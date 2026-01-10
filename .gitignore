@@ -1,0 +1,13 @@
+# 忽略数据、模型和输出目录
+model/
+output/
+data/
+# 忽略Python缓存和虚拟环境
+__pycache__/
+*.pyc
+.venv/
+venv/
+# 忽略IDE配置文件
+.vscode/
+.idea/
+.DS_Store
