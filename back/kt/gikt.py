@@ -127,6 +127,13 @@ class GIKT(Module):
             # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
             # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
             self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
+
+        # ----------------------------------------------------
+        # @add_fzq v5 optimization: Feature Transform Layer
+        # TF Alignment: feature_trans_embedding = Relu(Dense(aggregate_embedding))
+        # 即使在 PyTorch 中我们不直接用这个结果拼接，但为了特征空间的丰富度，我们可以加上这个非线性变换
+        # ----------------------------------------------------
+        self.feature_transform_layer = Linear(emb_dim, emb_dim)
             
         self.mlps4agg = ModuleList(Linear(emb_dim, emb_dim) for _ in range(agg_hops)) #  创建多个线性层用于聚合操作
         
@@ -186,12 +193,16 @@ class GIKT(Module):
             emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE) #  初始化一个全零的张量，形状为(batch_size, self.emb_dim)，并指定设备为DEVICE
             emb_question_t[mask_t] = emb0_question_t #  将emb0_question_t的值赋给emb_question_t中mask_t为True的位置
             emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]) #  对于emb_question_t中mask_t为False的位置，使用emb_table_question查找question_t中对应位置的嵌入向量
+            
+            # ----------------------------------------------------
+            # @add_fzq v5 optimization: Feature Transform
+            # TF Alignment: Apply transformation to question embedding before concat
+            # ----------------------------------------------------
+            emb_question_trans = torch.relu(self.feature_transform_layer(emb_question_t))
 
             # LSTM/GRU更新知识状态
-            # gru1_input = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
-            # h1_pre = self.dropout_gru(self.gru1(gru1_input, h1_pre))
-            # gru2_output = self.dropout_gru(self.gru2(h1_pre, h2_pre))
-            lstm_input = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
+            # 使用变换后的 Question Embedding 进行拼接
+            lstm_input = torch.cat((emb_question_trans, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
             
             # --- Prepare Recap Feature ---
             if self.recap_source == 'hsei':
@@ -212,6 +223,7 @@ class GIKT(Module):
                 curr_response = response_time[:, t].unsqueeze(1)
                 
                 # h2_pre 作为上一个时刻的 hidden state
+                # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
                 h_new, _ = self.cognitive_cell(lstm_input, h2_pre, curr_interval, curr_response)
                 lstm_output = self.dropout_lstm(h_new)
             else:

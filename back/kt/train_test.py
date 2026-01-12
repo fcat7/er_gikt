@@ -77,7 +77,7 @@ if __name__ == '__main__':
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 
     # 加载超参数
-    exp_config_path = get_exp_config_path(isFull=args.full, agg_method=args.agg_method, name=args.name)
+    exp_config_path = get_exp_config_path(isFull=args.full, isGAT=args.gat, name=args.name)
     params = HyperParameters.load(exp_config_path=exp_config_path)
     # 加载配置
     dataset_name = params.train.dataset_name
@@ -123,7 +123,8 @@ if __name__ == '__main__':
         use_cognitive_model=params.model.use_cognitive_model,
         pre_train=params.model.pre_train,
         data_dir=config.PROCESSED_DATA_DIR,
-        agg_method=params.model.agg_method
+        agg_method=params.model.agg_method,
+        recap_source='hsei' if params.model.use_input_attention else 'hssi' # 通过 toml 配置控制
     ).to(DEVICE)
 
     # @change_fzq 2026-01-08: 修改损失函数为 BCELoss
@@ -304,7 +305,7 @@ if __name__ == '__main__':
             print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s' + COLOR_LOG_END)
             # 保存输出至本地文件
             output_file.write(f'  fold {fold+1} | ')
-            output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | ')
+            output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}\n         | ')
             output_file.write(f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f} | ')
             output_file.write(f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s\n')
             # 保存至数组，之后用matplotlib画图
@@ -322,7 +323,7 @@ if __name__ == '__main__':
         print(COLOR_LOG_G + f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}' + COLOR_LOG_END)
         print(COLOR_LOG_G + f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}' + COLOR_LOG_END)
         output_file.write(f"epoch: {epoch_total} | ")
-        output_file.write(f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f} | ')
+        output_file.write(f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}\n         | ')
         output_file.write(f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}\n')
         y_label_aver[0][epoch], y_label_aver[1][epoch], y_label_aver[2][epoch] = test_loss_aver, test_acc_aver, test_auc_aver
 
