@@ -1,5 +1,5 @@
-
 import pandas as pd
+from config import Config
 try:
     from icecream import ic
 except ImportError:
@@ -10,25 +10,25 @@ class KTDataAdapter:
     通用知识追踪数据适配器
     负责数据的加载、列名映射和基础清洗
     """
-    def __init__(self, config):
+    def __init__(self, config : Config):
         self.config = config
-        self.col_map = config.COLUMN_MAP # 现在是 {Standard: Raw}
+        
+        self.col_map = config.dataset.COLUMN_MAP
         
         # 构造 {Raw: Standard} 映射用于 pandas rename
         # 如果 raw 不唯一，会有问题，但假设数据集设计良好 
-        # todo: 2026 年 1 月 8 日 02:20:26， by fzq
         self.raw_to_std_map = {raw_col: std_col for std_col, raw_col in self.col_map.items()}
-        
+
         self.required_cols = ['user_id', 'problem_id', 'correct']
 
     def load_data(self):
         """
         加载CSV文件并重命名列
         """
-        filepath = self.config.raw_data_path
+        filepath = self.config.dataset.FILE_PATH
         ic(f"正在加载数据: {filepath}")
         try:
-            df = pd.read_csv(filepath, encoding=self.config.ENCODING)
+            df = pd.read_csv(filepath, encoding=self.config.dataset.ENCODING)
         except FileNotFoundError:
             raise FileNotFoundError(f"文件未找到: {filepath}")
         
@@ -167,8 +167,8 @@ class KTDataAdapter:
         """
         ic(f"正在保存标准数据集至: {output_path}")
         # 只保存配置中映射过的列，确保输出整洁
-        # config.COLUMN_MAP 是 {Standard: Raw}，所以 .keys() 是标准列名
-        standard_cols = list(self.config.COLUMN_MAP.keys())
+        # col_map 是 {Standard: Raw}，所以 .keys() 是标准列名
+        standard_cols = list(self.col_map.keys())
         # 过滤掉 DataFrame 中不存在的列
         cols_to_save = [col for col in standard_cols if col in df.columns]
         

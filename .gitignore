@@ -8,6 +8,5 @@ __pycache__/
 .venv/
 venv/
 # 忽略IDE配置文件
-.vscode/
-.idea/
+#.vscode/
 .DS_Store

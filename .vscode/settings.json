@@ -1,0 +1,8 @@
+{
+    "python.analysis.extraPaths": [
+        "./back/kt" // 告诉 VS Code 的智能提示引擎（IntelliSense），“嘿，代码解析的时候，除了标准库，还要去 kt 这个文件夹里找找代码定义
+    ],
+    "python.defaultInterpreterPath": "/Users/fcatnoby/miniconda3/envs/kt/bin/python",
+    "python.envFile": "${workspaceFolder}/.env", // 指定环境变量文件的位置
+    "python.terminal.executeInFileDir": true
+}

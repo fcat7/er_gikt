@@ -11,9 +11,7 @@ S-S (知识点-知识点): 两个知识点经常在同一道题里出现，它�
 """
 import torch
 import torch.nn as nn
-from config import BaseConfig
-
-DEVICE = BaseConfig.DEVICE
+from config import DEVICE
 
 class PEBG(nn.Module):
 

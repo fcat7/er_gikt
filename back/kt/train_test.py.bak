@@ -365,7 +365,7 @@ for epoch in range(params['epochs']):
 
     # @add_fzq: 实时保存 aver 数据，防止训练中断丢失数据
     # 每次 epoch 结束都覆盖保存一次，确保即使中断也能保留已完成的 epoch 数据
-    # np.savetxt(f'{config.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
+    # np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
 
 # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 # 计算总耗时 
@@ -385,5 +385,5 @@ output_file.close()
 
 
 torch.save(model, f=f'{config.MODULE_DIR}/{time_now}.pt')
-np.savetxt(f'{config.CHART_DIR}/{time_now}_all.txt', y_label_all)
-np.savetxt(f'{config.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
+np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
+np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)

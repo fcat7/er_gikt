@@ -129,53 +129,22 @@ def plot_comparison(logs_dict, metric_type='auc', base_dir='chart_data'):
         print(row_str.rstrip(" | "))
     print(f"{'='*65}\n")
 
-if __name__ == "__main__":
-    # 示例用法
-    # 获取项目根目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+# if __name__ == "__main__":
+#     # 示例用法
+#     # 获取项目根目录
     
-    chart_data_dir = os.path.join(current_dir, 'chart_data')
+#     import sys
+#     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+#     from config import Config
+#     config = Config()
     
-    # 只需要配置 logs_to_compare_dict 即可
-    # 键为文件名，值为图例显示的 Label
-    logs_to_compare_dict = {
-        '20260108_0257_aver.txt': 'use_cognitive_model & no_BCELoss',
-        '20260108_0308_aver.txt': 'no_cognitive_model & no_BCELoss',
-        '20260108_1332_aver.txt': 'use_congnitive_model & use_BCELoss',
-        # '20260108_1430_aver.txt': 'use_cognitive_model & no_BCELoss',
-        '20260108_1537_aver.txt': 'no_cognitive_model & use_BCELoss'
-    }
-
-    # logs_to_compare_dict = { # 全量数据集 assist09
-    #     '20260108_1209_aver.txt': 'no_cognitive_model',
-    #     '20260108_1207_aver.txt': 'use_cognitive_model',
-    # }
+#     chart_data_dir = config.path.CHART_DIR
+#     compare_dict = { # 全量数据集 assist09
+#     #     '20260109_0053_aver.txt': 'gcn',
+#     #     '20260109_0057_aver.txt': 'gat(new)',
+#     # }
     
-    # logs_to_compare_dict = { # 全量数据集 assist09
-    #     '20260108_1759_aver.txt': 'use_pretrain',
-    #     '20260108_1809_aver.txt': 'no_pretrain',
-    # }
-    
-    # logs_to_compare_dict = { # 预训练的比较测试
-    #     '20260108_1430_aver.txt': 'no_pretrain',
-    #     '20260108_1657_aver.txt': 'use_pretrain(batch_size = 32, epoch = 100)',
-    #     '20260108_1710_aver.txt': 'use_pretrain(batch_size = 256, epoch = 50)',
-    #     '20260108_1723_aver.txt': 'use_pretrain(batch_size = 128, epoch = 50)',
-    #     '20260108_1724_aver.txt': 'use_pretrain(batch_size = 64, epoch = 50)',
-    #     '20260108_1726_aver.txt': 'use_pretrain(batch_size = 32, epoch = 50)'
-    # }
-    
-    # logs_to_compare_dict = { # gat 和 gcn 的比较测试
-    #     '20260109_0037_aver.txt': 'gat(new)',
-    #     '20260109_0038_aver.txt': 'gcn',
-    # }
-    
-    # logs_to_compare_dict = { # 全量数据集 assist09
-    #     '20260109_0053_aver.txt': 'gcn',
-    #     '20260109_0057_aver.txt': 'gat(new)',
-    # }
-    
-    if logs_to_compare_dict:
-        plot_comparison(logs_to_compare_dict, metric_type='auc', base_dir=chart_data_dir)
-    else:
-        print("请在 logs_to_compare_dict 中添加文件名以运行示例。")
+#     if logs_to_compare_dict:
+#         plot_comparison(logs_to_compare_dict, metric_type='auc', base_dir=chart_data_dir)
+#     else:
+#         print("请在 logs_to_compare_dict 中添加文件名以运行示例。")

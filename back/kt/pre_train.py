@@ -8,13 +8,17 @@ import torch.nn as nn
 from scipy import sparse
 from torch.utils.tensorboard import SummaryWriter
 
-from config import get_config, BaseConfig
+from config import Config, DEVICE
 from pebg import PEBG
 
 # 获取配置
 dataset_name = os.environ.get('DATASET', 'assist09-sample_10%')
-config = get_config(dataset_name)
-DEVICE = BaseConfig.DEVICE
+# Config 仅负责路径
+config = Config(dataset_name)
+
+batch_size = 32
+epoch_num = 100
+emb_dim = 100
 print(f"Pre-training on dataset: {dataset_name}, Data dir: {config.PROCESSED_DATA_DIR}")
 
 # 路径设置
@@ -34,25 +38,24 @@ print(f"qs_table: {qs_table.shape}, qq_table: {qq_table.shape}, ss_table: {ss_ta
 
 # @change_fzq: 针对小样本数据集，适当降低 batch_size 以增加迭代频次，避免收敛过快陷入局部最优
 # 原值: 256 -> 建议: 32 (平衡图结构视野和随机性)
-batch_size = 32 
 num_batch = math.ceil(num_q / batch_size)
 
 # 初始化模型
-model = PEBG(qs_table, qq_table, ss_table, emb_dim=config.SIZE_EMBEDDING).to(DEVICE)
+model = PEBG(qs_table, qq_table, ss_table, emb_dim=emb_dim).to(DEVICE)
 print('Start training PEBG model...')
 
 optimizer = torch.optim.Adam(params=model.parameters(), lr=0.001)
 mse_loss = [nn.MSELoss().to(DEVICE) for _ in range(3)]
 
 # 日志目录
-log_dir = os.path.join(config.OUTPUT_DIR, 'logs_pretrain', dataset_name)
+log_dir = os.path.join(config.path.OUTPUT_DIR, 'logs_pretrain', dataset_name)
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 writer = SummaryWriter(log_dir=log_dir)
 
 # 训练循环
 # @change_fzq: 对于小数据集，增加 Epoch 以确保充分收敛 (20 -> 50)
-for epoch in range(50):
+for epoch in range(epoch_num):
     train_loss = 0  # 总损失
     for idx_batch in range(num_batch):
         optimizer.zero_grad()  # 梯度清零

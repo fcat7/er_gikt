@@ -3,6 +3,7 @@ import os
 import numpy as np
 import pandas as pd
 from scipy import sparse
+from config import MAX_SEQ_LEN, Config
 try:
     from icecream import ic
 except ImportError:
@@ -14,7 +15,7 @@ class KTDataBuilder:
     负责将 DataFrame 转换为模型所需的 .npy / .npz 格式
     包括：ID映射、序列生成、邻接矩阵构建
     """
-    def __init__(self, config):
+    def __init__(self, config : Config):
         self.config = config
         self.output_dir = config.PROCESSED_DATA_DIR
         if not os.path.exists(self.output_dir):
@@ -137,7 +138,7 @@ class KTDataBuilder:
     def _build_sequences(self, df):
         """构建用户交互序列"""
         num_users = len(self.user2idx)
-        max_len = self.config.MAX_SEQ_LEN
+        max_len = MAX_SEQ_LEN
         
         user_seq = np.zeros([num_users, max_len], dtype=int)
         user_res = np.zeros([num_users, max_len], dtype=int)

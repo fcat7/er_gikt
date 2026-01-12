@@ -1,8 +1,7 @@
-import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+from config import Config
 try:
     from icecream import ic
 except ImportError:
@@ -13,10 +12,10 @@ class KTDataInspector:
     数据探查器
     负责统计数据分布、生成报告
     """
-    def __init__(self, df, config):
+    def __init__(self, df, config : Config):
         self.df = df
         self.config = config
-        self.report_dir = config.REPORT_DIR
+        self.report_dir = config.path.REPORT_DIR
         if not os.path.exists(self.report_dir):
             os.makedirs(self.report_dir)
 

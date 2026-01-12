@@ -1,6 +1,7 @@
-
 import pandas as pd
 import numpy as np
+from config import MIN_SEQ_LEN, RANDOM_SEED
+
 try:
     from icecream import ic
 except ImportError:
@@ -11,18 +12,18 @@ class KTDataSampler:
     数据采样器
     负责从总体数据集中抽取子集，并保持分布一致性
     """
-    def __init__(self, random_seed=42):
+    def __init__(self, random_seed=RANDOM_SEED):
         self.random_seed = random_seed
         np.random.seed(random_seed)
 
-    def stratified_sample(self, df, ratio=0.1, min_interactions=20):
+    def stratified_sample(self, df, ratio=0.1, min_seq_len=MIN_SEQ_LEN):
         """
         分层采样：根据用户的交互数量进行分层
         
         Args:
             df: 总体数据集 DataFrame
             ratio: 采样比例 (0.0 - 1.0)
-            min_interactions: 最小交互数限制 (先过滤再采样)
+            min_seq_len: 最小交互数限制 (先过滤再采样)
         
         Returns:
             sampled_df: 采样后的 DataFrame
@@ -31,7 +32,7 @@ class KTDataSampler:
         
         # 1. 预过滤：只考虑交互数足够的学生
         user_counts = df['user_id'].value_counts()
-        valid_users = user_counts[user_counts >= min_interactions].index
+        valid_users = user_counts[user_counts >= min_seq_len].index
         valid_df = df[df['user_id'].isin(valid_users)]
         
         if valid_df.empty:

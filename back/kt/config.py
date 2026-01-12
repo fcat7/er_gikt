@@ -1,152 +1,120 @@
-
 import os
 import torch
+import toml
 
-class BaseConfig:
-    """
-    基础配置类，定义通用路径和参数
-    """
-    # 项目根目录 (kt_fzq)
-    # 假设 config.py 在 kt_fzq/kt/config.py，所以向上两级
-    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-    
-    # 基础目录结构
-    # DATASET_DIR = os.path.join(PROJECT_ROOT, 'dataset')          # 原始数据集目录
-    # 临时指向旧位置，直到用户移动文件
-    # DATASET_DIR = os.path.join(PROJECT_ROOT, 'dataset')  # 原始数据集目录
-    DATASET_DIR = '/Users/fcatnoby/data/dataset' # 数据集原始文件目录，文件过大，自行下载放置
-    PROCESSED_DATA_ROOT = os.path.join(PROJECT_ROOT, 'data')      # 处理后数据根目录
+# 全局设备定义
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# 日志颜色
+COLOR_LOG_B = '\033[1;34m'
+COLOR_LOG_Y = '\033[1;33m'
+COLOR_LOG_G = '\033[1;36m'
+COLOR_LOG_END = '\033[m'
+RANDOM_SEED = 42
+MIN_SEQ_LEN = 20
+MAX_SEQ_LEN = 200
+
+class PathConfig:
+    def __init__(self, paths, project_root):
+        def _get(key):
+            val = paths.get(key)
+            if not val: raise ValueError(f"Missing config: paths.{key}")
+            if os.path.isabs(val): return val
+            return os.path.join(project_root, val)
+
+        self.PROCESSED_DATA_ROOT = _get('processed_data_root')
+        self.MODEL_DIR = _get('model_dir')
+        self.OUTPUT_DIR = _get('output_dir')
+        self.LOG_DIR = _get('log_dir')
+        self.CHART_DIR = _get('chart_dir')
+        self.REPORT_DIR = _get('report_dir')
+        
+        # Ensure directories exist
+        for d in [self.PROCESSED_DATA_ROOT, self.OUTPUT_DIR, self.LOG_DIR, self.CHART_DIR, self.REPORT_DIR]:
+            os.makedirs(d, exist_ok=True)
+
+class DatasetConfig:
+    def __init__(self, data):
+        self.DATA_NAME = data.get('name')
+        self.FILE_PATH = data.get('file_path') 
+        self.ENCODING = data.get('encoding', 'utf-8')
+        self.COLUMN_MAP = data.get('column_map', {})
+
+class Config:
+    def __init__(self, dataset_name=None):
+        self.DATASET_NAME = dataset_name
+        self.PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+        self.CONFIG_ROOT = os.path.join(self.PROJECT_ROOT, 'config')
+
+        # 1. Base project config
+        self.config_data = {
+            'paths': {
+                'processed_data_root': 'data',
+                'model_dir': 'model',
+                'output_dir': 'output',
+                'log_dir': 'output/logs',
+                'chart_dir': 'output/chart_data',
+                'report_dir': 'output/data_analysis_reports'
+            }
+        }
+        
+        try:
+            project_config_path = os.path.join(self.CONFIG_ROOT, 'project.toml')
+            loaded_config = self._load_toml(project_config_path)
+            if 'paths' in loaded_config:
+                self.config_data['paths'].update(loaded_config['paths'])
+        except Exception as e:
+            print(f"Warning: Failed to load project.toml: {e}")
+
+        # Init PathConfig
+        self.path = PathConfig(self.config_data['paths'], self.PROJECT_ROOT)
+        
+        # 2. Dataset config
+        dataset_config_path = self._find_dataset_config(dataset_name)
+        if dataset_config_path:
+            dataset_data = self._load_toml(dataset_config_path)
+            self.dataset = DatasetConfig(dataset_data)
+        else:
+            available_datasets = self._list_available_datasets()
+            print(f"Dataset config not found for: '{dataset_name}'. Available: {available_datasets}")
+            self.dataset = None
+
+    def _list_available_datasets(self):
+        dataset_dir = os.path.join(self.CONFIG_ROOT, 'datasets')
+        if not os.path.exists(dataset_dir):
+            return []
+        return sorted([f[:-5] for f in os.listdir(dataset_dir) if f.endswith('.toml')])
+
+    def _load_toml(self, path):
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, 'rb') as f:
+                return toml.load(f)
+        except TypeError:
+            with open(path, 'r', encoding='utf-8') as f:
+                return toml.load(f)
+
+    def _find_dataset_config(self, dataset_name):
+        if dataset_name is None: return None
+        dataset_dir = os.path.join(self.CONFIG_ROOT, 'datasets')
+        if not os.path.exists(dataset_dir): os.makedirs(dataset_dir, exist_ok=True)
+            
+        exact_match = os.path.join(dataset_dir, f"{dataset_name}.toml")
+        if os.path.exists(exact_match): return exact_match
+            
+        for filename in os.listdir(dataset_dir):
+            if not filename.endswith('.toml'): continue
+            if dataset_name.startswith(filename[:-5]):
+                return os.path.join(dataset_dir, filename)
+        return None
 
     @property
     def PROCESSED_DATA_DIR(self):
-        """返回当前数据集的处理后数据目录: kt/data/dataset_name"""
-        if hasattr(self, 'DATASET_NAME'):
-            return os.path.join(self.PROCESSED_DATA_ROOT, self.DATASET_NAME)
-        return self.PROCESSED_DATA_ROOT
+        if hasattr(self, 'DATASET_NAME') and self.DATASET_NAME:
+            return os.path.join(self.path.PROCESSED_DATA_ROOT, self.DATASET_NAME)
+        return self.path.PROCESSED_DATA_ROOT
 
-    MODULE_DIR = os.path.join(PROJECT_ROOT, 'model')            # 模型模块目录
-    OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'output/')             # 日志输出目录
-    LOG_DIR = os.path.join(OUTPUT_DIR, 'logs')                   # 日志目录
-    CHART_DIR = os.path.join(OUTPUT_DIR, 'chart_data')            # 图表保存目录
-    REPORT_DIR = os.path.join(OUTPUT_DIR, 'data_analysis_reports') # 报告目录
+# 如何标注其返回值类型
+def get_config(dataset_name) -> Config:
+    return Config(dataset_name=dataset_name)
 
-    # 预处理通用参数
-    MIN_SEQ_LEN = 20   # 最小交互序列长度
-    MAX_SEQ_LEN = 200  # 最大交互序列长度
-    MIN_INTERACTIONS = 3 # 最小交互数 (用于初步筛选)
-    
-    # 划分参数
-    TEST_RATIO = 0.2
-    RANDOM_SEED = 42
-    
-    # 默认编码
-    ENCODING = 'utf-8'
-
-    # 计算设备: 优先使用gpu
-    DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    # 日志颜色
-    LOG_B = '\033[1;34m' # 蓝色
-    LOG_Y = '\033[1;33m' # 黄色
-    LOG_G = '\033[1;36m' # 深绿色
-    LOG_END = '\033[m' # 结束标记
-
-    # 数据超参数
-    SIZE_Q_FEATURE = 8
-    SIZE_EMBEDDING = 100 # 问题和技能的嵌入向量维度
-
-    @property
-    def raw_data_path(self):
-        """返回原始数据文件的绝对路径"""
-        raise NotImplementedError("Subclasses must implement raw_data_path")
-
-class Assist09Config(BaseConfig):
-    DATASET_NAME = 'assist09'
-    RAW_FILENAME = 'assistments_2009_2010_non_skill_builder_data_new.csv'
-    ENCODING = 'ISO-8859-1'
-    
-    # 列名映射 (Standard -> Raw)
-    # Standard columns: user_id, problem_id, skill_id, correct, timestamp
-    COLUMN_MAP = {
-        'user_id': 'user_id',
-        'problem_id': 'problem_id',
-        'skill_id': 'skill_id',
-        'correct': 'correct',
-        'timestamp': 'order_id',
-        'response_time': 'ms_first_response', # 可选
-        # 'overlap_time': 'overlap_time',       # 可选
-        'original': 'original'                # original： 1 = Main problem；0 = Scaffolding problem
-    }
-
-    @property
-    def raw_data_path(self):
-        return os.path.join(self.DATASET_DIR, self.RAW_FILENAME)
-
-
-class Assist12Config(BaseConfig):
-    DATASET_NAME = 'assist12'
-    RAW_FILENAME = '2012-2013-data-with-predictions-4-final.csv'
-    ENCODING = 'utf-8'
-    
-    # 列名映射 (Standard -> Raw)
-    COLUMN_MAP = {
-        'user_id': 'user_id',
-        'problem_id': 'problem_id',
-        'skill_id': 'skill_id',
-        'correct': 'correct',
-        'timestamp': 'start_time',
-    }
-
-    @property
-    def raw_data_path(self):
-        return os.path.join(self.DATASET_DIR, self.RAW_FILENAME)
-
-class EdNetKT1Config(BaseConfig):
-    DATASET_NAME = 'ednet_kt1'
-    RAW_FILENAME = 'EdNet/Ednet-KT1_sample_size_5000_stratified.csv'
-    ENCODING = 'utf-8'
-    
-    # 列名映射 (Standard -> Raw)
-    COLUMN_MAP = {
-        'user_id': 'user_id',
-        'problem_id': 'question_id',
-        'skill_id': 'skill_id',
-        'correct': 'correct',
-        'timestamp': 'timestamp',
-        'response_time': 'elapsed_time', # 可选
-    }
-
-    @property
-    def raw_data_path(self):
-        return os.path.join(self.DATASET_DIR, self.RAW_FILENAME)
-
-# 配置映射表
-CONFIG_MAP = {
-    'assist09': Assist09Config,
-    'assist12': Assist12Config,
-    'ednet_kt1': EdNetKT1Config
-}
-
-def get_config(dataset_name='assist09'):
-    """
-    工厂函数：根据数据集名称获取配置对象
-    支持变体名称，例如 "assist09-sample-10%" 会加载 Assist09Config，
-    并自动将 PROCESSED_DATA_DIR 指向 "kt/data/assist09-sample-10%"
-    """
-    # 1. 精确匹配
-    if dataset_name in CONFIG_MAP:
-        return CONFIG_MAP[dataset_name]()
-    
-    # 2. 前缀模糊匹配 (支持 assist09-sample-10% 这种变体)
-    # 我们遍历以知的配置类型，看 requested_name 是否以它开头
-    for key, config_cls in CONFIG_MAP.items():
-        if dataset_name.startswith(key):
-            # 实例化基础配置
-            config_instance = config_cls()
-            # @fix_fzq: 动态覆盖 DATASET_NAME
-            # 这样 config.PROCESSED_DATA_DIR 就会指向传入的目录名 (如 assist09-sample-10%)
-            # 而不是硬编码的 assist09
-            config_instance.DATASET_NAME = dataset_name
-            return config_instance
-
-    raise ValueError(f"Unknown dataset: {dataset_name}. Base types available: {list(CONFIG_MAP.keys())}")

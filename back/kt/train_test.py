@@ -11,9 +11,10 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold, ShuffleSplit
 from torch.utils.data import DataLoader, Subset
 from dataset import UserDataset
-from gikt import GIKT
-from config import get_config
-from utils import gen_gikt_graph, build_adj_list
+from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
+from params import HyperParameters
+from util.utils import gen_gikt_graph, build_adj_list
+import argparse
 
 # try :
 #     from icecream import ic
@@ -39,29 +40,34 @@ def set_seed(seed=42):
 set_seed(42)
 # @add_fzq 2025-12-25 10:42:10 -------------------------------------------
 
-# 设置设备
-def get_device():
-    try:
-        # 尝试使用CUDA
-        if torch.cuda.is_available():
-            device = torch.device('cuda:0')
-            # 测试设备是否可用
-            torch.tensor([1.0]).to(device)
-            return device
-    except RuntimeError as e:
-        print(f"CUDA device error: {e}")
-        print("Falling back to CPU")
-    
-    # 如果CUDA不可用，使用CPU
-    return torch.device('cpu')
+def get_parser():
+    parser = argparse.ArgumentParser(description="Train and Test GIKT Model")
+    parser.add_argument('--full', action='store_true', help='Use full dataset (overrides --mode)')
+    parser.add_argument('--gat', action='store_true', help='Use GAT aggregation method instead of GCN')
 
-# 在代码中使用
-DEVICE = get_device()
-print(f"Using device: {DEVICE}")
+    parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
+    return parser
 
+def get_exp_config_path(isFull=False, isGAT=False, name='default'):
+    # 默认路径为： config/experiments/exp_gcn_sample_default.toml
+    return f"config/experiments/exp_{'gat' if isGAT else 'gcn'}_{'full' if isFull else 'sample'}_{name}.toml"
+
+# 使用方法
+# python train_test.py 
+# python train_test.py --full
+# python train_test.py --agg_method gat
+# python train_test.py --name my_exp
 if __name__ == '__main__':
 
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    parser = get_parser()
+    args = parser.parse_args()
+    
+    if args.gat:
+        from gikt_gat import GIKT
+    else :
+        from gikt import GIKT
+
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 方便调试 CUDA 错误
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 1. 解决时区问题：强制使用 UTC+8 (北京时间)
@@ -69,103 +75,62 @@ if __name__ == '__main__':
     beijing_time = datetime.now(timezone(timedelta(hours=8)))
     time_now = beijing_time.strftime('%Y%m%d_%H%M')
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
-    
 
+    # 加载超参数
+    exp_config_path = get_exp_config_path(isFull=args.full, agg_method=args.agg_method, name=args.name)
+    params = HyperParameters.load(exp_config_path=exp_config_path)
+    # 加载配置
+    dataset_name = params.train.dataset_name
+    config = Config(dataset_name=dataset_name)
 
-
-    # 使用数据集
-    #  Available: ['assist09', 'assist12', 'ednet_kt1'] 
-    dataset_name = 'assist09-sample_10%'
-    config = get_config(dataset_name)
-
-    output_path = f'{config.LOG_DIR}/{time_now}.log'
+    output_path = f'{config.path.LOG_DIR}/{time_now}.log'
     output_dir = os.path.dirname(output_path)  # 获取目录路径    
     os.makedirs(output_dir, exist_ok=True) # 创建目录（如果不存在）
     output_file = open(output_path, 'a', buffering=1) # 解决日志丢失问题，使用 'a' (append) 模式，并设置 buffering=1 (行缓冲)
 
     print(f"Using dataset: {dataset_name}, Data dir: {config.PROCESSED_DATA_DIR}\n")
-    output_file.write(f"Using dataset: {dataset_name}\n")
-
-    # 训练时的超参数 - 旧版本备份
-    params = {
-        'max_seq_len': config.MAX_SEQ_LEN,
-        'min_seq_len': config.MIN_SEQ_LEN,
-        'epochs': 20, # 每折训练的轮数
-        'lr': 0.01,
-        'lr_gamma': 0.95,
-        'batch_size': 16,
-        'size_q_neighbors': 4,
-        'size_s_neighbors': 10,
-        'num_workers': 2, # 设置为8核，最大化利用CPU
-        'prefetch_factor': 4,
-        'agg_hops': 3,
-        # 'emb_dim': 100, # @change_fzq: 使用 config 中的统一配置，确保预训练维度一致
-        'emb_dim': config.SIZE_EMBEDDING,
-        'hard_recap': True,
-        'dropout': (0.2, 0.4),
-        'rank_k': 10,
-        'k_fold': 1,  # 几折交叉验证
-        'use_cognitive_model': True, # 是否使用认知模型 (CognitiveRNNCell)
-        'pre_train': False, # 是否使用预训练的向量
-        'use_BCELoss': False, # 是否使用 BCELoss 代替 BCEWithLogitsLoss
-        'verbose': True # 控制是否打印详细的 step 日志 (默认关闭以提高速度)
-    }
-
-    # 训练时的超参数 - 全量数据集版本
-    # params = {
-    #     'max_seq_len': config.MAX_SEQ_LEN,
-    #     'min_seq_len': config.MIN_SEQ_LEN,
-    #     'epochs': 100, # 每折训练的轮数
-    #     'lr': 0.002,
-    #     'lr_gamma': 0.95,
-    #     'batch_size': 128,
-    #     # 'batch_size': 16,
-    #     'size_q_neighbors': 4,
-    #     'size_s_neighbors': 10,
-    #     'num_workers': 4, # macOS 上建议设为0，防止 DataLoader 多进程卡死
-    #     'prefetch_factor': 2,
-    #     'agg_hops': 3,
-    #     'emb_dim': 200,
-    #     'hard_recap': True,
-    #     'dropout': (0.2, 0.4),
-    #     'rank_k': 10,
-    #     'k_fold': 1,  # 启用 5 折交叉验证，获取更可靠的实验指标
-    #     'use_cognitive_model': True, # 是否使用认知模型 (CognitiveRNNCell)
-    #     'pre_train': False, # 是否使用预训练的向量
-    #     'use_BCELoss': False, # 是否使用 BCELoss 代替 BCEWithLogitsLoss
-    #     'verbose': False # 控制是否打印详细的 step 日志 (默认关闭以提高速度)
-    # }
+    print(f"Using experiment config: {exp_config_path}\n")
 
     # 打印并写超参数
     output_file.write(str(params) + '\n')
     print(params)
-    batch_size = params['batch_size']
+    
+    batch_size = params.train.batch_size
+    
     # 构建模型需要的数据结构, 全部转化为正确类型tensor再输入模型中
     qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.int64, device=DEVICE)  # [num_q, num_c]
     num_question = torch.tensor(qs_table.shape[0], device=DEVICE)
     num_skill = torch.tensor(qs_table.shape[1], device=DEVICE)
     q_neighbors_list, s_neighbors_list = build_adj_list(config.PROCESSED_DATA_DIR)
-    q_neighbors, s_neighbors = gen_gikt_graph(q_neighbors_list, s_neighbors_list, params['size_q_neighbors'], params['size_s_neighbors'])
+    
+    # Config 使用结构化访问
+    q_neighbors, s_neighbors = gen_gikt_graph(q_neighbors_list, s_neighbors_list, params.model.size_q_neighbors, params.model.size_s_neighbors)
     q_neighbors = torch.tensor(q_neighbors, dtype=torch.int64, device=DEVICE)
     s_neighbors = torch.tensor(s_neighbors, dtype=torch.int64, device=DEVICE)
+
+    # 处理 dropout (list -> tuple)
+    dropout_val = params.model.dropout
+    if isinstance(dropout_val, list):
+        dropout_val = tuple(dropout_val)
 
     # 初始化模型
     model = GIKT(
         num_question, num_skill, q_neighbors, s_neighbors, qs_table,
-        agg_hops=params['agg_hops'],
-        emb_dim=params['emb_dim'],
-        dropout=params['dropout'],
-        hard_recap=params['hard_recap'],
-        use_cognitive_model=params['use_cognitive_model'],
-        pre_train=params['pre_train'],
-        data_dir=config.PROCESSED_DATA_DIR
+        agg_hops=params.model.agg_hops,
+        emb_dim=params.model.emb_dim,
+        dropout=dropout_val,
+        hard_recap=params.model.hard_recap,
+        use_cognitive_model=params.model.use_cognitive_model,
+        pre_train=params.model.pre_train,
+        data_dir=config.PROCESSED_DATA_DIR,
+        agg_method=params.model.agg_method
     ).to(DEVICE)
 
     # @change_fzq 2026-01-08: 修改损失函数为 BCELoss
     # 原因：模型输出已经是 Sigmoid 概率，BCEWithLogitsLoss 会再次 Sigmoid，导致梯度消失
     # 原始损失函数备份：
     loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) # 损失函数
-    if params['use_BCELoss']:
+    if params.train.use_bce_loss:
         loss_fun = torch.nn.BCELoss().to(DEVICE)
     dataset = UserDataset(config)  # 数据集
     data_len = len(dataset)  # 数据总长度
@@ -180,23 +145,23 @@ if __name__ == '__main__':
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 
     # 优化器
-
     epoch_total = 0
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=params['lr'])
-    torch.optim.lr_scheduler.ExponentialLR(optimizer, params['lr_gamma'])
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr)
+    torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
+    
     # 在matplotlib中绘制的y轴数据，三行分别表示loss, acc, auc
-    y_label_aver = np.zeros([3, params['epochs']]) # 平均精度值
-    y_label_all = np.zeros([3, params['epochs'] * params['k_fold']]) # 全部精度值
+    y_label_aver = np.zeros([3, params.train.epochs]) # 平均精度值
+    y_label_all = np.zeros([3, params.train.epochs * params.train.k_fold]) # 全部精度值
 
     # KFold的shuffle操作是在用户级别进行的，而不是在答题记录级别
-    if params['k_fold'] == 1:
+    if params.train.k_fold == 1:
         # 如果 k_fold 为 1，使用 ShuffleSplit 进行单次划分 (80% 训练, 20% 测试)
         k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     else:
         # 否则使用 KFold 进行交叉验证
-        k_fold = KFold(n_splits=params['k_fold'], shuffle=True, random_state=42)
+        k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
 
-    for epoch in range(params['epochs']):
+    for epoch in range(params.train.epochs):
         train_loss_aver = train_acc_aver = train_auc_aver = 0
         test_loss_aver = test_acc_aver = test_auc_aver = 0
         # 五折的平均值
@@ -208,15 +173,15 @@ if __name__ == '__main__':
                 train_loader = DataLoader(train_set, batch_size=batch_size)  # 训练数据加载器
                 test_loader = DataLoader(test_set, batch_size=batch_size)  # 测试数据加载器
             else:  # Gpu(服务器)
-                train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=params['num_workers'],
-                                            pin_memory=True, prefetch_factor=params['prefetch_factor'])
-                test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=params['num_workers'],
-                                            pin_memory=True, prefetch_factor=params['prefetch_factor'])
+                train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=params.common.num_workers,
+                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
+                test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=params.common.num_workers,
+                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
             train_data_len, test_data_len = len(train_set), len(test_set)
             # @delete_fzq 2025-12-23 22:10:41
-            #  print('===================' + LOG_Y + f'epoch: {epoch_total + 1}'+ LOG_END + '====================')
+            #  print('===================' + COLOR_LOG_Y + f'epoch: {epoch_total + 1}'+ COLOR_LOG_END + '====================')
             # @add_fzq 2025-12-23 22:10:41
-            print('===================' + config.LOG_Y + f'fold: {fold + 1}'+ config.LOG_END + '====================')
+            print('===================' + COLOR_LOG_Y + f'fold: {fold + 1}'+ COLOR_LOG_END + '====================')
 
             # 训练阶段，既有前向传播，也有反向传播
             print('-------------------training------------------')
@@ -269,7 +234,7 @@ if __name__ == '__main__':
                 loss.backward()
                 optimizer.step()
                 train_step += 1
-                if params.get('verbose', False):
+                if params.train.verbose:
                     print(f'step: {train_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
             train_loss, train_acc = train_loss / train_step, train_right / train_total
             train_loss_aver += train_loss
@@ -323,7 +288,7 @@ if __name__ == '__main__':
                 auc = roc_auc_score(y_target.cpu(), y_pred.cpu())
                 test_auc += auc * len(x) / test_data_len
                 test_step += 1
-                if params.get('verbose', False):
+                if params.train.verbose:
                     print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
             test_loss, test_acc = test_loss / test_step, test_right / test_total
             test_loss_aver += test_loss
@@ -334,9 +299,9 @@ if __name__ == '__main__':
         
             time1 = time.time()
             run_time = time1 - time0
-            print(config.LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}' + config.LOG_END)
-            print(config.LOG_B + f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f}' + config.LOG_END)
-            print(config.LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s' + config.LOG_END)
+            print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s' + COLOR_LOG_END)
             # 保存输出至本地文件
             output_file.write(f'  fold {fold+1} | ')
             output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | ')
@@ -347,15 +312,15 @@ if __name__ == '__main__':
 
         # epoch总结阶段
         epoch_total += 1
-        train_loss_aver /= params['k_fold']
-        train_acc_aver /= params['k_fold']
-        train_auc_aver /= params['k_fold']
-        test_loss_aver /= params['k_fold']
-        test_acc_aver /= params['k_fold']
-        test_auc_aver /= params['k_fold']
-        print('>>>>>>>>>>>>>>>>>>' + config.LOG_Y + f"epoch: {epoch_total}"+ config.LOG_END + '<<<<<<<<<<<<<<<<<<')
-        print(config.LOG_G + f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}' + config.LOG_END)
-        print(config.LOG_G + f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}' + config.LOG_END)
+        train_loss_aver /= params.train.k_fold
+        train_acc_aver /= params.train.k_fold
+        train_auc_aver /= params.train.k_fold
+        test_loss_aver /= params.train.k_fold
+        test_acc_aver /= params.train.k_fold
+        test_auc_aver /= params.train.k_fold
+        print('>>>>>>>>>>>>>>>>>>' + COLOR_LOG_Y + f"epoch: {epoch_total}"+ COLOR_LOG_END + '<<<<<<<<<<<<<<<<<<')
+        print(COLOR_LOG_G + f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}' + COLOR_LOG_END)
+        print(COLOR_LOG_G + f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}' + COLOR_LOG_END)
         output_file.write(f"epoch: {epoch_total} | ")
         output_file.write(f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f} | ')
         output_file.write(f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}\n')
@@ -363,7 +328,7 @@ if __name__ == '__main__':
 
         # @add_fzq: 实时保存 aver 数据，防止训练中断丢失数据
         # 每次 epoch 结束都覆盖保存一次，确保即使中断也能保留已完成的 epoch 数据
-        # np.savetxt(f'{config.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
+        # np.savetxt(f'{LOGCHART_DIR}/{time_now}_aver.txt', y_label_aver)
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 计算总耗时 
@@ -379,6 +344,6 @@ if __name__ == '__main__':
 
     output_file.close()
 
-    # torch.save(model, f=f'{config.MODULE_DIR}/{time_now}.pt')
-    np.savetxt(f'{config.CHART_DIR}/{time_now}_all.txt', y_label_all)
-    np.savetxt(f'{config.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
+    # torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+    np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
+    np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)

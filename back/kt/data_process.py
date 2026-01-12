@@ -1,6 +1,7 @@
 import sys
 import os
 import pandas as pd
+from config import Config, MIN_SEQ_LEN, RANDOM_SEED
 try:
     from icecream import ic
 except ImportError:
@@ -124,7 +125,11 @@ def main():
     ic("初始化配置...")
     # Available: ['assist09', 'assist12', 'ednet_kt1'] 
     dataset_name = 'assist09'
-    config = get_config(dataset_name)
+
+    config = Config(dataset_name=dataset_name)
+    
+    min_seq_len = MIN_SEQ_LEN
+    reandom_seed = RANDOM_SEED
     
     # 2. 数据加载与基础清洗
     ic("Step 1: 数据加载与标准化...")
@@ -137,16 +142,16 @@ def main():
         return
     
     # 3. 数据集特定过滤
-    if config.DATASET_NAME == 'assist09':
+    if config.dataset.DATA_NAME == 'assist09':
         if 'original' in df.columns:
             df = df[df['original'] == 1]
         if 'skill_id' in df.columns:
             df = df[df['skill_id'] != 'NA']
 
     # 4. 过滤过短序列
-    ic(f"过滤交互数小于 {config.MIN_SEQ_LEN} 的用户...")
+    ic(f"过滤交互数小于 {min_seq_len} 的用户...")
     user_counts = df['user_id'].value_counts()
-    valid_users = user_counts[user_counts >= config.MIN_SEQ_LEN].index
+    valid_users = user_counts[user_counts >= min_seq_len].index
     df = df[df['user_id'].isin(valid_users)]
     
     # 将 skill_id 中的分隔符统一处理
@@ -183,11 +188,10 @@ def main():
     # 假设我们想抽取 10% 的数据进行快速测试
     # 注意：如果不需要采样，请将 ratio 设为 1.0 或直接使用 df
     ic("Step 4: 数据采样 (10%)...")
-    sampler = KTDataSampler(random_seed=config.RANDOM_SEED)
+    sampler = KTDataSampler(random_seed=reandom_seed)
     
     # [修改] 使用采样数据，或者如果需要全量，可以注释掉下面这行用 sampled_df = df
-    sampled_df = sampler.stratified_sample(df, ratio=1.0, min_interactions=config.MIN_SEQ_LEN)
-    # sampled_df = df # Uncomment to use full data
+    sampled_df = sampler.stratified_sample(df, ratio=1.0, min_seq_len=min_seq_len)
 
     # 保存抽样数据集
     sampled_csv_path = os.path.join(config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')

@@ -18,6 +18,7 @@ TODO
 ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/data ./data
 ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/model ./model
 ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/output ./output
+ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/config ./config
 ```
 
 

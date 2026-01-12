@@ -1,12 +1,8 @@
-"""
-模型
-"""
 import os
 import torch
 from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell
 
-from config import BaseConfig
-DEVICE = BaseConfig.DEVICE
+from config import DEVICE
 
 # @add_fzq 2025-12-25 -------------------------------------------
 class CognitiveRNNCell(Module):
