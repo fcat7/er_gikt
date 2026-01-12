@@ -24,6 +24,7 @@ class ModelParams:
     hard_recap: bool = True
     agg_method: str = 'gcn'
     use_input_attention: bool = False
+    enable_tf_alignment: bool = False # TF Alignment (Logits Output, Xavier Init)
 
     def __post_init__(self):
         # 自动转换 list 为 tuple (适应 toml 加载后的数据类型)

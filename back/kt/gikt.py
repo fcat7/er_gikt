@@ -59,7 +59,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi'):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -78,8 +78,8 @@ class GIKT(Module):
             use_cognitive_model: 是否使用认知模型(CognitiveRNNCell)，默认为False
             data_dir: 数据目录，用于加载预训练向量，默认为None
             agg_method: 聚合方法，默认为'gcn'
-            recap_source: 硬回顾的特征来源，'hssi' (LSTM Output) 或 'hsei' (Input Embedding)，默认为'hssi'
-            返回值：无
+            recap_source: 回顾特征来源，默认为'hssi'
+            enable_tf_alignment: 是否启用 TF 对齐 (Logits 输出, Xavier Init)，默认为False
         '''
         super(GIKT, self).__init__()  # 调用父类的初始化方法
         self.model_name = "gikt" #  模型名称设置
@@ -95,6 +95,7 @@ class GIKT(Module):
         self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
+        self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
 
         if pre_train:
             # 使用预训练之后的向量
@@ -145,6 +146,10 @@ class GIKT(Module):
         self.MLP_key = Linear(emb_dim, emb_dim) #  键向量转换的线性层
         # 公式10中的W
         self.MLP_W = Linear(2 * emb_dim, 1)
+
+        # @add_fzq: TF Alignment - Initialize weights if enabled
+        if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
+            self.reset_parameters()
         
         # # 可学习的融合参数 beta，初始化为 0.1
         # self.beta = torch.nn.Parameter(torch.tensor(0.1))
@@ -436,5 +441,26 @@ class GIKT(Module):
         # 3. 加权聚合与预测
         # 用注意力权重 alpha 对原始相关性分数 output_g 进行加权求和，得到一个综合得分
         p = torch.sum(torch.sum(alpha * output_g, dim=1), dim=1)  # [batch_size, 1]
-        result = torch.sigmoid(torch.squeeze(p, dim=-1)) # [batch_size, ] 通过 sigmoid 函数输出预测概率
+        
+        # @add_fzq: TF Alignment
+        if self.enable_tf_alignment:
+            # Case 1: Return Logits (No Sigmoid) to use with BCEWithLogitsLoss
+            result = torch.squeeze(p, dim=-1)
+        else:
+            # Case 2: Return Probabilities (Sigmoid) (Original behavior)
+            result = torch.sigmoid(torch.squeeze(p, dim=-1)) 
+        
         return result
+
+    def reset_parameters(self):
+        """
+        Initialize parameters with Xavier Uniform to match TensorFlow implementation
+        """
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                if len(param.shape) >= 2:
+                    torch.nn.init.xavier_uniform_(param)
+                else:
+                    torch.nn.init.uniform_(param, -0.1, 0.1) # Fallback for 1D weights
+            elif 'bias' in name:
+                torch.nn.init.zeros_(param)

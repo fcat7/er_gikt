@@ -124,7 +124,8 @@ if __name__ == '__main__':
         pre_train=params.model.pre_train,
         data_dir=config.PROCESSED_DATA_DIR,
         agg_method=params.model.agg_method,
-        recap_source='hsei' if params.model.use_input_attention else 'hssi' # 通过 toml 配置控制
+        recap_source='hsei' if params.model.use_input_attention else 'hssi', # 通过 toml 配置控制
+        enable_tf_alignment=params.model.enable_tf_alignment
     ).to(DEVICE)
 
     # @change_fzq 2026-01-08: 修改损失函数为 BCELoss
@@ -133,6 +134,12 @@ if __name__ == '__main__':
     loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) # 损失函数
     if params.train.use_bce_loss:
         loss_fun = torch.nn.BCELoss().to(DEVICE)
+
+    # @add_fzq: TF Alignment Override
+    if params.model.enable_tf_alignment:
+        # If alignment enabled, Model outputs Logits -> Must use BCEWithLogitsLoss
+        loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE)
+    
     dataset = UserDataset(config)  # 数据集
     data_len = len(dataset)  # 数据总长度
 
@@ -217,20 +224,33 @@ if __name__ == '__main__':
                 # --------------------------------------------
     
                 y_hat = torch.masked_select(y_hat, mask)
-                y_pred = torch.ge(y_hat, torch.tensor(0.5))
                 y_target = torch.masked_select(y_target, mask)
 
-                # @add_fzq 2026-01-08: 数值截断，防止 BCELoss 计算 Log(0) 溢出
-                y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-
-                loss = loss_fun(y_hat, y_target.to(torch.float32))
+                # @add_fzq: Logic Branch for TF Alignment (Logits vs Probs)
+                if params.model.enable_tf_alignment:
+                    # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    
+                    # Metrics: Convert to Probabilities
+                    y_prob = torch.sigmoid(y_hat) 
+                else: 
+                    # Original Behavior: y_hat is probabilities (Sigmoid applied in model)
+                    # @add_fzq 2026-01-08: Clamping for BCELoss numerical stability
+                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    
+                    y_prob = y_hat # Already probabilities
+                
                 train_loss += loss.item()
+                
                 # 计算acc
+                y_pred = torch.ge(y_prob, torch.tensor(0.5))
                 acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
                 train_right += torch.sum(torch.eq(y_target, y_pred))
                 train_total += torch.sum(mask)
                 # 计算auc
-                auc = roc_auc_score(y_target.cpu(), y_pred.cpu())
+                # @optimize: Use probabilities (y_prob) instead of labels (y_pred) for better precision
+                auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
                 train_auc += auc * len(x) / train_data_len
                 loss.backward()
                 optimizer.step()
@@ -273,22 +293,30 @@ if __name__ == '__main__':
                 # --------------------------------------------
             
                 y_hat = torch.masked_select(y_hat, mask.to(torch.bool))
-                y_pred = torch.ge(y_hat, torch.tensor(0.5))
                 y_target = torch.masked_select(y_target, mask.to(torch.bool))
             
-                # @add_fzq 2026-01-08: 截断
-                y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-            
-                loss = loss_fun(y_hat, y_target.to(torch.float32))
+                # @add_fzq: Logic Branch for TF Alignment (Testing Phase)
+                if params.model.enable_tf_alignment:
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    y_prob = torch.sigmoid(y_hat)
+                else:
+                    # @add_fzq 2026-01-08: 截断
+                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    y_prob = y_hat
+
                 test_loss += loss.item()
+                
                 # 计算acc
+                y_pred = torch.ge(y_prob, torch.tensor(0.5))
                 acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
                 test_right += torch.sum(torch.eq(y_target, y_pred))
                 test_total += torch.sum(mask)
                 # 计算auc
-                auc = roc_auc_score(y_target.cpu(), y_pred.cpu())
+                auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
                 test_auc += auc * len(x) / test_data_len
                 test_step += 1
+
                 if params.train.verbose:
                     print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
             test_loss, test_acc = test_loss / test_step, test_right / test_total
