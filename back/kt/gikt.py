@@ -59,7 +59,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi'):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -77,6 +77,8 @@ class GIKT(Module):
             pre_train: 是否预训练，默认为False
             use_cognitive_model: 是否使用认知模型(CognitiveRNNCell)，默认为False
             data_dir: 数据目录，用于加载预训练向量，默认为None
+            agg_method: 聚合方法，默认为'gcn'
+            recap_source: 硬回顾的特征来源，'hssi' (LSTM Output) 或 'hsei' (Input Embedding)，默认为'hssi'
             返回值：无
         '''
         super(GIKT, self).__init__()  # 调用父类的初始化方法
@@ -91,6 +93,8 @@ class GIKT(Module):
         self.hard_recap = hard_recap #  困难回顾设置
         self.rank_k = rank_k #  排名参数k设置
         self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
+        self.agg_method = agg_method # 聚合方法
+        self.recap_source = recap_source # 硬回顾特征来源
 
         if pre_train:
             # 使用预训练之后的向量
@@ -118,6 +122,11 @@ class GIKT(Module):
             self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim * 2, hidden_size=emb_dim)
         else:
             self.lstm_cell = LSTMCell(input_size=emb_dim * 2, hidden_size=emb_dim) # 使用LSTM网络
+
+        if self.recap_source == 'hsei':
+            # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
+            # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
+            self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
             
         self.mlps4agg = ModuleList(Linear(emb_dim, emb_dim) for _ in range(agg_hops)) #  创建多个线性层用于聚合操作
         
@@ -184,6 +193,16 @@ class GIKT(Module):
             # gru2_output = self.dropout_gru(self.gru2(h1_pre, h2_pre))
             lstm_input = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
             
+            # --- Prepare Recap Feature ---
+            if self.recap_source == 'hsei':
+                # 使用 Input (经过线性变换) 作为 History State
+                # Align with TF: input_trans_embedding (Dense layer, Linear activation)
+                # Removed torch.tanh to match TF default
+                recap_feature = self.input_trans_layer(lstm_input) 
+                # TF code snippet shows: input_trans_embedding = tf.reshape(tf.layers.dense(input_fa_embedding, hidden_size), ...) 
+                # Default activation of dense is None (Linear). But RNN usually operates on Tanh/ReLU. 
+                # Model GIKT aggregate uses Tanh. Let's assume Tanh for consistency with state.
+            
             if self.use_cognitive_model:
                 if interval_time is None or response_time is None:
                     raise ValueError("CognitiveRNNCell requires interval_time and response_time")
@@ -213,42 +232,37 @@ class GIKT(Module):
                         max_num_skill = skills_index.shape[0]
 
             # 将习题和对应知识点embedding拼接起来
-            # --- 优化1：对 q_next 进行图聚合增强 ---- form github copilot --------------------------------
-            # --- 经 验：效果不好，不使用 ---
-            # @add_fzq 2025-12-23 22:10:41 -------------------------------------------
-            # --- 优化1：对 q_next 进行图聚合增强 ---
-            # # 1. 构建 q_next 的多跳邻居图
-            # node_neighbors_next = [q_next] # 初始节点：待预测题目
-            # _batch_size_next = len(node_neighbors_next[0]) # 其实就是 batch_size
-            
-            # # 循环寻找每一跳的邻居
-            # for i in range(self.agg_hops):
-            #     nodes_current = node_neighbors_next[-1].reshape(-1)
-            #     # 计算 reshape 的形状
-            #     neighbor_shape = [_batch_size_next] + [(q_neighbor_size if j % 2 == 0 else s_neighbor_size) for j in range(i + 1)]
+            # --- 逻辑分支修复：仅在 hsei 模式下启用 Target 聚合，hssi 模式保持原样 ---
+            if self.recap_source == 'hsei':
+                # [Case: HSEI] 需要特征对齐，执行图聚合
+                # 1. 构建 q_next 的多跳邻居图
+                node_neighbors_next = [q_next] # 初始节点
+                _batch_size_next = len(node_neighbors_next[0])
                 
-            #     if i % 2 == 0: # 偶数跳：题目 -> 知识点
-            #         node_neighbors_next.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
-            #     else: # 奇数跳：知识点 -> 题目
-            #         node_neighbors_next.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
-            
-            # # 2. 将邻居 ID 转换为 Embedding 向量
-            # emb_node_neighbor_next = []
-            # for i, nodes in enumerate(node_neighbors_next):
-            #     if i % 2 == 0: # 偶数层是题目
-            #         emb_node_neighbor_next.append(self.emb_table_question(nodes))
-            #     else: # 奇数层是知识点
-            #         emb_node_neighbor_next.append(self.emb_table_skill(nodes))
-            
-            # # 3. 执行聚合
-            # emb_q_next_agg = self.aggregate(emb_node_neighbor_next)
-            
-            # # 4. 融合原始嵌入和聚合嵌入
-            # emb_q_next_raw = self.emb_table_question(q_next)
-            # emb_q_next = emb_q_next_raw + self.beta * emb_q_next_agg
-            # ------------------------------------ form github copilot ------------------------------------
-            emb_q_next = self.emb_table_question(q_next) # [batch_size, emd_dim] (原代码)
-            # ------------------------------------@ delete_fzq 2025-12-23 22:10:41 -------------------------------------------
+                for i in range(self.agg_hops):
+                    nodes_current = node_neighbors_next[-1].reshape(-1)
+                    neighbor_shape = [_batch_size_next] + [(q_neighbor_size if j % 2 == 0 else s_neighbor_size) for j in range(i + 1)]
+                    
+                    if i % 2 == 0: 
+                        node_neighbors_next.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
+                    else: 
+                        node_neighbors_next.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
+                
+                # 2. 转换为 Embedding 并聚合
+                emb_node_neighbor_next = []
+                for i, nodes in enumerate(node_neighbors_next):
+                    if i % 2 == 0: 
+                        emb_node_neighbor_next.append(self.emb_table_question(nodes))
+                    else: 
+                        emb_node_neighbor_next.append(self.emb_table_skill(nodes))
+                
+                emb_q_next = self.aggregate(emb_node_neighbor_next)
+                
+            else:
+                # [Case: Defaults/HSSI] 保持原代码逻辑，使用原始 Embedding
+                # (对应原代码注释：经验效果不好，不使用聚合)
+                emb_q_next = self.emb_table_question(q_next) 
+            # -------------------------------------------------------------------------
 
             qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim).to(DEVICE) #  创建一个零张量，用于存储问题与技能的拼接嵌入 形状为: batch_size × (max_num_skill + 1) × emb_dim 并将其移动到指定设备(GPU/CPU)上
             for i, emb_skills in enumerate(skills_related_list): # emb_skills: [num_skill, emb_dim]
@@ -295,15 +309,26 @@ class GIKT(Module):
                 history_time = self.recap_hard(q_next, question[:, 0:t]) # 选取哪些时刻的问题
                 selected_states = [] # 不同时刻t选择的历史状态
                 max_num_states = 1 # 求最大的历史状态数量
+                
+                # Determine "neighbor" source (retrieved items)
+                if self.recap_source == 'hsei':
+                    neighbor_source = recap_feature
+                else:
+                    neighbor_source = lstm_output
+
                 for row, selected_time in enumerate(history_time):
+                    # Align with TF: Element 0 (Current State) is ALWAYS lstm_output
+                    # regardless of what we retrieve from history (neighbor_source)
                     current_state = torch.unsqueeze(lstm_output[row], dim=0) # [1, emb_dim]
+                    
                     if len(selected_time) == 0: # 没有历史状态,直接取当前状态
                         selected_states.append(current_state)
                     else: # 有历史状态,将历史状态和当前状态连接起来
+                        # Retrieve neighbors from the correct source
                         selected_state = state_history[row, torch.tensor(selected_time, dtype=torch.int64)]
                         selected_states.append(torch.cat((current_state, selected_state), dim=0))
                         if (selected_state.shape[0] + 1) > max_num_states:
-                            max_num_states = selected_state.shape[0] + 1
+                           max_num_states = selected_state.shape[0] + 1
                 current_history_state = torch.zeros(batch_size, max_num_states, self.emb_dim).to(DEVICE)
                 # 当前状态
                 for b, c_h_state in enumerate(selected_states):
@@ -321,8 +346,18 @@ class GIKT(Module):
                     select_history = torch.cat(tuple(state_history[i][indices[i]].unsqueeze(dim=0) for i in range(batch_size)), dim=0)
                     current_history_state = torch.cat((current_state, select_history), dim=1)
             y_hat[:, t + 1] = self.predict(qs_concat, current_history_state)
+            
+            # --- Update History State ---
+            if self.recap_source == 'hsei':
+                # 如果配置为 hsei，历史状态存储的是 Input Embedding (Projected)
+                # 使用刚才定义的 neighbor_source (recap_feature)
+                state_history[:, t] = neighbor_source
+            else:
+                # 默认 (hssi): 历史状态存储的是 LSTM Output (Hidden State)
+                state_history[:, t] = lstm_output
+            
             h2_pre = lstm_output
-            state_history[:, t] = lstm_output
+            # state_history[:, t] = lstm_output
         return y_hat
 
     def aggregate(self, emb_node_neighbor):
