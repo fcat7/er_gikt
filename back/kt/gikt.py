@@ -116,18 +116,23 @@ class GIKT(Module):
             self.emb_table_skill = Embedding(num_skill, emb_dim) #  初始化技能ID的嵌入表
         self.emb_table_response = Embedding(2, emb_dim) # 回答结果的嵌入表（0和1两种可能）
 
+        # Ensure input_trans_layer is initialized for HSEI mode
+        # regardless of whether Cognitive Model is used or not.
+        if self.recap_source == 'hsei':
+             self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
+
         # self.gru1 = GRUCell(emb_dim * 2, emb_dim) # 使用GRU网络
         # self.gru2 = GRUCell(emb_dim, emb_dim)
         if self.use_cognitive_model:
             self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim * 2, hidden_size=emb_dim)
         else:
-            self.lstm_cell = LSTMCell(input_size=emb_dim * 2, hidden_size=emb_dim) # 使用LSTM网络
+            if self.recap_source == 'hsei':
+                # [Case: HSEI] TF Alignment: LSTM takes projected input (size=emb_dim)
+                self.lstm_cell = LSTMCell(input_size=emb_dim, hidden_size=emb_dim)
+            else:
+                # [Case: HSSI] Original: LSTM takes concatenated input (size=emb_dim * 2)
+                self.lstm_cell = LSTMCell(input_size=emb_dim * 2, hidden_size=emb_dim) 
 
-        if self.recap_source == 'hsei':
-            # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
-            # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
-            self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
-            
         self.mlps4agg = ModuleList(Linear(emb_dim, emb_dim) for _ in range(agg_hops)) #  创建多个线性层用于聚合操作
         
         self.MLP_AGG_last = Linear(emb_dim, emb_dim) #  最后一个聚合操作的线性层
@@ -188,20 +193,22 @@ class GIKT(Module):
             emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]) #  对于emb_question_t中mask_t为False的位置，使用emb_table_question查找question_t中对应位置的嵌入向量
 
             # LSTM/GRU更新知识状态
-            # gru1_input = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
-            # h1_pre = self.dropout_gru(self.gru1(gru1_input, h1_pre))
-            # gru2_output = self.dropout_gru(self.gru2(h1_pre, h2_pre))
-            lstm_input = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
+            lstm_input_raw = torch.cat((emb_question_t, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
             
-            # --- Prepare Recap Feature ---
+            # --- 分支逻辑：处理输入投影和 LSTM 输入源 ---
             if self.recap_source == 'hsei':
-                # 使用 Input (经过线性变换) 作为 History State
-                # Align with TF: input_trans_embedding (Dense layer, Linear activation)
-                # Removed torch.tanh to match TF default
-                recap_feature = self.input_trans_layer(lstm_input) 
-                # TF code snippet shows: input_trans_embedding = tf.reshape(tf.layers.dense(input_fa_embedding, hidden_size), ...) 
-                # Default activation of dense is None (Linear). But RNN usually operates on Tanh/ReLU. 
-                # Model GIKT aggregate uses Tanh. Let's assume Tanh for consistency with state.
+                # [Case: HSEI] TF Alignment
+                # 1. 投影层: 2*emb -> emb (无激活函数, 匹配 TF Dense linear 默认)
+                lstm_input_projected = self.input_trans_layer(lstm_input_raw)
+                # 2. LSTM 输入: 使用投影后的向量
+                lstm_input_final = lstm_input_projected
+                # 3. Recap Feature 源: 也是投影后的向量
+                recap_feature = lstm_input_projected
+            else:
+                # [Case: HSSI/Default] Original Logic
+                # 1. LSTM 输入: 使用原始拼接向量
+                lstm_input_final = lstm_input_raw
+                # 无需计算 recap_feature，因为 HSSI 使用 lstm_output
             
             if self.use_cognitive_model:
                 if interval_time is None or response_time is None:
@@ -212,10 +219,11 @@ class GIKT(Module):
                 curr_response = response_time[:, t].unsqueeze(1)
                 
                 # h2_pre 作为上一个时刻的 hidden state
-                h_new, _ = self.cognitive_cell(lstm_input, h2_pre, curr_interval, curr_response)
+                # Cognitive Model 保持使用原始 input (待定)
+                h_new, _ = self.cognitive_cell(lstm_input_raw, h2_pre, curr_interval, curr_response)
                 lstm_output = self.dropout_lstm(h_new)
             else:
-                lstm_output = self.dropout_lstm(self.lstm_cell(lstm_input)[0]) # [batch_size, emb_dim]
+                lstm_output = self.dropout_lstm(self.lstm_cell(lstm_input_final)[0]) # [batch_size, emb_dim]
 
             # 找t+1时刻的[习题]以及[其对应的知识点]
             q_next = question[:, t + 1] # [batch_size, ]
