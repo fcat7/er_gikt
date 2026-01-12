@@ -124,7 +124,13 @@ class GIKT(Module):
         # self.gru1 = GRUCell(emb_dim * 2, emb_dim) # 使用GRU网络
         # self.gru2 = GRUCell(emb_dim, emb_dim)
         if self.use_cognitive_model:
-            self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim * 2, hidden_size=emb_dim)
+            # [Fix] Make Cognitive Model adapt to input dimension based on mode
+            if self.recap_source == 'hsei':
+                # Case HSEI: Takes projected input (emb_dim)
+                self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim, hidden_size=emb_dim)
+            else:
+                 # Case HSSI: Takes raw input (emb_dim * 2)
+                self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim * 2, hidden_size=emb_dim)
         else:
             if self.recap_source == 'hsei':
                 # [Case: HSEI] TF Alignment: LSTM takes projected input (size=emb_dim)
@@ -219,8 +225,8 @@ class GIKT(Module):
                 curr_response = response_time[:, t].unsqueeze(1)
                 
                 # h2_pre 作为上一个时刻的 hidden state
-                # Cognitive Model 保持使用原始 input (待定)
-                h_new, _ = self.cognitive_cell(lstm_input_raw, h2_pre, curr_interval, curr_response)
+                # [Fix] Use lstm_input_final which is correctly mode-dependent (projected or raw)
+                h_new, _ = self.cognitive_cell(lstm_input_final, h2_pre, curr_interval, curr_response)
                 lstm_output = self.dropout_lstm(h_new)
             else:
                 lstm_output = self.dropout_lstm(self.lstm_cell(lstm_input_final)[0]) # [batch_size, emb_dim]
