@@ -294,10 +294,16 @@ class GIKT(Module):
                 emb_q_next, agg_list_next = self.aggregate(emb_node_neighbor_next)
                 
                 if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-                    # TF Logic: qs_concat = concat(emb_q_next, agg_results_next[1])
+                    # [Correction & Review] TF Logic: Apply Feature Transform to Target Question
+                    # TF: next_trans_embedding = Relu(Dense(aggregate_embedding[0]))
+                    emb_q_next_trans = torch.relu(self.feature_transform_layer(emb_q_next))
+
+                    # TF Logic: qs_concat = concat(next_trans_embedding, agg_results_next[1])
                     # agg_results_next[1] 是第一层聚合后的 Skill 邻居特征 [Batch, Q_Neighbor_Size, Emb]
                     emb_skills_next_batch = agg_list_next[1] # [Batch, Q_Neighbor_Size, Emb]
-                    qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
+
+                    # 拼接: [Target_Question_Projected, Skill_Neighbors]
+                    qs_concat = torch.cat((emb_q_next_trans.unsqueeze(1), emb_skills_next_batch), dim=1)
                     use_legacy_concat = False
                 
             else:
