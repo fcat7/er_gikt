@@ -28,6 +28,18 @@ logs_to_compare_dict = {
 #     '20260108_1207_aver.txt': 'use_cognitive_model',
 # }
 
+logs_to_compare_dict = { # 重构代码后的对比实验
+    '20260112_1754_aver.txt': 'default',
+    # '20260112_2154_aver.txt': 'use input attention',
+    # '20260112_2218_aver.txt': 'use input attention-v2',
+    '20260112_2233_aver.txt': 'use input attention-v3',
+    # '20260112_2251_aver.txt': 'use input attention-v4',
+    # '20260112_2320_aver.txt': 'use input attention-v4_fix_cognitive',
+    # '20260113_0005_aver.txt': 'use input attention-v3.1',
+    '20260113_0058_aver.txt': 'use input attention-v3.2_alignment',
+    '20260113_0131_aver.txt': 'use input attention-v3.2_no_hsei',
+}
+
 if logs_to_compare_dict:
     plot_comparison(logs_to_compare_dict, metric_type='auc', base_dir=chart_data_dir)
 else:
