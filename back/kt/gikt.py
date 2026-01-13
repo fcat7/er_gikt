@@ -120,9 +120,12 @@ class GIKT(Module):
         # self.gru1 = GRUCell(emb_dim * 2, emb_dim) # 使用GRU网络
         # self.gru2 = GRUCell(emb_dim, emb_dim)
         if self.use_cognitive_model:
-            self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim * 2, hidden_size=emb_dim)
+            # Step 3 Init: TF Alignment uses projected input (emb_dim), Original uses concatenated (emb_dim*2)
+            _input_size = emb_dim if (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment) else emb_dim * 2
+            self.cognitive_cell = CognitiveRNNCell(input_size=_input_size, hidden_size=emb_dim)
         else:
-            self.lstm_cell = LSTMCell(input_size=emb_dim * 2, hidden_size=emb_dim) # 使用LSTM网络
+            _input_size = emb_dim if (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment) else emb_dim * 2
+            self.lstm_cell = LSTMCell(input_size=_input_size, hidden_size=emb_dim) # 使用LSTM网络
 
         if self.recap_source == 'hsei':
             # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
@@ -194,7 +197,7 @@ class GIKT(Module):
                     emb_node_neighbor.append(self.emb_table_question(nodes))
                 else: # 技能索引->技能向量
                     emb_node_neighbor.append(self.emb_table_skill(nodes)) #  将邻居节点的嵌入表示添加到列表中
-            emb0_question_t = self.aggregate(emb_node_neighbor) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
+            emb0_question_t, _ = self.aggregate(emb_node_neighbor) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
             emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE) #  初始化一个全零的张量，形状为(batch_size, self.emb_dim)，并指定设备为DEVICE
             emb_question_t[mask_t] = emb0_question_t #  将emb0_question_t的值赋给emb_question_t中mask_t为True的位置
             emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]) #  对于emb_question_t中mask_t为False的位置，使用emb_table_question查找question_t中对应位置的嵌入向量
@@ -219,6 +222,15 @@ class GIKT(Module):
                 # Default activation of dense is None (Linear). But RNN usually operates on Tanh/ReLU. 
                 # Model GIKT aggregate uses Tanh. Let's assume Tanh for consistency with state.
             
+            # Determine LSTM Input
+            if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
+                # [Case: TF Alignment] LSTM uses Projected Features (100 dim)
+                # Note: `recap_feature` is calculated above as input_trans_layer(lstm_input)
+                lstm_cell_input = recap_feature
+            else:
+                # [Case: Original] LSTM uses Concatenated Features (200 dim)
+                lstm_cell_input = lstm_input
+
             if self.use_cognitive_model:
                 if interval_time is None or response_time is None:
                     raise ValueError("CognitiveRNNCell requires interval_time and response_time")
@@ -229,10 +241,11 @@ class GIKT(Module):
                 
                 # h2_pre 作为上一个时刻的 hidden state
                 # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
-                h_new, _ = self.cognitive_cell(lstm_input, h2_pre, curr_interval, curr_response)
+                # @change_fzq: Pass correct input size based on alignment
+                h_new, _ = self.cognitive_cell(lstm_cell_input, h2_pre, curr_interval, curr_response)
                 lstm_output = self.dropout_lstm(h_new)
             else:
-                lstm_output = self.dropout_lstm(self.lstm_cell(lstm_input)[0]) # [batch_size, emb_dim]
+                lstm_output = self.dropout_lstm(self.lstm_cell(lstm_cell_input)[0]) # [batch_size, emb_dim]
 
             # 找t+1时刻的[习题]以及[其对应的知识点]
             q_next = question[:, t + 1] # [batch_size, ]
@@ -250,6 +263,9 @@ class GIKT(Module):
 
             # 将习题和对应知识点embedding拼接起来
             # --- 逻辑分支修复：仅在 hsei 模式下启用 Target 聚合，hssi 模式保持原样 ---
+            use_legacy_concat = True # 使用“旧版连接”功能
+            qs_concat = None
+
             if self.recap_source == 'hsei':
                 # [Case: HSEI] 需要特征对齐，执行图聚合
                 # 1. 构建 q_next 的多跳邻居图
@@ -273,7 +289,16 @@ class GIKT(Module):
                     else: 
                         emb_node_neighbor_next.append(self.emb_table_skill(nodes))
                 
-                emb_q_next = self.aggregate(emb_node_neighbor_next)
+                # 3. 聚合
+                # Return: (final_res, full_layers_list)
+                emb_q_next, agg_list_next = self.aggregate(emb_node_neighbor_next)
+                
+                if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
+                    # TF Logic: qs_concat = concat(emb_q_next, agg_results_next[1])
+                    # agg_results_next[1] 是第一层聚合后的 Skill 邻居特征 [Batch, Q_Neighbor_Size, Emb]
+                    emb_skills_next_batch = agg_list_next[1] # [Batch, Q_Neighbor_Size, Emb]
+                    qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
+                    use_legacy_concat = False
                 
             else:
                 # [Case: Defaults/HSSI] 保持原代码逻辑，使用原始 Embedding
@@ -281,11 +306,12 @@ class GIKT(Module):
                 emb_q_next = self.emb_table_question(q_next) 
             # -------------------------------------------------------------------------
 
-            qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim).to(DEVICE) #  创建一个零张量，用于存储问题与技能的拼接嵌入 形状为: batch_size × (max_num_skill + 1) × emb_dim 并将其移动到指定设备(GPU/CPU)上
-            for i, emb_skills in enumerate(skills_related_list): # emb_skills: [num_skill, emb_dim]
-                num_qs = 1 + emb_skills.shape[0] # 总长度为1(问题嵌入长度) + num_skill(技能嵌入长度) #  计算问题与技能拼接后的总长度，包含问题嵌入和所有技能嵌入
-                emb_next = torch.unsqueeze(emb_q_next[i], dim=0) # [1, emb_dim] #  对下一个问题的嵌入向量进行维度扩展，从[emb_dim]变为[1, emb_dim]
-                qs_concat[i, 0 : num_qs] = torch.cat((emb_next, emb_skills), dim=0) #  将下一个问题的嵌入和技能嵌入拼接后存入qs矩阵的相应位置 拼接后的向量长度为num_qs，从qs矩阵的第0个位置开始存储
+            if use_legacy_concat:
+                qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim).to(DEVICE) #  创建一个零张量，用于存储问题与技能的拼接嵌入 形状为: batch_size × (max_num_skill + 1) × emb_dim 并将其移动到指定设备(GPU/CPU)上
+                for i, emb_skills in enumerate(skills_related_list): # emb_skills: [num_skill, emb_dim]
+                    num_qs = 1 + emb_skills.shape[0] # 总长度为1(问题嵌入长度) + num_skill(技能嵌入长度) #  计算问题与技能拼接后的总长度，包含问题嵌入和所有技能嵌入
+                    emb_next = torch.unsqueeze(emb_q_next[i], dim=0) # [1, emb_dim] #  对下一个问题的嵌入向量进行维度扩展，从[emb_dim]变为[1, emb_dim]
+                    qs_concat[i, 0 : num_qs] = torch.cat((emb_next, emb_skills), dim=0) #  将下一个问题的嵌入和技能嵌入拼接后存入qs矩阵的相应位置 拼接后的向量长度为num_qs，从qs矩阵的第0个位置开始存储
 
             ####################################上述代码解释#####################################
             # qs_concat 最终变为 [batch_size, max_num_skill + 1, emb_dim] 的张量
@@ -345,7 +371,7 @@ class GIKT(Module):
                         selected_state = state_history[row, torch.tensor(selected_time, dtype=torch.int64)]
                         selected_states.append(torch.cat((current_state, selected_state), dim=0))
                         if (selected_state.shape[0] + 1) > max_num_states:
-                           max_num_states = selected_state.shape[0] + 1
+                            max_num_states = selected_state.shape[0] + 1
                 current_history_state = torch.zeros(batch_size, max_num_states, self.emb_dim).to(DEVICE)
                 # 当前状态
                 for b, c_h_state in enumerate(selected_states):
@@ -390,8 +416,10 @@ class GIKT(Module):
         for i in range(self.agg_hops):
             for j in range(self.agg_hops - i):
                 emb_node_neighbor[j] = self.sum_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], j)
-                
-        return torch.tanh(self.MLP_AGG_last(emb_node_neighbor[0])) # 返回自身的向量（索引为0）
+        
+        # 返回: (最终聚合结果[经过MLP], 聚合过程中的列表[包含邻居聚合信息])
+        final_res = torch.tanh(self.MLP_AGG_last(emb_node_neighbor[0]))
+        return final_res, emb_node_neighbor
 
     def sum_aggregate(self, emb_self, emb_neighbor, hop):
         # 求和式聚合, 将邻居节点求和平均之后与自己相加, 得到聚合后的特征
