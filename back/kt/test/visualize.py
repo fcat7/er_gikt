@@ -40,6 +40,13 @@ logs_to_compare_dict = { # 重构代码后的对比实验
     '20260113_0131_aver.txt': 'use input attention-v3.2_no_hsei',
 }
 
+logs_to_compare_dict = { # 重构代码后的对比实验
+    '20260112_1754_aver.txt': 'default',
+    '20260113_0058_aver.txt': 'use input attention-v3.2_alignment',
+    '20260113_1626_aver.txt': 'use input attention-v3.2 + dev2_v1',
+    '20260113_1928_aver.txt': 'use input attention-v3.2 + dev2_v2' # 补充 Target Projection (目标项投影)。
+}
+
 if logs_to_compare_dict:
     plot_comparison(logs_to_compare_dict, metric_type='auc', base_dir=chart_data_dir)
 else:

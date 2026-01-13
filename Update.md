@@ -48,9 +48,28 @@
 
 | Experiment ID | Config Name | Key Features | AUC (Sample) | Note |
 | :--- | :--- | :--- | :--- | :--- |
+| **[1626]** | `dev_v2` | HSEI + TF Alignment + **Target Aggregation (Neighbors)** | **0.7535** | **Best Stable Version**. PyTorch features now match TF logic. |
+| **[1928]** | `dev_v3 (无效)` | `dev_v2` + **Target Transform (ReLU)** | 0.7423 | Over-alignment caused regression. Reverted. |
 | **[2233]** | `v3` | Hybrid Mode (Wide Input) | ~0.66 | Baseline |
 | **[0131]** | `v3.2_no_hsei` | HSSI Mode + **TF Alignment** | ~0.748 | Math fix is crucial |
-| **[0058]** | `v3.2_alignment` | **HSEI Mode** + **TF Alignment** | **~0.755** | Best Performance |
+| **[0058]** | `v3.2_alignment` | **HSEI Mode** + **TF Alignment** | **~0.755** | Similar to dev_v2 |
+
+### Dev Version Technical Details
+
+#### dev_v2 (1626) - Target Context Fix :rocket:
+此版本修复了 PyTorch 实现与 TF 原版在构建“目标问题上下文”（Target Context - 即待预测问题）时的核心差异。
+- **Original PyTorch (Old)**: 仅使用静态查表得到的 Skill Embedding。
+  - `qs_concat = cat(emb_q_next, emb_skill_table[skill_id])`
+- **dev_v2 Mode (New)**: 使用 **图聚合后的 Skill 邻居特征**。
+  - `qs_concat = cat(emb_q_next, agg_list[1])`
+  - 对应 TF 逻辑：Next Question 作为一个查询向量，应当包含其在知识图谱中的邻域信息（1-hop neighbors），而不仅仅是自身的 ID Embedding。
+
+#### dev_v3 (1928) - Target Transform Experiment :warning: (已废弃)
+尝试将“目标问题”的处理逻辑与“历史输入”的处理逻辑进行严格对称对齐。
+- **Change**: 对 `emb_q_next` 施加了 `Linear + ReLU` 特征变换。
+- **Result**: **无效 (Regression)**. AUC 从 ~0.75 下降至 ~0.74。
+- **Analysis**: 实验表明，虽然历史状态需要投影（用于压缩信息），但 Target Query 保持在原始 Embedding 空间（Untransformed）能更好地检索相关历史。
+
 
 ---
 
