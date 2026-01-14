@@ -15,6 +15,7 @@ from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_
 from params import HyperParameters
 from util.utils import gen_gikt_graph, build_adj_list
 import argparse
+from gikt import GIKT
 
 # try :
 #     from icecream import ic
@@ -43,14 +44,13 @@ set_seed(42)
 def get_parser():
     parser = argparse.ArgumentParser(description="Train and Test GIKT Model")
     parser.add_argument('--full', action='store_true', help='Use full dataset (overrides --mode)')
-    parser.add_argument('--gat', action='store_true', help='Use GAT aggregation method instead of GCN')
 
     parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
     return parser
 
-def get_exp_config_path(isFull=False, isGAT=False, name='default'):
+def get_exp_config_path(isFull=False, name='default'):
     # 默认路径为： config/experiments/exp_gcn_sample_default.toml
-    return f"config/experiments/exp_{'gat' if isGAT else 'gcn'}_{'full' if isFull else 'sample'}_{name}.toml"
+    return f"config/experiments/exp_{'full' if isFull else 'sample'}_{name}.toml"
 
 # 使用方法
 # python train_test.py 
@@ -61,11 +61,6 @@ if __name__ == '__main__':
 
     parser = get_parser()
     args = parser.parse_args()
-    
-    if args.gat:
-        from gikt_gat import GIKT
-    else :
-        from gikt import GIKT
 
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 方便调试 CUDA 错误
 
@@ -77,7 +72,7 @@ if __name__ == '__main__':
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 
     # 加载超参数
-    exp_config_path = get_exp_config_path(isFull=args.full, isGAT=args.gat, name=args.name)
+    exp_config_path = get_exp_config_path(isFull=args.full, name=args.name)
     params = HyperParameters.load(exp_config_path=exp_config_path)
     # 加载配置
     dataset_name = params.train.dataset_name

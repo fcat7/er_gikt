@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell
 
 from config import DEVICE
@@ -59,7 +60,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -96,6 +97,36 @@ class GIKT(Module):
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
         self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
+
+        # @add_fzq: GAT 相关初始化
+        if self.agg_method == 'gat':
+            if q_features_path is None and data_dir is not None:
+                q_features_path = os.path.join(data_dir, 'q_features.npy')
+                
+            if q_features_path is None or not os.path.exists(q_features_path):
+                print(f"Warning: GAT select but q_features not found at {q_features_path}. Fallback to GCN.")
+                self.agg_method = 'gcn'
+            else:
+                import numpy as np
+                print(f"Loading Q-Features for GAT from: {q_features_path}")
+                try:
+                    q_feats = np.load(q_features_path).astype(np.float32)
+                    # q_feats shape: [num_q, 3] (Difficulty, Disc, RT)
+                    self.q_feature_embedding = Embedding.from_pretrained(torch.from_numpy(q_feats), freeze=True)
+                    self.q_feat_dim = q_feats.shape[1]
+                    
+                    # 定义 Attention 计算层
+                    # 输入: [Self_Emb, Neighbor_Emb, Edge_Attributes]
+                    # Dim: emb_dim + emb_dim + q_feat_dim
+                    self.gat_attn_layers = ModuleList([
+                        Linear(emb_dim * 2 + self.q_feat_dim, 1) for _ in range(agg_hops)
+                    ])
+                    # Init weights
+                    for layer in self.gat_attn_layers:
+                        torch.nn.init.xavier_uniform_(layer.weight)
+                except Exception as e:
+                    print(f"Error loading GAT features: {e}. Fallback to GCN.")
+                    self.agg_method = 'gcn'
 
         if pre_train:
             # 使用预训练之后的向量
@@ -197,7 +228,10 @@ class GIKT(Module):
                     emb_node_neighbor.append(self.emb_table_question(nodes))
                 else: # 技能索引->技能向量
                     emb_node_neighbor.append(self.emb_table_skill(nodes)) #  将邻居节点的嵌入表示添加到列表中
-            emb0_question_t, _ = self.aggregate(emb_node_neighbor) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
+            
+            # @mod_fzq: GAT requires node_neighbors indices
+            emb0_question_t, _ = self.aggregate(emb_node_neighbor, node_neighbors) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
+            
             emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE) #  初始化一个全零的张量，形状为(batch_size, self.emb_dim)，并指定设备为DEVICE
             emb_question_t[mask_t] = emb0_question_t #  将emb0_question_t的值赋给emb_question_t中mask_t为True的位置
             emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]) #  对于emb_question_t中mask_t为False的位置，使用emb_table_question查找question_t中对应位置的嵌入向量
@@ -291,7 +325,8 @@ class GIKT(Module):
                 
                 # 3. 聚合
                 # Return: (final_res, full_layers_list)
-                emb_q_next, agg_list_next = self.aggregate(emb_node_neighbor_next)
+                # @mod_fzq: GAT requires neighbors indices
+                emb_q_next, agg_list_next = self.aggregate(emb_node_neighbor_next, node_neighbors_next)
                 
                 if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
                     # TF Logic: qs_concat = concat(emb_q_next, agg_results_next[1])
@@ -403,7 +438,7 @@ class GIKT(Module):
             # state_history[:, t] = lstm_output
         return y_hat
 
-    def aggregate(self, emb_node_neighbor):
+    def aggregate(self, emb_node_neighbor, node_neighbors=None):
         # 图扩散模型
         # 输入是节点（习题节点）的embedding，计算步骤是：将节点和邻居的embedding相加，再通过一个MLP输出（embedding维度不变），激活函数用的tanh
         # 假设聚合3跳，那么输入是[0,1,2,3]，分别表示输入节点，1跳节点，2跳节点，3跳节点，总共聚合3次
@@ -415,7 +450,14 @@ class GIKT(Module):
         
         for i in range(self.agg_hops):
             for j in range(self.agg_hops - i):
-                emb_node_neighbor[j] = self.sum_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], j)
+                if self.agg_method == 'gat':
+                     if node_neighbors is None:
+                         raise ValueError("GAT requires node_neighbors indices")
+                     nodes_self = node_neighbors[j] 
+                     nodes_neighbor = node_neighbors[j+1]
+                     emb_node_neighbor[j] = self.gat_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], nodes_self, nodes_neighbor, j)
+                else:
+                    emb_node_neighbor[j] = self.sum_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], j)
         
         # 返回: (最终聚合结果[经过MLP], 聚合过程中的列表[包含邻居聚合信息])
         final_res = torch.tanh(self.MLP_AGG_last(emb_node_neighbor[0]))
@@ -425,6 +467,76 @@ class GIKT(Module):
         # 求和式聚合, 将邻居节点求和平均之后与自己相加, 得到聚合后的特征
         emb_sum_neighbor = torch.mean(emb_neighbor, dim=-2)
         emb_sum = emb_sum_neighbor + emb_self
+        return torch.tanh(self.dropout_gnn(self.mlps4agg[hop](emb_sum)))
+
+    def gat_aggregate(self, emb_self, emb_neighbor, nodes_self, nodes_neighbor, hop):
+        """
+        Graph Attention Aggregation
+        Weights calculated using [Current, Neighbor, EdgeAttr]
+        EdgeAttr comes from Question Features.
+        """
+        # nodes_self: [Batch, ...] (Indices)
+        # nodes_neighbor: [Batch, ..., K] (Indices)
+        # emb_self: [Batch, ..., Dim]
+        # emb_neighbor: [Batch, ..., K, Dim]
+        
+        # 1. 确定 Edge Attributes (题目特征)
+        # 聚合方向: Neighbor(j+1) -> Self(j)
+        # hop=j.
+        # j=0: Q <- S. Target=Q. EdgeAttr=Q_Features(Target).
+        # j=1: S <- Q. Target=S. EdgeAttr=Q_Features(Source).
+        # j=2: Q <- S. Target=Q. EdgeAttr=Q_Features(Target).
+        # 偶数跳: Self 是 Q. 特征来自 Self.
+        # 奇数跳: Self 是 S. 特征来自 Neighbor.
+        
+        is_self_q = (hop % 2 == 0)
+        
+        if is_self_q:
+            # 特征来自 Emb_Self 对应的节点
+            # nodes_self need to be broadcasted to match neighbor structure for concat
+            # nodes_self: [Batch, ...,] -> emb_self: [Batch, ..., Dim]
+            # We need features: [Batch, ..., 3] -> expand -> [Batch, ..., K, 3]
+            
+            # 查找特征
+            q_idx = nodes_self.long()
+            edge_attr = self.q_feature_embedding(q_idx) # [Batch, ..., 3]
+            
+            # 扩展到邻居维度 K
+            # emb_neighbor shape last dim is Dim. second last is K.
+            # edge_attr shape needs to insert K at second last dim.
+            edge_attr = edge_attr.unsqueeze(-2) # [Batch, ..., 1, 3]
+            edge_attr = edge_attr.expand(*emb_neighbor.shape[:-1], self.q_feat_dim) # [Batch, ..., K, 3]
+            
+        else:
+            # 特征来自 Emb_Neighbor 对应的节点 (Source is Q)
+            q_idx = nodes_neighbor.long()
+            edge_attr = self.q_feature_embedding(q_idx) # [Batch, ..., K, 3]
+            
+        # 2. 准备注意力输入 [h_i, h_j, f_edge]
+        # h_i = emb_self expanded
+        emb_self_exp = emb_self.unsqueeze(-2).expand_as(emb_neighbor) # [Batch, ..., K, Dim]
+        
+        # Concat
+        cat_input = torch.cat([emb_self_exp, emb_neighbor, edge_attr], dim=-1) # [Batch, ..., K, 2*Dim + 3]
+        
+        # 3. 计算分数与权重
+        # scores = self.gat_attn_layers[hop](cat_input) # [Batch, ..., K, 1]
+        # scores = torch.nn.functional.leaky_relu(scores, negative_slope=0.2)
+        scores = F.leaky_relu(self.gat_attn_layers[hop](cat_input), negative_slope=0.2)
+        
+        # Softmax over neighbors
+        alpha = torch.softmax(scores, dim=-2) # [Batch, ..., K, 1]
+        
+        # 4. 加权聚合
+        emb_weighted = emb_neighbor * alpha # [Batch, ..., K, Dim]
+        emb_agg = torch.sum(emb_weighted, dim=-2) # [Batch, ..., Dim]
+        
+        # 5. 更新状态 (Residual / Skip Connection)
+        # 与 sum_aggregate 保持一致结构: Output = MLP( Agg + Self )
+        # GAT原版通常直接对 Layer 2 再次 Attention. 
+        # 但这里为了适配 GIKT 架构 (ResNet style)，我们做 (Agg + Self)
+        emb_sum = emb_agg + emb_self
+        
         return torch.tanh(self.dropout_gnn(self.mlps4agg[hop](emb_sum)))
 
     def recap_hard(self, q_next, q_history):
