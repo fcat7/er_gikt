@@ -41,6 +41,7 @@ class TrainParams:
     prefetch_factor: int = 4
     k_fold: int = 1
     use_bce_loss: bool = False
+    use_global_auc: bool = False # 是否使用全局 AUC (收集所有预测值计算) 替代 Batch 加权平均 AUC
     verbose: bool = True
 
 @dataclass

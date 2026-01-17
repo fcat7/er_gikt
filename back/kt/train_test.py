@@ -260,6 +260,11 @@ if __name__ == '__main__':
             # 测试阶段，只有前向传递，没有反向传播阶段
             print('-------------------testing------------------')
             test_step = test_loss = test_total = test_right = test_auc = 0
+            
+            # @add_fzq: Global AUC Support
+            all_y_targets = []
+            all_y_probs = []
+
             # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体的auc
             for data in test_loader:
 
@@ -308,12 +313,29 @@ if __name__ == '__main__':
                 test_right += torch.sum(torch.eq(y_target, y_pred))
                 test_total += torch.sum(mask)
                 # 计算auc
-                auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                test_auc += auc * len(x) / test_data_len
-                test_step += 1
+                if params.train.use_global_auc:
+                    all_y_targets.extend(y_target.cpu().detach().numpy())
+                    all_y_probs.extend(y_prob.cpu().detach().numpy())
+                    test_step += 1
+                    if params.train.verbose:
+                        try:
+                            batch_auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
+                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {batch_auc:.4f} (Batch)')
+                        except ValueError:
+                             pass
+                else:
+                    try:
+                        auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
+                        test_auc += auc * len(x) / test_data_len
+                        test_step += 1
+                        if params.train.verbose:
+                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
+                    except ValueError:
+                        test_step += 1
+            
+            if params.train.use_global_auc and len(all_y_targets) > 0:
+                test_auc = roc_auc_score(all_y_targets, all_y_probs)
 
-                if params.train.verbose:
-                    print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
             test_loss, test_acc = test_loss / test_step, test_right / test_total
             test_loss_aver += test_loss
             test_acc_aver += test_acc

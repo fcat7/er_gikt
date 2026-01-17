@@ -124,11 +124,11 @@ def main():
     # 1. 初始化配置
     ic("初始化配置...")
     # Available: ['assist09', 'assist12', 'ednet_kt1'] 
-    dataset_name = 'assist09'
+    dataset_name = 'assist09-sample_9%'
 
     config = Config(dataset_name=dataset_name)
     
-    min_seq_len = MIN_SEQ_LEN
+    min_seq_len = 3
     reandom_seed = RANDOM_SEED
     
     # 2. 数据加载与基础清洗
@@ -191,7 +191,7 @@ def main():
     sampler = KTDataSampler(random_seed=reandom_seed)
     
     # [修改] 使用采样数据，或者如果需要全量，可以注释掉下面这行用 sampled_df = df
-    sampled_df = sampler.stratified_sample(df, ratio=1.0, min_seq_len=min_seq_len)
+    sampled_df = sampler.stratified_sample(df, ratio=0.09, min_seq_len=min_seq_len)
 
     # 保存抽样数据集
     sampled_csv_path = os.path.join(config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')
