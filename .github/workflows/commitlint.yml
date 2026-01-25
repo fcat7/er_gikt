@@ -1,0 +1,43 @@
+name: CommitLint
+# 触发时机：推送到 main 分支、向 main 分支提 PR 时执行
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      # 拉取完整仓库历史（解决 HEAD~1 找不到提交的问题）
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # 配置 Node.js 环境（和本地一致的版本）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm' # 缓存依赖，加速后续运行
+      # 安装 commitlint 依赖（兼容无 package.json 场景，兜底）
+      - name: Install CommitLint Dependencies
+        run: |
+          if [ ! -f "package.json" ]; then
+            npm init -y && npm install @commitlint/cli @commitlint/config-conventional --save-dev
+          else
+            npm install
+          fi
+      # 执行 CommitLint 校验（适配 PR/push 不同场景）
+      - name: Run CommitLint
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR 场景：校验本次 PR 所有提交
+            npx commitlint --from=origin/main --to=HEAD --verbose
+          else
+            # Push 场景：校验最近提交（兼容首次提交）
+            COMMIT_RANGE="HEAD~1..HEAD"
+            if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+              COMMIT_RANGE="HEAD"
+            fi
+            npx commitlint --from=${COMMIT_RANGE%..*} --to=${COMMIT_RANGE#*..} --verbose
+          fi
