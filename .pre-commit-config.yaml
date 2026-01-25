@@ -1,0 +1,35 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.6.0
+  hooks:
+    # - id: trailing-whitespace # 删除行尾多余空白
+    # - id: end-of-file-fixer # 确保所有文件以换行结尾
+    - id: check-merge-conflict
+    - id: detect-private-key
+    - id: check-added-large-files # 阻止大于 500KB 的新文件被提交（如模型权重、数据切片等）
+      args: ["--maxkb=500"]
+
+# - repo: https://github.com/astral-sh/ruff-pre-commit
+#   rev: v0.3.7
+#   hooks:
+    # - id: ruff # 自动修复 Python 代码中的风格和部分语法问题
+    #   args: ["--fix"]
+    # - id: ruff-format # 统一 Python 代码格式
+
+# Conventional Commits 提交信息校验（commit-msg 阶段）
+- repo: https://github.com/commitizen-tools/commitizen
+  rev: v3.27.0
+  hooks:
+    - id: commitizen
+      stages: [commit-msg]
+      # 默认执行 `cz check` 以校验提交信息符合 Conventional Commits
+
+# 本地自定义：当 Body 含 [🔴 BREAKING] 时，Footer 必须包含 EXP: #数字（或范围/多个）
+- repo: local
+  hooks:
+    - id: check-breaking-exp
+      name: check-breaking-exp
+      entry: python scripts/check_commit_msg_exp.py
+      language: system
+      stages: [commit-msg]
+      pass_filenames: true
