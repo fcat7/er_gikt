@@ -1,5 +1,4 @@
-name: CommitLint
-# 触发时机：推送到 main 分支、向 main 分支提 PR 时执行
+name: CommitLint (pre-commit + commitizen)
 on:
   pull_request:
     branches: [main]
@@ -7,37 +6,85 @@ on:
     branches: [main]
 
 jobs:
-  commitlint:
+  pre-commit-commitlint:
     runs-on: ubuntu-latest
     steps:
-      # 拉取完整仓库历史（解决 HEAD~1 找不到提交的问题）
+      # 1. 拉取完整仓库历史（保留原有逻辑）
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # 配置 Node.js 环境（和本地一致的版本）
-      - uses: actions/setup-node@v4
+
+      # 2. 配置 Python 环境（与本地 kt 环境版本一致）
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 20
-          cache: 'npm' # 缓存依赖，加速后续运行
-      # 安装 commitlint 依赖（兼容无 package.json 场景，兜底）
-      - name: Install CommitLint Dependencies
+          python-version: "3.10"
+          cache: 'pip'
+
+      # 3. 安装依赖（pre-commit + commitizen，适配你的配置）
+      - name: Install dependencies
         run: |
-          if [ ! -f "package.json" ]; then
-            npm init -y && npm install @commitlint/cli @commitlint/config-conventional --save-dev
-          else
-            npm install
-          fi
-      # 执行 CommitLint 校验（适配 PR/push 不同场景）
-      - name: Run CommitLint
+          pip install pre-commit commitizen==3.27.0
+          # 验证依赖安装
+          pre-commit --version
+          cz --version
+
+      # 4. 执行提交信息校验（适配 commitizen + 自定义钩子）
+      - name: Run commit validation (commitizen + custom check)
         run: |
+          # 定义通用校验函数：校验单个提交的信息
+          validate_single_commit() {
+            local commit_hash=$1
+            local commit_msg_file=$(mktemp)
+            
+            # 导出提交信息到临时文件（模拟 commit-msg 阶段的文件输入）
+            git log -1 --format=%B $commit_hash > $commit_msg_file
+            
+            echo "🔍 校验提交 $commit_hash 的信息..."
+            
+            # 第一步：执行 commitizen 校验（核心规则，对应 pyproject.toml）
+            if ! pre-commit run commitizen --hook-stage commit-msg --commit-msg-filename $commit_msg_file; then
+              echo "❌ 提交 $commit_hash 不符合 Conventional Commits 规范（commitizen 校验失败）"
+              rm -f $commit_msg_file
+              exit 1
+            fi
+            
+            # 第二步：执行本地自定义钩子（check-breaking-exp，对应你的 local 钩子）
+            if ! pre-commit run check-breaking-exp --hook-stage commit-msg --commit-msg-filename $commit_msg_file; then
+              echo "❌ 提交 $commit_hash 不符合 BREAKING-EXP 规则（自定义校验失败）"
+              rm -f $commit_msg_file
+              exit 1
+            fi
+            
+            rm -f $commit_msg_file
+            echo "✅ 提交 $commit_hash 校验通过"
+          }
+
+          # 定义批量校验函数：遍历指定提交范围
+          validate_commits_range() {
+            local from_commit=$1
+            local to_commit=$2
+            
+            # 遍历提交范围的所有 commit hash
+            git log --format=%H $from_commit..$to_commit | while read -r commit_hash; do
+              validate_single_commit $commit_hash
+              if [ $? -ne 0 ]; then
+                exit 1
+              fi
+            done
+          }
+
+          # 适配 PR/push 场景（与原有逻辑完全一致）
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            # PR 场景：校验本次 PR 所有提交
-            npx commitlint --from=origin/main --to=HEAD --verbose
+            # PR 场景：校验 origin/main 到 HEAD 的所有提交
+            validate_commits_range origin/main HEAD
           else
             # Push 场景：校验最近提交（兼容首次提交）
             COMMIT_RANGE="HEAD~1..HEAD"
             if ! git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
               COMMIT_RANGE="HEAD"
             fi
-            npx commitlint --from=${COMMIT_RANGE%..*} --to=${COMMIT_RANGE#*..} --verbose
+            validate_commits_range ${COMMIT_RANGE%..*} ${COMMIT_RANGE#*..}
           fi
+
+          echo "🎉 所有提交信息均符合规范（commitizen + 自定义规则）"
