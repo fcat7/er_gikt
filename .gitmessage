@@ -1,0 +1,18 @@
+# <type>(<scope>): <subject> (首行≤50字符, 动词开头, 勿用句号)
+# 类型: feat, fix, docs, style, refactor, perf, test, chore, revert
+# 标记: 破坏性变更请在类型后加 "!" (如 feat!)
+# ------------------ 必填 Header ------------------
+# 示例: feat(model): 引入CognitiveRNN记忆模块
+# ------------------ Body (选填) ------------------
+
+# [🔴 BREAKING] / [🟡 CHANGE] / [🟢 SAFE] (视觉标记必须放在此行)
+# 动机: 为什么要做这个改动？（科研场景需说明实验/论文需求）
+# 实现: 简要描述实现逻辑（核心代码/算法变更）
+# 影响: 对实验结果/性能的影响（需关联实验ID）
+
+# ----------------- Footer (选填) -----------------
+# EXP: #15, #20 (关联实验ID，带🔴/🟡标记必填)
+# PAPER: TABLE2, CAMERA-READY (关联论文模块/阶段)
+# VALIDATE: RTX4050验证通过，速度提升20% (验证结果)
+# Closes: #42 (关闭的Issue号)
+# BREAKING CHANGE: 描述不兼容变更（仅破坏性提交填写）
