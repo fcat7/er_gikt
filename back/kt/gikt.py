@@ -86,8 +86,6 @@ class GIKT(Module):
         self.model_name = "gikt" #  模型名称设置
         self.num_question = num_question #  问题数量设置
         self.num_skill = num_skill #  技能数量设置
-        self.q_neighbors = q_neighbors #  问题邻居数量设置
-        self.s_neighbors = s_neighbors #  技能邻居数量设置
         self.agg_hops = agg_hops #  聚合跳跃层数设置
         self.qs_table = qs_table #  问题-技能关系表设置
         self.emb_dim = emb_dim #  嵌入维度设置
@@ -97,6 +95,12 @@ class GIKT(Module):
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
         self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
+
+        # 将邻居表预加载到计算设备上，以便重复使用/缓存
+        self.register_buffer('q_neighbors_t', torch.as_tensor(q_neighbors, dtype=torch.long, device=DEVICE))
+        self.register_buffer('s_neighbors_t', torch.as_tensor(s_neighbors, dtype=torch.long, device=DEVICE))
+        self.q_neighbor_size = self.q_neighbors_t.shape[1]
+        self.s_neighbor_size = self.s_neighbors_t.shape[1]
 
         # @add_fzq: GAT 相关初始化
         if self.agg_method == 'gat':
@@ -196,11 +200,22 @@ class GIKT(Module):
         # response_time: [batch_size, seq_len] (可选)
         # 每一个在forward中new出来的tensor都要.to(DEVICE)
         batch_size, seq_len = question.shape # batch_size表示多少个用户, seq_len表示每个用户最多回答了多少个问题
-        q_neighbor_size, s_neighbor_size = self.q_neighbors.shape[1], self.s_neighbors.shape[1]
+        q_neighbor_size, s_neighbor_size = self.q_neighbor_size, self.s_neighbor_size
         h1_pre = torch.nn.init.xavier_uniform_(torch.zeros(self.emb_dim, device=DEVICE).repeat(batch_size, 1)) #  使用Xavier初始化方法创建两个全零的嵌入向量，并重复batch_size次
         h2_pre = torch.nn.init.xavier_uniform_(torch.zeros(self.emb_dim, device=DEVICE).repeat(batch_size, 1))
         state_history = torch.zeros(batch_size, seq_len, self.emb_dim, device=DEVICE) #  初始化状态历史记录和预测结果张量
         y_hat = torch.zeros(batch_size, seq_len, device=DEVICE)
+
+        # 在每个时间步中预先计算多跳邻居关系，以避免在每次循环中重新构建图结构
+        node_neighbors_cache = [question]
+        cache_curr = question
+        for hop in range(self.agg_hops):
+            if hop % 2 == 0:
+                cache_next = self.q_neighbors_t[cache_curr]
+            else:
+                cache_next = self.s_neighbors_t[cache_curr]
+            node_neighbors_cache.append(cache_next)
+            cache_curr = cache_next
         for t in range(seq_len - 1): # 第t时刻
             question_t = question[:, t] #  取出所有学生在第 t 个时间步所做的题目ID
             response_t = response[:, t] #  取出所有学生在第 t 个时间步所做的题目ID的回答结果
@@ -211,17 +226,7 @@ class GIKT(Module):
             emb_response_t = self.emb_table_response(response_t) # [batch_size, emb_dim]
             # GNN获得习题的embedding
             # question_t[mask_t]：这是 PyTorch 中的布尔索引操作，它会返回 question_t 中对应 mask_t 为 True 的位置的所有元素。
-            node_neighbors = [question_t[mask_t]] # 当前节点的邻居节点列表,[自己, 第一跳节点, 第二跳节点...]
-            _batch_size = len(node_neighbors[0]) # 当前的批量, 不一定是设定好的批量。得到当前步的真实有效样本数。
-            for i in range(self.agg_hops):
-                nodes_current = node_neighbors[-1].reshape(-1) # 当前正在遍历的node(上次新添加的邻居)
-                # nodes_current = nodes_current.reshape(-1)
-                neighbor_shape = [_batch_size] + [(q_neighbor_size if j % 2 == 0 else s_neighbor_size) for j in range(i + 1)]
-                # [t时刻问题数量, q_neighbor_size, s_neighbor_size, q_neighbor_size, ...]
-                if i % 2 == 0: # 找知识点节点
-                    node_neighbors.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
-                else: # 找习题节点
-                    node_neighbors.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
+            node_neighbors = [level[mask_t, t] for level in node_neighbors_cache] # 当前节点的邻居节点列表,[自己, 第一跳节点, 第二跳节点...]
             emb_node_neighbor = [] # 每层邻居(问题或者知识点)的嵌入向量,形状为node_neighbor.shape + [emb_dim]
             for i, nodes in enumerate(node_neighbors):
                 if i % 2 == 0: # 问题索引->问题向量
@@ -303,17 +308,7 @@ class GIKT(Module):
             if self.recap_source == 'hsei':
                 # [Case: HSEI] 需要特征对齐，执行图聚合
                 # 1. 构建 q_next 的多跳邻居图
-                node_neighbors_next = [q_next] # 初始节点
-                _batch_size_next = len(node_neighbors_next[0])
-                
-                for i in range(self.agg_hops):
-                    nodes_current = node_neighbors_next[-1].reshape(-1)
-                    neighbor_shape = [_batch_size_next] + [(q_neighbor_size if j % 2 == 0 else s_neighbor_size) for j in range(i + 1)]
-                    
-                    if i % 2 == 0: 
-                        node_neighbors_next.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
-                    else: 
-                        node_neighbors_next.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
+                node_neighbors_next = [level[:, t + 1] for level in node_neighbors_cache] # 初始节点
                 
                 # 2. 转换为 Embedding 并聚合
                 emb_node_neighbor_next = []
@@ -451,11 +446,11 @@ class GIKT(Module):
         for i in range(self.agg_hops):
             for j in range(self.agg_hops - i):
                 if self.agg_method == 'gat':
-                     if node_neighbors is None:
-                         raise ValueError("GAT requires node_neighbors indices")
-                     nodes_self = node_neighbors[j] 
-                     nodes_neighbor = node_neighbors[j+1]
-                     emb_node_neighbor[j] = self.gat_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], nodes_self, nodes_neighbor, j)
+                    if node_neighbors is None:
+                        raise ValueError("GAT requires node_neighbors indices")
+                    nodes_self = node_neighbors[j] 
+                    nodes_neighbor = node_neighbors[j+1]
+                    emb_node_neighbor[j] = self.gat_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], nodes_self, nodes_neighbor, j)
                 else:
                     emb_node_neighbor[j] = self.sum_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], j)
         
@@ -543,19 +538,29 @@ class GIKT(Module):
         # 硬选择, 直接在q_history中选出与q_next有相同技能的问题
         # q_next: [batch_size, 1], q_history: [batch_size, t-1]
         batch_size = q_next.shape[0]
-        q_neighbor_size, s_neighbor_size = self.q_neighbors.shape[1], self.s_neighbors.shape[1] #  获取Q邻居和S邻居的大小，即每个问题/技能的邻居数量
-        q_next = q_next.reshape(-1) #  将q_next重塑为一维数组，便于后续索引操作
-        # 获取与当前问题相关的技能列表
-        skill_related = self.q_neighbors[q_next].reshape((batch_size, q_neighbor_size)).reshape(-1) 
-        # 获取与当前问题相关的技能对应的问题列表
-        q_related = self.s_neighbors[skill_related].reshape((batch_size, q_neighbor_size * s_neighbor_size)).tolist() #  获取与当前问题相关的问题列表，并转换为Python列表
-        time_select = [[] for _ in range(batch_size)] #  初始化一个列表，用于存储每个用户的相关时间点
-        for row in range(batch_size): #  遍历批次中的每个用户
-            key = q_history[row].tolist() # 该用户的回答过的问题列表
-            query = q_related[row] # 与该用户的当前问题相关的问题列表
-            for t, k in enumerate(key): #  遍历用户的历史回答记录
-                if k in query: #  检查历史问题是否在相关问题列表中
-                    time_select[row].append(t) #  如果是，则记录该时间点
+        q_next = q_next.reshape(-1)
+
+        # 1. 获取与当前问题相关的技能和对应的候选问题集合
+        skill_related = self.q_neighbors_t[q_next]  # [batch, q_neighbor_size]
+        q_related = self.s_neighbors_t[skill_related].reshape(batch_size, -1)  # [batch, q_neighbor_size * s_neighbor_size]
+
+        # 2.1 扩展历史问题维度以支持广播
+        history_expanded = q_history.unsqueeze(-1)  # [batch, history_len, 1]
+        # 2.2 扩展候选问题维度
+        related_expanded = q_related.unsqueeze(1)   # [batch, 1, num_related]
+
+        # 2.3 广播比较：生成匹配矩阵
+        matches = history_expanded.eq(related_expanded)
+        # 2.4 检查有效历史：排除填充值
+        valid_history = q_history.ne(0)  # 避免填充位被误选
+        match_any = matches.any(dim=-1) & valid_history
+
+        # 3. 提取结果 - 从布尔矩阵中获取匹配的时间索引
+        rows, cols = torch.nonzero(match_any, as_tuple=True)
+        time_select = [[] for _ in range(batch_size)]
+        rows_list, cols_list = rows.tolist(), cols.tolist()
+        for r, c in zip(rows_list, cols_list):
+            time_select[r].append(int(c))
         return time_select #  返回每个用户的相关时间点列表
 
     def recap_soft(self, rank_k=10):
