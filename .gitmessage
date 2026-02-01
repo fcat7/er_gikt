@@ -1,4 +1,4 @@
-# <type>(<scope>): <subject> (首行≤50字符, 动词开头, 勿用句号)
+<type>(<scope>): <subject> (首行≤50字符, 动词开头, 勿用句号)
 
 # 类型: feat, fix, docs, style, refactor, perf, test, chore, revert
 # 标记: 破坏性变更请在类型后加 "!" (如 feat!)
