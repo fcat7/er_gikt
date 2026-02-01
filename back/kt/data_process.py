@@ -1,7 +1,7 @@
 import sys
 import os
 import pandas as pd
-from config import Config, MIN_SEQ_LEN, RANDOM_SEED
+from config import Config, RANDOM_SEED
 try:
     from icecream import ic
 except ImportError:

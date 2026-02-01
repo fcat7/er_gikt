@@ -7,7 +7,7 @@ import toml
 class CommonParams:
     min_seq_len: int = 20
     max_seq_len: int = 200
-    num_workers: int = 2
+    num_workers: int = 0  # Windows下建议设为0，避免多进程启动开销(spawn overhead)；Mac/Linux可设为2或4
     test_ratio: float = 0.2
     random_seed: int = 42
 
