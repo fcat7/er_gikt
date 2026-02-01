@@ -53,6 +53,8 @@ def get_exp_config_path(isFull=False, name='default'):
     return f"config/experiments/exp_{'full' if isFull else 'sample'}_{name}.toml"
 
 # 使用方法
+# Windows PowerShell 禁用 GPU
+# $env:CUDA_VISIBLE_DEVICES = "-1"  
 # python train_test.py 
 # python train_test.py --full
 # python train_test.py --agg_method gat
@@ -62,7 +64,7 @@ if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
 
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 方便调试 CUDA 错误
+    # os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # ⚠️ 仅用于调试，会大幅降低性能！正常训练时应注释掉
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 1. 解决时区问题：强制使用 UTC+8 (北京时间)
@@ -85,6 +87,10 @@ if __name__ == '__main__':
 
     print(f"Using dataset: {dataset_name}, Data dir: {config.PROCESSED_DATA_DIR}\n")
     print(f"Using experiment config: {exp_config_path}\n")
+    
+    # 打印当前使用的设备的名称 get_device_name
+    print(f"Using device: {torch.cuda.is_available() and torch.cuda.get_device_name(0) or 'cpu'}\n")
+    
 
     # 打印并写超参数
     output_file.write(str(params) + '\n')
@@ -199,14 +205,14 @@ if __name__ == '__main__':
                 # x, y_target, mask = data[:, :, 0].to(DEVICE), data[:, :, 1].to(DEVICE), data[:, :, 2].to(torch.bool).to(DEVICE)
                 # y_hat = model(x, y_target, mask) # 原始代码
                 # --------------------------------------------
-
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # 解包数据：[batch, seq, 5] -> x, y, mask, interval, response
-                x = data[:, :, 0].to(torch.long).to(DEVICE)
-                y_target = data[:, :, 1].to(torch.long).to(DEVICE)
-                mask = data[:, :, 2].to(torch.bool).to(DEVICE)
-                interval_time = data[:, :, 3].to(torch.float32).to(DEVICE)
-                response_time = data[:, :, 4].to(torch.float32).to(DEVICE)
+                # 批量转移到 GPU（单次 PCIe）
+                data_gpu = data.to(DEVICE)
+                # 在 GPU 上切片和类型转换（GPU 内操作，无开销）
+                x = data_gpu[:, :, 0].to(torch.long)
+                y_target = data_gpu[:, :, 1].to(torch.long)
+                mask = data_gpu[:, :, 2].to(torch.bool)
+                interval_time = data_gpu[:, :, 3].to(torch.float32)
+                response_time = data_gpu[:, :, 4].to(torch.float32)
 
                 # @add_fzq 2026-01-08: 输入数据 NaN 运行时检查与清洗
                 # 必须步骤：防止 data/assist09/*.npy 中存在的 NaN 导致训练崩溃
@@ -275,12 +281,15 @@ if __name__ == '__main__':
 
                 # ---------------- 新增时间特征 ----------------
                 # -- add_fzq 2025-12-25 17:15:13-----------------
-                # 解包数据：[batch, seq, 5] -> x, y, mask, interval, response
-                x = data[:, :, 0].to(torch.long).to(DEVICE)
-                y_target = data[:, :, 1].to(torch.long).to(DEVICE)
-                mask = data[:, :, 2].to(torch.bool).to(DEVICE)
-                interval_time = data[:, :, 3].to(torch.float32).to(DEVICE)
-                response_time = data[:, :, 4].to(torch.float32).to(DEVICE)
+                # 批量转移到 GPU（单次 PCIe）
+                data_gpu = data.to(DEVICE)
+
+                # 在 GPU 上切片和类型转换（GPU 内操作，无开销）
+                x = data_gpu[:, :, 0].to(torch.long)
+                y_target = data_gpu[:, :, 1].to(torch.long)
+                mask = data_gpu[:, :, 2].to(torch.bool)
+                interval_time = data_gpu[:, :, 3].to(torch.float32)
+                response_time = data_gpu[:, :, 4].to(torch.float32)
             
                 # @add_fzq 2026-01-08: 测试集同样需要 NaN 检查
                 if torch.isnan(interval_time).any():
@@ -322,7 +331,7 @@ if __name__ == '__main__':
                             batch_auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
                             print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {batch_auc:.4f} (Batch)')
                         except ValueError:
-                             pass
+                            pass
                 else:
                     try:
                         auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
@@ -347,12 +356,12 @@ if __name__ == '__main__':
             run_time = time1 - time0
             print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s' + COLOR_LOG_END)
             # 保存输出至本地文件
             output_file.write(f'  fold {fold+1} | ')
             output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}\n         | ')
             output_file.write(f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f} | ')
-            output_file.write(f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s\n')
+            output_file.write(f'time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s\n')
             # 保存至数组，之后用matplotlib画图
             y_label_all[0][fold], y_label_all[1][fold], y_label_all[2][fold] = test_loss, test_acc, test_auc
 
