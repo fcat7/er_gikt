@@ -183,10 +183,17 @@ if __name__ == '__main__':
                 train_loader = DataLoader(train_set, batch_size=batch_size)  # 训练数据加载器
                 test_loader = DataLoader(test_set, batch_size=batch_size)  # 测试数据加载器
             else:  # Gpu(服务器)
-                train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=params.common.num_workers,
-                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
-                test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=params.common.num_workers,
-                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
+                # @fix_fzq: prefetch_factor only works with num_workers > 0
+                loader_kwargs = {
+                    'batch_size': batch_size,
+                    'num_workers': params.common.num_workers,
+                    'pin_memory': True
+                }
+                if params.common.num_workers > 0:
+                    loader_kwargs['prefetch_factor'] = params.train.prefetch_factor
+                
+                train_loader = DataLoader(train_set, **loader_kwargs)
+                test_loader = DataLoader(test_set, **loader_kwargs)
             train_data_len, test_data_len = len(train_set), len(test_set)
             # @delete_fzq 2025-12-23 22:10:41
             #  print('===================' + COLOR_LOG_Y + f'epoch: {epoch_total + 1}'+ COLOR_LOG_END + '====================')
