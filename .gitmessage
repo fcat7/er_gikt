@@ -1,6 +1,7 @@
 <type>(<scope>): <subject> (首行≤50字符, 动词开头, 勿用句号)
 
 # 类型: feat, fix, docs, style, refactor, perf, test, chore, revert
+# 范围：model, data, train, eval, infra, config, experiment, docs, deps
 # 标记: 破坏性变更请在类型后加 "!" (如 feat!)
 # ------------------ 必填 Header ------------------
 # 示例: feat(model): 引入CognitiveRNN记忆模块

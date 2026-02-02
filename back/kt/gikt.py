@@ -185,6 +185,14 @@ class GIKT(Module):
         # 公式10中的W
         self.MLP_W = Linear(2 * emb_dim, 1)
 
+        # @add_fzq: Differential GIKT Architecture (Path 2)
+        # 1. 静态难度基准 (Common Mode): 每个题目一个难度偏置 (V-)
+        self.difficulty_bias = Embedding(num_question, 1)
+        torch.nn.init.constant_(self.difficulty_bias.weight, 0.0) # 初始化为0
+        
+        # 2. 判别增益 (Discrimination Gain): 放大差模信号 (Ability - Difficulty)
+        self.discrimination_gain = torch.nn.Parameter(torch.tensor(1.0))
+
         # @add_fzq: TF Alignment - Initialize weights if enabled
         if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
             self.reset_parameters()
@@ -375,7 +383,7 @@ class GIKT(Module):
             # 第一个问题, 无需寻找历史问题, 直接预测
             if t == 0:
                 y_hat[:, 0] = 0.5 # 第一个问题默认0.5的正确率
-                y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1))
+                y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1), q_target=q_next)
                 continue
             # recap硬选择历史问题
             if self.hard_recap:
@@ -418,7 +426,7 @@ class GIKT(Module):
                     _, indices = torch.topk(product_score, k=self.rank_k, dim=1)
                     select_history = torch.cat(tuple(state_history[i][indices[i]].unsqueeze(dim=0) for i in range(batch_size)), dim=0)
                     current_history_state = torch.cat((current_state, select_history), dim=1)
-            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state)
+            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next)
             
             # --- Update History State ---
             if self.recap_source == 'hsei':
@@ -567,9 +575,10 @@ class GIKT(Module):
         # 软选择
         pass
 
-    def predict(self, qs_concat, current_history_state):
+    def predict(self, qs_concat, current_history_state, q_target=None):
         # qs_concat: [batch_size, num_qs, dim_emb]
         # current_history_state: [batch_size, num_state, dim_emb]
+        # q_target: [batch_size] (Optional, for Differential GIKT)
         # 1. 计算原始相关性
         output_g = torch.bmm(qs_concat, torch.transpose(current_history_state, 1, 2)) # 计算待预测题目（及关联知识点）与每个历史状态的原始点积分数
         num_qs, num_state = qs_concat.shape[1], current_history_state.shape[1]
@@ -586,14 +595,34 @@ class GIKT(Module):
         # 3. 加权聚合与预测
         # 用注意力权重 alpha 对原始相关性分数 output_g 进行加权求和，得到一个综合得分
         p = torch.sum(torch.sum(alpha * output_g, dim=1), dim=1)  # [batch_size, 1]
+        p = torch.squeeze(p, dim=-1) # [batch_size]
+
+        # @add_fzq: Path 2 Differential Logic
+        if q_target is not None:
+            # [Backward Compatibility] 
+            # Check if model has differential components (for loading old models without crashing)
+            if hasattr(self, 'difficulty_bias') and hasattr(self, 'discrimination_gain'):
+                # 获取共模难度 (V-)
+                # q_target shape [batch_size]. difficulty shape [batch_size, 1] -> squeeze -> [batch_size]
+                difficulty = torch.squeeze(self.difficulty_bias(q_target), dim=-1) 
+                
+                # @add_fzq: Regularization Constraint (Fix for Gain Explosion)
+                # 限制 Gain 在 [0.1, 3.0] 之间，防止过度放大噪声
+                # 限制 Difficulty 避免极端值
+                gain_clamped = torch.clamp(self.discrimination_gain, 0.1, 3.0)
+                
+                # 差分放大: Logits = Gain * (Ability - Difficulty)
+                # 这里的 p 代表 Student Ability State (V+)
+                p = gain_clamped * (p - difficulty)
+            # else: Fallback to standard GIKT (do nothing to p)
         
         # @add_fzq: TF Alignment
         if self.enable_tf_alignment:
             # Case 1: Return Logits (No Sigmoid) to use with BCEWithLogitsLoss
-            result = torch.squeeze(p, dim=-1)
+            result = p
         else:
             # Case 2: Return Probabilities (Sigmoid) (Original behavior)
-            result = torch.sigmoid(torch.squeeze(p, dim=-1)) 
+            result = torch.sigmoid(p) 
         
         return result
 

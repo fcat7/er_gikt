@@ -59,6 +59,7 @@ def get_exp_config_path(isFull=False, name='default'):
 # python train_test.py --full
 # python train_test.py --agg_method gat
 # python train_test.py --name my_exp
+# python train_test.py --name mc_optim_a
 if __name__ == '__main__':
 
     parser = get_parser()
@@ -242,6 +243,14 @@ if __name__ == '__main__':
                     
                     y_prob = y_hat # Already probabilities
                 
+                # @add_fzq: Regularization Constraint (Option A)
+                # 防止 Differential Gain 爆炸：添加 L2 正则化项
+                # 如果模型包含 discrimination_gain 参数
+                if hasattr(model, 'discrimination_gain'):
+                    # 系数 0.01 是经验值，旨在施加轻微约束
+                    reg_loss = 0.01 * (model.discrimination_gain ** 2)
+                    loss += reg_loss
+
                 train_loss += loss.item()
                 
                 # 计算acc
@@ -399,6 +408,6 @@ if __name__ == '__main__':
 
     output_file.close()
 
-    # torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+    torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
