@@ -186,12 +186,27 @@ class GIKT(Module):
         self.MLP_W = Linear(2 * emb_dim, 1)
 
         # @add_fzq: Differential GIKT Architecture (Path 2)
-        # 1. 静态难度基准 (Common Mode): 每个题目一个难度偏置 (V-)
+        # 1. 静态难度基准 (Common Mode): 层次化难度建模
+        # (1) 题目级难度偏置: 捕捉题目特有的细微难度差异
         self.difficulty_bias = Embedding(num_question, 1)
-        torch.nn.init.constant_(self.difficulty_bias.weight, 0.0) # 初始化为0
+        torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
         
-        # 2. 判别增益 (Discrimination Gain): 放大差模信号 (Ability - Difficulty)
-        self.discrimination_gain = torch.nn.Parameter(torch.tensor(1.0))
+        # (2) 知识点级难度偏置 (Hierarchical Step 2): 
+        # 用于抑制题目稀疏性带来的噪声，为关联同一知识点的题目提供稳健的共模难度基准
+        self.skill_difficulty_bias = Embedding(num_skill, 1)
+        torch.nn.init.constant_(self.skill_difficulty_bias.weight, 0.0)
+        
+        # 2. 区分度 (Discrimination): a_q (Step 3: 4PL 升级为题目级参数)
+        # 初始化为 0，后期配合 softplus(x) + 1.0 得到约为 1.69 的初始区分度
+        self.discrimination_bias = Embedding(num_question, 1)
+        torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
+        
+        # 3. 猜测率 (Guessing) c_q 与 失误率 (Slipping) d_q: 噪声吸收器
+        # 使用较大的负数初始化，使得初始状态下 c_q 约为 0.05, d_q 约为 0.02
+        self.guessing_bias = Embedding(num_question, 1)
+        self.slipping_bias = Embedding(num_question, 1)
+        torch.nn.init.constant_(self.guessing_bias.weight, -3.0)
+        torch.nn.init.constant_(self.slipping_bias.weight, -4.0)
 
         # @add_fzq: TF Alignment - Initialize weights if enabled
         if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
@@ -598,31 +613,60 @@ class GIKT(Module):
         p = torch.squeeze(p, dim=-1) # [batch_size]
 
         # @add_fzq: Path 2 Differential Logic
+        is_4pl = False
         if q_target is not None:
-            # [Backward Compatibility] 
-            # Check if model has differential components (for loading old models without crashing)
-            if hasattr(self, 'difficulty_bias') and hasattr(self, 'discrimination_gain'):
-                # 获取共模难度 (V-)
-                # q_target shape [batch_size]. difficulty shape [batch_size, 1] -> squeeze -> [batch_size]
-                difficulty = torch.squeeze(self.difficulty_bias(q_target), dim=-1) 
+            # [Backward Compatibility Check]
+            if hasattr(self, 'difficulty_bias'):
+                # 1. 获取题目级基础难度 (Question-specific Difficulty)
+                q_diff = torch.squeeze(self.difficulty_bias(q_target), dim=-1) 
                 
-                # @add_fzq: Regularization Constraint (Fix for Gain Explosion)
-                # 限制 Gain 在 [0.1, 3.0] 之间，防止过度放大噪声
-                # 限制 Difficulty 避免极端值
-                gain_clamped = torch.clamp(self.discrimination_gain, 0.1, 3.0)
+                # 2. 获取知识点级共性难度 (Hierarchical Step 2)
+                if hasattr(self, 'skill_difficulty_bias'):
+                    related_mask = self.qs_table[q_target].to(torch.float32)
+                    s_diff_sum = torch.matmul(related_mask, self.skill_difficulty_bias.weight).squeeze(-1)
+                    s_count = torch.sum(related_mask, dim=1)
+                    s_diff_avg = s_diff_sum / (s_count + 1e-8)
+                    difficulty = q_diff + s_diff_avg
+                else:
+                    difficulty = q_diff
                 
-                # 差分放大: Logits = Gain * (Ability - Difficulty)
-                # 这里的 p 代表 Student Ability State (V+)
-                p = gain_clamped * (p - difficulty)
-            # else: Fallback to standard GIKT (do nothing to p)
+                # 3. 引入判别度、猜测率与失误率 (Step 3: 4PL Model)
+                if hasattr(self, 'discrimination_bias') and hasattr(self, 'guessing_bias'):
+                    is_4pl = True
+                    # a_q (Discrimination): 区分度，必须为正。使用 softplus 确保平滑且 > 0
+                    a_q = 1.0 + F.softplus(torch.squeeze(self.discrimination_bias(q_target), dim=-1))
+                    
+                    # c_q (Guessing): 猜测率，通常在 [0, 0.25] 之间
+                    c_q = 0.25 * torch.sigmoid(torch.squeeze(self.guessing_bias(q_target), dim=-1))
+                    
+                    # d_q (Slipping): 失误率，通常在 [0, 0.1] 之间
+                    d_q = 0.1 * torch.sigmoid(torch.squeeze(self.slipping_bias(q_target), dim=-1))
+                    
+                    # 4PL 核心预测公式: P = c + (1 - c - d) * sigmoid(a * (theta - b))
+                    # 此处 p 作为注意力聚合后的能力值 theta (Student Ability)
+                    logits = a_q * (p - difficulty)
+                    p_base = torch.sigmoid(logits)
+                    p_final = c_q + (1.0 - c_q - d_q) * p_base
+                    
+                    if self.enable_tf_alignment:
+                        # 为了兼容 BCEWithLogitsLoss，将概率反向映射回 logit：L = log(p/(1-p))
+                        p_final = torch.clamp(p_final, 1e-7, 1.0 - 1e-7)
+                        p = torch.log(p_final / (1.0 - p_final))
+                    else:
+                        p = p_final
+                else:
+                    # Fallback to Step 1/2: 使用全局判别增益 (Discrimination Gain)
+                    gain = getattr(self, 'discrimination_gain', torch.tensor(1.0))
+                    gain_clamped = torch.clamp(gain, 0.1, 3.0)
+                    p = gain_clamped * (p - difficulty)
         
-        # @add_fzq: TF Alignment
+        # @add_fzq: Output Alignment
         if self.enable_tf_alignment:
-            # Case 1: Return Logits (No Sigmoid) to use with BCEWithLogitsLoss
+            # 返回 Logits (或经映射的伪 Logits) 给 BCEWithLogitsLoss
             result = p
         else:
-            # Case 2: Return Probabilities (Sigmoid) (Original behavior)
-            result = torch.sigmoid(p) 
+            # 4PL 逻辑下 p 已经是最终概率，非 4PL 则补充 Sigmoid
+            result = p if is_4pl else torch.sigmoid(p) 
         
         return result
 

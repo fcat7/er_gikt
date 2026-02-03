@@ -250,13 +250,17 @@ if __name__ == '__main__':
                     
                     y_prob = y_hat # Already probabilities
                 
-                # @add_fzq: Regularization Constraint (Option A)
-                # 防止 Differential Gain 爆炸：添加 L2 正则化项
-                # 如果模型包含 discrimination_gain 参数
+                # @add_fzq: Regularization Constraint (Path 2 & 3)
+                # 防止区分度参数爆炸。对于 Step 2 (scalar)，约束其趋近 0(即gain=1)；
+                # 对于 Step 3 (Embedding)，约束整个表。
+                reg_loss = 0.0
                 if hasattr(model, 'discrimination_gain'):
-                    # 系数 0.01 是经验值，旨在施加轻微约束
-                    reg_loss = 0.01 * (model.discrimination_gain ** 2)
-                    loss += reg_loss
+                    reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                if hasattr(model, 'discrimination_bias'):
+                    # 区分度偏差项的 L2 正则，系数选小一点以免抑制判别能力的学习
+                    reg_loss += 1e-5 * torch.sum(model.discrimination_bias.weight ** 2)
+                
+                loss += reg_loss
 
                 train_loss += loss.item()
                 
