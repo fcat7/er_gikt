@@ -260,9 +260,14 @@ class GIKT(Module):
             # @mod_fzq: GAT requires node_neighbors indices
             emb0_question_t, _ = self.aggregate(emb_node_neighbor, node_neighbors) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
             
-            emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE) #  初始化一个全零的张量，形状为(batch_size, self.emb_dim)，并指定设备为DEVICE
-            emb_question_t[mask_t] = emb0_question_t #  将emb0_question_t的值赋给emb_question_t中mask_t为True的位置
-            emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]) #  对于emb_question_t中mask_t为False的位置，使用emb_table_question查找question_t中对应位置的嵌入向量
+            # @fix_fzq: AMP FP16 Mismatch Fix
+            # emb0_question_t 在 autocast 模式下会变成 float16，而 emb_question_t 初始化为 float32
+            # 必须显式统一数据类型
+            dtype = emb0_question_t.dtype
+            emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE, dtype=dtype)
+            
+            emb_question_t[mask_t] = emb0_question_t
+            emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]).to(dtype) # Ensure fallback also matches
             
             # ----------------------------------------------------
             # @add_fzq v5 optimization: Feature Transform
@@ -312,16 +317,10 @@ class GIKT(Module):
             # 找t+1时刻的[习题]以及[其对应的知识点]
             q_next = question[:, t + 1] # [batch_size, ]
             skills_related = self.qs_table[q_next] # [batch_size, num_skill]
-            skills_related_list = [] # [[num_skill1, emb_dim], [num_skill2, emb_dim], ...]
-            max_num_skill = 1 # 求一个问题的最多关联的技能的数量
-            for i in range(batch_size):
-                skills_index = torch.nonzero(skills_related[i]).squeeze()
-                if len(skills_index.shape) == 0: # 只有一个技能
-                    skills_related_list.append(torch.unsqueeze(self.emb_table_skill(skills_index), dim=0)) # [1, emb_dim]
-                else: # 不止一个技能
-                    skills_related_list.append(self.emb_table_skill(skills_index)) # [num_skill, emb_dim]
-                    if skills_index.shape[0] > max_num_skill:
-                        max_num_skill = skills_index.shape[0]
+            
+            # @opt_fzq 2026-02-04: 批量化技能嵌入获取 - 移除 Python for 循环
+            skill_mask = skills_related.bool()  # [batch_size, num_skill]
+            max_num_skill = skill_mask.sum(dim=1).max().item()  # 找到最大技能数
 
             # 将习题和对应知识点embedding拼接起来
             # --- 逻辑分支修复：仅在 hsei 模式下启用 Target 聚合，hssi 模式保持原样 ---
@@ -353,18 +352,28 @@ class GIKT(Module):
                     qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
                     use_legacy_concat = False
                 
-            else:
-                # [Case: Defaults/HSSI] 保持原代码逻辑，使用原始 Embedding
-                # (对应原代码注释：经验效果不好，不使用聚合)
-                emb_q_next = self.emb_table_question(q_next) 
-            # -------------------------------------------------------------------------
-
             if use_legacy_concat:
-                qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim).to(DEVICE) #  创建一个零张量，用于存储问题与技能的拼接嵌入 形状为: batch_size × (max_num_skill + 1) × emb_dim 并将其移动到指定设备(GPU/CPU)上
-                for i, emb_skills in enumerate(skills_related_list): # emb_skills: [num_skill, emb_dim]
-                    num_qs = 1 + emb_skills.shape[0] # 总长度为1(问题嵌入长度) + num_skill(技能嵌入长度) #  计算问题与技能拼接后的总长度，包含问题嵌入和所有技能嵌入
-                    emb_next = torch.unsqueeze(emb_q_next[i], dim=0) # [1, emb_dim] #  对下一个问题的嵌入向量进行维度扩展，从[emb_dim]变为[1, emb_dim]
-                    qs_concat[i, 0 : num_qs] = torch.cat((emb_next, emb_skills), dim=0) #  将下一个问题的嵌入和技能嵌入拼接后存入qs矩阵的相应位置 拼接后的向量长度为num_qs，从qs矩阵的第0个位置开始存储
+                # @fix_fzq: AMP Fix - qs_concat 必须与 emb_q_next (FP16/Full) 保持相同类型
+                dtype = emb_q_next.dtype if 'emb_q_next' in locals() else torch.float32
+                
+                # Check emb_q_next existence first (case HSSI)
+                if not 'emb_q_next' in locals():
+                    emb_q_next = self.emb_table_question(q_next) 
+                    dtype = emb_q_next.dtype
+                
+                # @opt_fzq 2026-02-04: 批量化 qs_concat 填充 - 优化循环结构
+                qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim, device=DEVICE, dtype=dtype)
+                # 第一列始终是问题嵌入 [batch_size, emb_dim]
+                qs_concat[:, 0, :] = emb_q_next
+                
+                # 批量获取技能嵌入：虽然仍需逐样本处理（因为每个样本关联的技能数不同）
+                # 但使用张量索引替代 Python 列表提高效率
+                for i in range(batch_size):
+                    skill_indices = torch.nonzero(skills_related[i], as_tuple=False).squeeze(dim=1)
+                    if len(skill_indices) > 0:
+                        emb_skills = self.emb_table_skill(skill_indices).to(dtype)  # [num_skill, emb_dim]
+                        num_skills = len(skill_indices)
+                        qs_concat[i, 1:1+num_skills, :] = emb_skills
 
             ####################################上述代码解释#####################################
             # qs_concat 最终变为 [batch_size, max_num_skill + 1, emb_dim] 的张量
@@ -403,8 +412,6 @@ class GIKT(Module):
             # recap硬选择历史问题
             if self.hard_recap:
                 history_time = self.recap_hard(q_next, question[:, 0:t]) # 选取哪些时刻的问题
-                selected_states = [] # 不同时刻t选择的历史状态
-                max_num_states = 1 # 求最大的历史状态数量
                 
                 # Determine "neighbor" source (retrieved items)
                 if self.recap_source == 'hsei':
@@ -412,24 +419,21 @@ class GIKT(Module):
                 else:
                     neighbor_source = lstm_output
 
+                # @opt_fzq 2026-02-04: 批量化历史状态拼接 - 使用 pad_sequence 替代逐个赋值
+                from torch.nn.utils.rnn import pad_sequence
+                
+                selected_states_list = []
                 for row, selected_time in enumerate(history_time):
-                    # Align with TF: Element 0 (Current State) is ALWAYS lstm_output
-                    # regardless of what we retrieve from history (neighbor_source)
                     current_state = torch.unsqueeze(lstm_output[row], dim=0) # [1, emb_dim]
                     
                     if len(selected_time) == 0: # 没有历史状态,直接取当前状态
-                        selected_states.append(current_state)
+                        selected_states_list.append(current_state)
                     else: # 有历史状态,将历史状态和当前状态连接起来
-                        # Retrieve neighbors from the correct source
                         selected_state = state_history[row, torch.tensor(selected_time, dtype=torch.int64)]
-                        selected_states.append(torch.cat((current_state, selected_state), dim=0))
-                        if (selected_state.shape[0] + 1) > max_num_states:
-                            max_num_states = selected_state.shape[0] + 1
-                current_history_state = torch.zeros(batch_size, max_num_states, self.emb_dim).to(DEVICE)
-                # 当前状态
-                for b, c_h_state in enumerate(selected_states):
-                    num_states = c_h_state.shape[0]
-                    current_history_state[b, 0 : num_states] = c_h_state
+                        selected_states_list.append(torch.cat((current_state, selected_state), dim=0))
+                
+                # 批量填充：pad_sequence 会自动处理不同长度的序列，避免手动逐个赋值
+                current_history_state = pad_sequence(selected_states_list, batch_first=True, padding_value=0.0).to(DEVICE)
             else: # 软选择
                 current_state = lstm_output.unsqueeze(dim=1)
                 if t <= self.rank_k:

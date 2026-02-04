@@ -17,6 +17,20 @@ from util.utils import gen_gikt_graph, build_adj_list
 import argparse
 from gikt import GIKT
 
+# @add_fzq: AMP Support
+import torch
+from torch.cuda.amp import autocast, GradScaler
+
+# 自动检测 AMP 可用性
+# P100 (Pascal) 不支持 Tensor Core 加速，但 fp16 可节省显存
+# RTX 4050 (Ada) 支持 Tensor Core，加速明显
+use_amp = torch.cuda.is_available() # 暂时全开，由 autocast 内部处理硬件兼容
+scaler = GradScaler(enabled=use_amp)
+if use_amp:
+    print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
+else:
+    print(f"⚠️ AMP Disabled")
+
 # try :
 #     from icecream import ic
 #     print = ic
@@ -224,53 +238,58 @@ if __name__ == '__main__':
                 interval_time = data_gpu[:, :, 3].to(torch.float32)
                 response_time = data_gpu[:, :, 4].to(torch.float32)
 
-                # @add_fzq 2026-01-08: 输入数据 NaN 运行时检查与清洗
-                # 必须步骤：防止 data/assist09/*.npy 中存在的 NaN 导致训练崩溃
-                if torch.isnan(interval_time).any():
-                    interval_time = torch.nan_to_num(interval_time, nan=0.0)
-                if torch.isnan(response_time).any():
-                    response_time = torch.nan_to_num(response_time, nan=0.0)
+                # @delete_fzq 2026-02-04: 移除训练循环内的 NaN 检查以加速
+                # if torch.isnan(interval_time).any():
+                #    interval_time = torch.nan_to_num(interval_time, nan=0.0)
+                # if torch.isnan(response_time).any():
+                #    response_time = torch.nan_to_num(response_time, nan=0.0)
 
-                y_hat = model(x, y_target, mask, interval_time, response_time)
-                # --------------------------------------------
-    
-                y_hat = torch.masked_select(y_hat, mask)
-                y_target = torch.masked_select(y_target, mask)
+                with autocast(enabled=use_amp):
+                    y_hat = model(x, y_target, mask, interval_time, response_time)
+                    # --------------------------------------------
+        
+                    y_hat = torch.masked_select(y_hat, mask)
+                    y_target = torch.masked_select(y_target, mask)
 
-                # @add_fzq: Logic Branch for TF Alignment (Logits vs Probs)
-                if params.model.enable_tf_alignment:
-                    # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    # @add_fzq: Logic Branch for TF Alignment (Logits vs Probs)
+                    if params.model.enable_tf_alignment:
+                        # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
+                        loss = loss_fun(y_hat, y_target.to(torch.float32))
+                        
+                        # Metrics: Convert to Probabilities
+                        y_prob = torch.sigmoid(y_hat) 
+                    else: 
+                        # Original Behavior: y_hat is probabilities (Sigmoid applied in model)
+                        # @add_fzq 2026-01-08: Clamping for BCELoss numerical stability
+                        y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
+                        loss = loss_fun(y_hat, y_target.to(torch.float32))
+                        
+                        y_prob = y_hat # Already probabilities
                     
-                    # Metrics: Convert to Probabilities
-                    y_prob = torch.sigmoid(y_hat) 
-                else: 
-                    # Original Behavior: y_hat is probabilities (Sigmoid applied in model)
-                    # @add_fzq 2026-01-08: Clamping for BCELoss numerical stability
-                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    # @add_fzq: Regularization Constraint (Path 2 & 3)
+                    # 防止区分度参数爆炸。对于 Step 2 (scalar)，约束其趋近 0(即gain=1)；
+                    # 对于 Step 3 (Embedding)，约束整个表。
+                    reg_loss = 0.0
+                    if hasattr(model, 'discrimination_gain'):
+                        reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                    if hasattr(model, 'discrimination_bias'):
+                        # 区分度正则：鼓励其靠近 1.0 (即偏差靠近 0)
+                        reg_loss += 1e-5 * torch.sum(model.discrimination_bias.weight ** 2)
                     
-                    y_prob = y_hat # Already probabilities
+                    if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                        # 猜测和失误率正则：防止它们过大
+                        # 因为 sigmoid(-3) 约等于 0.05，我们不希望这些参数漂移回 0 (0.5) 或更高
+                        # 这里限制其权重的 L2，但更重要的是限制其不要变得太大
+                        reg_loss += 1e-5 * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
+                        reg_loss += 1e-5 * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                    
+                    loss += reg_loss
                 
-                # @add_fzq: Regularization Constraint (Path 2 & 3)
-                # 防止区分度参数爆炸。对于 Step 2 (scalar)，约束其趋近 0(即gain=1)；
-                # 对于 Step 3 (Embedding)，约束整个表。
-                reg_loss = 0.0
-                if hasattr(model, 'discrimination_gain'):
-                    reg_loss += 0.01 * (model.discrimination_gain ** 2)
-                if hasattr(model, 'discrimination_bias'):
-                    # 区分度正则：鼓励其靠近 1.0 (即偏差靠近 0)
-                    reg_loss += 1e-5 * torch.sum(model.discrimination_bias.weight ** 2)
+                # @add_fzq: AMP Backward
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 
-                if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
-                    # 猜测和失误率正则：防止它们过大
-                    # 因为 sigmoid(-3) 约等于 0.05，我们不希望这些参数漂移回 0 (0.5) 或更高
-                    # 这里限制其权重的 L2，但更重要的是限制其不要变得太大
-                    reg_loss += 1e-5 * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
-                    reg_loss += 1e-5 * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
-                
-                loss += reg_loss
-
                 train_loss += loss.item()
                 
                 # 计算acc
@@ -282,8 +301,7 @@ if __name__ == '__main__':
                 # @optimize: Use probabilities (y_prob) instead of labels (y_pred) for better precision
                 auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
                 train_auc += auc * len(x) / train_data_len
-                loss.backward()
-                optimizer.step()
+                
                 train_step += 1
                 if params.train.verbose:
                     print(f'step: {train_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
@@ -321,13 +339,14 @@ if __name__ == '__main__':
                     interval_time = data_gpu[:, :, 3].to(torch.float32)
                     response_time = data_gpu[:, :, 4].to(torch.float32)
                 
-                    # @add_fzq 2026-01-08: 测试集同样需要 NaN 检查
-                    if torch.isnan(interval_time).any():
-                        interval_time = torch.nan_to_num(interval_time, nan=0.0)
-                    if torch.isnan(response_time).any():
-                        response_time = torch.nan_to_num(response_time, nan=0.0)
+                    # @delete_fzq 2026-02-04: 移除测试循环内的 NaN 检查以加速
+                    # if torch.isnan(interval_time).any():
+                    #    interval_time = torch.nan_to_num(interval_time, nan=0.0)
+                    # if torch.isnan(response_time).any():
+                    #    response_time = torch.nan_to_num(response_time, nan=0.0)
 
-                    y_hat = model(x, y_target, mask, interval_time, response_time)
+                    with autocast(enabled=use_amp):
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
                     # -- add_fzq 2025-12-25 17:15:13-----------------
                     # --------------------------------------------
                 
