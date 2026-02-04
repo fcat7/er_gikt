@@ -60,7 +60,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None, use_pid=False):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -95,6 +95,7 @@ class GIKT(Module):
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
         self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
+        self.use_pid = use_pid # 是否使用PID控制器架构
 
         # 将邻居表预加载到计算设备上，以便重复使用/缓存
         self.register_buffer('q_neighbors_t', torch.as_tensor(q_neighbors, dtype=torch.long, device=DEVICE))
@@ -208,6 +209,20 @@ class GIKT(Module):
         torch.nn.init.constant_(self.guessing_bias.weight, -3.0)
         torch.nn.init.constant_(self.slipping_bias.weight, -4.0)
 
+        # @add_fzq: PID-GIKT Controller Parameters
+        if self.use_pid:
+            # Purpose: Introduce "Momentum" (Integral) and "Acceleration" (Derivative) control for student ability
+            # ema_alpha: Decay rate for Integral term (0.1 means long-term memory dominant)
+            # pid_lambda: Scaling factor for Tanh Limiter on Derivative term
+            self.ema_alpha = 0.1
+            self.pid_lambda = 1.0
+            
+            # PID Weights (Learnable): Initialize to near-zero to prevent initial distribution shock
+            # w_pid_i: Weight for Integral term (Streak tracking)
+            # w_pid_d: Weight for Derivative term (Trend tracking)
+            self.w_pid_i = torch.nn.Parameter(torch.tensor(1e-2))
+            self.w_pid_d = torch.nn.Parameter(torch.tensor(1e-2))
+
         # @add_fzq: TF Alignment - Initialize weights if enabled
         if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
             self.reset_parameters()
@@ -228,6 +243,16 @@ class GIKT(Module):
         h2_pre = torch.nn.init.xavier_uniform_(torch.zeros(self.emb_dim, device=DEVICE).repeat(batch_size, 1))
         state_history = torch.zeros(batch_size, seq_len, self.emb_dim, device=DEVICE) #  初始化状态历史记录和预测结果张量
         y_hat = torch.zeros(batch_size, seq_len, device=DEVICE)
+
+        # @add_fzq: PID-GIKT State Initialization
+        # pid_ema: Tracks the running average of correctness (Integral Term)
+        # Initialized to 0.5 (Neutral state)
+        if self.use_pid:
+            pid_ema = torch.full((batch_size,), 0.5, device=DEVICE)
+            pid_diff = torch.zeros((batch_size,), device=DEVICE)
+        else:
+            pid_ema = None
+            pid_diff = None
 
         # 在每个时间步中预先计算多跳邻居关系，以避免在每次循环中重新构建图结构
         node_neighbors_cache = [question]
@@ -268,6 +293,22 @@ class GIKT(Module):
             
             emb_question_t[mask_t] = emb0_question_t
             emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]).to(dtype) # Ensure fallback also matches
+            
+            # ----------------------------------------------------
+            # @add_fzq: PID State Update (Integral & Derivative)
+            # ----------------------------------------------------
+            if self.use_pid:
+                # Update EMA based on current response_t.
+                # Masking check: Only update valid interactions.
+                current_response_float = response_t.float()
+                pid_ema_new = self.ema_alpha * current_response_float + (1.0 - self.ema_alpha) * pid_ema
+                
+                # Calculate Derivative (Change in state)
+                pid_diff_new = pid_ema_new - pid_ema
+                
+                # Update state with mask protection (prevent padding from skewing state)
+                pid_ema = torch.where(mask_t, pid_ema_new, pid_ema)
+                pid_diff = torch.where(mask_t, pid_diff_new, torch.zeros_like(pid_diff))
             
             # ----------------------------------------------------
             # @add_fzq v5 optimization: Feature Transform
@@ -390,7 +431,7 @@ class GIKT(Module):
             #     # 问题1关联2个技能
             #     torch.tensor([[0.11, 0.12, 0.13, 0.14],  # 技能1
             #                 [0.15, 0.16, 0.17, 0.18]]), # 技能2
-            #     # 问题2关联1个技能
+            #     # 问题2关联1个技能, pid_data=(pid_ema, pid_diff)
             #     torch.tensor([[0.21, 0.22, 0.23, 0.24]])  # 技能1
             # ]
             # # 将问题嵌入和技能嵌入拼接
@@ -408,7 +449,8 @@ class GIKT(Module):
             # 第一个问题, 无需寻找历史问题, 直接预测
             if t == 0:
                 y_hat[:, 0] = 0.5 # 第一个问题默认0.5的正确率
-                y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1), q_target=q_next)
+                pid_data = (pid_ema, pid_diff) if self.use_pid else None
+                y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1), q_target=q_next, pid_data=pid_data)
                 continue
             # recap硬选择历史问题
             if self.hard_recap:
@@ -436,6 +478,12 @@ class GIKT(Module):
                 # 批量填充：pad_sequence 会自动处理不同长度的序列，避免手动逐个赋值
                 current_history_state = pad_sequence(selected_states_list, batch_first=True, padding_value=0.0).to(DEVICE)
             else: # 软选择
+                # Determine "neighbor" source (retrieved items)
+                if self.recap_source == 'hsei':
+                    neighbor_source = recap_feature
+                else:
+                    neighbor_source = lstm_output
+
                 current_state = lstm_output.unsqueeze(dim=1)
                 if t <= self.rank_k:
                     current_history_state = torch.cat((current_state, state_history[:, 0:t]), dim=1)
@@ -446,7 +494,9 @@ class GIKT(Module):
                     _, indices = torch.topk(product_score, k=self.rank_k, dim=1)
                     select_history = torch.cat(tuple(state_history[i][indices[i]].unsqueeze(dim=0) for i in range(batch_size)), dim=0)
                     current_history_state = torch.cat((current_state, select_history), dim=1)
-            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next)
+            
+            pid_data = (pid_ema, pid_diff) if self.use_pid else None
+            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next, pid_data=pid_data)
             
             # --- Update History State ---
             if self.recap_source == 'hsei':
@@ -598,10 +648,11 @@ class GIKT(Module):
         # 软选择
         pass
 
-    def predict(self, qs_concat, current_history_state, q_target=None):
+    def predict(self, qs_concat, current_history_state, q_target=None, pid_data=None):
         # qs_concat: [batch_size, num_qs, dim_emb]
         # current_history_state: [batch_size, num_state, dim_emb]
         # q_target: [batch_size] (Optional, for Differential GIKT)
+        # pid_data: tuple(pid_ema, pid_diff) (Optional, for PID-GIKT)
         # 1. 计算原始相关性
         output_g = torch.bmm(qs_concat, torch.transpose(current_history_state, 1, 2)) # 计算待预测题目（及关联知识点）与每个历史状态的原始点积分数
         num_qs, num_state = qs_concat.shape[1], current_history_state.shape[1]
@@ -632,6 +683,25 @@ class GIKT(Module):
         # p = sum(alpha * output_g) -> [batch_size]
         p = torch.sum(alpha * output_g, dim=(1, 2)) 
 
+        # @add_fzq: PID-GIKT Bias Injection
+        # Modify Student Ability (p) with PID Control Signal
+        if pid_data is not None:
+            pid_ema_val, pid_diff_val = pid_data
+            
+            # Integral Term: Deviation from neutral (0.5), range approx [-0.5, 0.5]
+            # w_pid_i * (S_t - 0.5)
+            term_i = pid_ema_val - 0.5
+            
+            # Derivative Term: Trend direction
+            # Tanh Limiter prevents noise amplification
+            term_d = torch.tanh(self.pid_lambda * pid_diff_val)
+            
+            # Apply Bias to Student Ability (p)
+            # p represents "Theta" in IRT contexts
+            pid_bias = self.w_pid_i * term_i + self.w_pid_d * term_d
+            p = p + pid_bias
+
+        # @add_fzq: P
         # @add_fzq: Path 2 Differential Logic
         is_4pl = False
         if q_target is not None:
