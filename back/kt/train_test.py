@@ -219,6 +219,7 @@ if __name__ == '__main__':
             torch.set_grad_enabled(True) # @add_fzq: Enable grad for training
             model.train() # @add_fzq: Switch to train mode
             time0 = time.time()
+            train_start_time = time.time()
             train_step = train_loss = train_total = train_right = train_auc = 0
             # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体训练的auc
             for data in train_loader:
@@ -309,11 +310,13 @@ if __name__ == '__main__':
             train_loss_aver += train_loss
             train_acc_aver += train_acc
             train_auc_aver += train_auc
+            train_time = time.time() - train_start_time
 
             # 测试阶段，只有前向传递，没有反向传播阶段
             print('-------------------testing------------------')
             model.eval() # @add_fzq: Switch to eval mode
             test_step = test_loss = test_total = test_right = test_auc = 0
+            test_start_time = time.time()
             
             # @add_fzq: Global AUC Support
             all_y_targets = []
@@ -398,19 +401,26 @@ if __name__ == '__main__':
             test_loss_aver += test_loss
             test_acc_aver += test_acc
             test_auc_aver += test_auc
+            test_time = time.time() - test_start_time
 
             # fold总结阶段
         
             time1 = time.time()
             run_time = time1 - time0
+            train_avg_batch_time = train_time / train_step if train_step > 0 else 0.0
+            test_avg_batch_time = test_time / test_step if test_step > 0 else 0.0
             print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.2f}s' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'test  time: {test_time:.2f}s, avg batch: {test_avg_batch_time:.2f}s' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'total time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s' + COLOR_LOG_END)
             # 保存输出至本地文件
             output_file.write(f'  fold {fold+1} | ')
             output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}\n         | ')
             output_file.write(f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f} | ')
-            output_file.write(f'time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s\n')
+            output_file.write(f'train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.2f}s | ')
+            output_file.write(f'test time: {test_time:.2f}s, avg batch: {test_avg_batch_time:.2f}s | ')
+            output_file.write(f'total time: {run_time:.2f}s, average batch time: {(run_time / (test_step + train_step)):.2f}s\n')
             # 保存至数组，之后用matplotlib画图
             y_label_all[0][fold], y_label_all[1][fold], y_label_all[2][fold] = test_loss, test_acc, test_auc
 
