@@ -636,11 +636,11 @@ class GIKT(Module):
                     # a_q (Discrimination): 区分度，必须为正。使用 softplus 确保平滑且 > 0
                     a_q = 1.0 + F.softplus(torch.squeeze(self.discrimination_bias(q_target), dim=-1))
                     
-                    # c_q (Guessing): 猜测率，通常在 [0, 0.25] 之间
-                    c_q = 0.25 * torch.sigmoid(torch.squeeze(self.guessing_bias(q_target), dim=-1))
+                    # c_q (Guessing): 猜测率，收紧到 [0, 0.2]
+                    c_q = 0.2 * torch.sigmoid(torch.squeeze(self.guessing_bias(q_target), dim=-1))
                     
-                    # d_q (Slipping): 失误率，通常在 [0, 0.1] 之间
-                    d_q = 0.1 * torch.sigmoid(torch.squeeze(self.slipping_bias(q_target), dim=-1))
+                    # d_q (Slipping): 失误率，收紧到 [0, 0.05]
+                    d_q = 0.05 * torch.sigmoid(torch.squeeze(self.slipping_bias(q_target), dim=-1))
                     
                     # 4PL 核心预测公式: P = c + (1 - c - d) * sigmoid(a * (theta - b))
                     # 此处 p 作为注意力聚合后的能力值 theta (Student Ability)

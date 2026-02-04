@@ -257,8 +257,15 @@ if __name__ == '__main__':
                 if hasattr(model, 'discrimination_gain'):
                     reg_loss += 0.01 * (model.discrimination_gain ** 2)
                 if hasattr(model, 'discrimination_bias'):
-                    # 区分度偏差项的 L2 正则，系数选小一点以免抑制判别能力的学习
+                    # 区分度正则：鼓励其靠近 1.0 (即偏差靠近 0)
                     reg_loss += 1e-5 * torch.sum(model.discrimination_bias.weight ** 2)
+                
+                if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                    # 猜测和失误率正则：防止它们过大
+                    # 因为 sigmoid(-3) 约等于 0.05，我们不希望这些参数漂移回 0 (0.5) 或更高
+                    # 这里限制其权重的 L2，但更重要的是限制其不要变得太大
+                    reg_loss += 1e-5 * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
+                    reg_loss += 1e-5 * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
                 
                 loss += reg_loss
 
