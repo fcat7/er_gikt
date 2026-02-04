@@ -597,20 +597,32 @@ class GIKT(Module):
         # 1. 计算原始相关性
         output_g = torch.bmm(qs_concat, torch.transpose(current_history_state, 1, 2)) # 计算待预测题目（及关联知识点）与每个历史状态的原始点积分数
         num_qs, num_state = qs_concat.shape[1], current_history_state.shape[1]
-        states = torch.unsqueeze(current_history_state, dim=1)  # [batch_size, 1, num_state, dim_emb]
-        states = states.repeat(1, num_qs, 1, 1)  # [batch_size, num_qs, num_state, dim_emb]
-        qs_concat2 = torch.unsqueeze(qs_concat, dim=2)  # [batch_size, num_qs, 1, dim_emb]
-        qs_concat2 = qs_concat2.repeat(1, 1, num_state, 1)  # [batch_size, num_qs, num_state, dim_emb]
-        # 2. 计算注意力权重
-        K = torch.tanh(self.MLP_query(states))  # [batch_size, num_qs, num_state, dim_emb]
-        Q = torch.tanh(self.MLP_key(qs_concat2))  # [batch_size, num_qs, num_state, dim_emb]
-        tmp = self.MLP_W(torch.cat((Q, K), dim=-1))  # [batch_size, num_qs, num_state, 1]
+        
+        # 2. 计算注意力权重 (内存优化版本：先投影后扩展，避免大批量重复计算)
+        # 优化前：Q = tanh(MLP_key(qs_concat.expand(...))) -> 会产生 [Batch, Q, S, Dim] 的物理张量
+        # 优化后：Q = tanh(MLP_key(qs_concat)).unsqueeze(2).expand(...) -> 只在最后一步求和时广播
+        K_base = torch.tanh(self.MLP_query(current_history_state))  # [batch_size, num_state, dim_emb]
+        Q_base = torch.tanh(self.MLP_key(qs_concat))  # [batch_size, num_qs, dim_emb]
+        
+        # 将 MLP_W (2*Dim -> 1) 拆分为两个 (Dim -> 1) 的投影，避免 torch.cat 产生的大张量
+        w1 = self.MLP_W.weight[:, :self.emb_dim] # [1, Dim]
+        w2 = self.MLP_W.weight[:, self.emb_dim:] # [1, Dim]
+        b = self.MLP_W.bias
+
+        # 分别投影
+        score_q = F.linear(Q_base, w1) # [batch_size, num_qs, 1]
+        score_k = F.linear(K_base, w2) # [batch_size, num_state, 1]
+        
+        # 广播相加得到注意力分数矩阵 [batch_size, num_qs, num_state]
+        # score_q.unsqueeze(2): [B, Q, 1, 1]
+        # score_k.unsqueeze(1): [B, 1, S, 1]
+        tmp = score_q.unsqueeze(2) + score_k.unsqueeze(1) + b # 广播：[B, Q, S, 1]
         tmp = torch.squeeze(tmp, dim=-1)  # [batch_size, num_qs, num_state]
         alpha = torch.softmax(tmp, dim=2)  # [batch_size, num_qs, num_state]
+        
         # 3. 加权聚合与预测
-        # 用注意力权重 alpha 对原始相关性分数 output_g 进行加权求和，得到一个综合得分
-        p = torch.sum(torch.sum(alpha * output_g, dim=1), dim=1)  # [batch_size, 1]
-        p = torch.squeeze(p, dim=-1) # [batch_size]
+        # p = sum(alpha * output_g) -> [batch_size]
+        p = torch.sum(alpha * output_g, dim=(1, 2)) 
 
         # @add_fzq: Path 2 Differential Logic
         is_4pl = False

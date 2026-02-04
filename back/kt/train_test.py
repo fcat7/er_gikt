@@ -202,6 +202,8 @@ if __name__ == '__main__':
 
             # 训练阶段，既有前向传播，也有反向传播
             print('-------------------training------------------')
+            torch.set_grad_enabled(True) # @add_fzq: Enable grad for training
+            model.train() # @add_fzq: Switch to train mode
             time0 = time.time()
             train_step = train_loss = train_total = train_right = train_auc = 0
             # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体训练的auc
@@ -292,6 +294,7 @@ if __name__ == '__main__':
 
             # 测试阶段，只有前向传递，没有反向传播阶段
             print('-------------------testing------------------')
+            model.eval() # @add_fzq: Switch to eval mode
             test_step = test_loss = test_total = test_right = test_auc = 0
             
             # @add_fzq: Global AUC Support
@@ -299,75 +302,75 @@ if __name__ == '__main__':
             all_y_probs = []
 
             # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体的auc
+            torch.set_grad_enabled(False) # @add_fzq: Disable grad for testing (Save VRAM)
             for data in test_loader:
+                    # -- delete_fzq 2025-12-25 17:15:13-----------------
+                    # x, y_target, mask = data[:, :, 0].to(DEVICE), data[:, :, 1].to(DEVICE), data[:, :, 2].to(torch.bool).to(DEVICE)
+                    # y_hat = model(x, y_target, mask) # 原始代码
+                    # --------------------------------------------
 
-                # -- delete_fzq 2025-12-25 17:15:13-----------------
-                # x, y_target, mask = data[:, :, 0].to(DEVICE), data[:, :, 1].to(DEVICE), data[:, :, 2].to(torch.bool).to(DEVICE)
-                # y_hat = model(x, y_target, mask) # 原始代码
-                # --------------------------------------------
+                    # ---------------- 新增时间特征 ----------------
+                    # -- add_fzq 2025-12-25 17:15:13-----------------
+                    # 批量转移到 GPU（单次 PCIe）
+                    data_gpu = data.to(DEVICE)
 
-                # ---------------- 新增时间特征 ----------------
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # 批量转移到 GPU（单次 PCIe）
-                data_gpu = data.to(DEVICE)
-
-                # 在 GPU 上切片和类型转换（GPU 内操作，无开销）
-                x = data_gpu[:, :, 0].to(torch.long)
-                y_target = data_gpu[:, :, 1].to(torch.long)
-                mask = data_gpu[:, :, 2].to(torch.bool)
-                interval_time = data_gpu[:, :, 3].to(torch.float32)
-                response_time = data_gpu[:, :, 4].to(torch.float32)
-            
-                # @add_fzq 2026-01-08: 测试集同样需要 NaN 检查
-                if torch.isnan(interval_time).any():
-                    interval_time = torch.nan_to_num(interval_time, nan=0.0)
-                if torch.isnan(response_time).any():
-                    response_time = torch.nan_to_num(response_time, nan=0.0)
-
-                y_hat = model(x, y_target, mask, interval_time, response_time)
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # --------------------------------------------
-            
-                y_hat = torch.masked_select(y_hat, mask.to(torch.bool))
-                y_target = torch.masked_select(y_target, mask.to(torch.bool))
-            
-                # @add_fzq: Logic Branch for TF Alignment (Testing Phase)
-                if params.model.enable_tf_alignment:
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    y_prob = torch.sigmoid(y_hat)
-                else:
-                    # @add_fzq 2026-01-08: 截断
-                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    y_prob = y_hat
-
-                test_loss += loss.item()
+                    # 在 GPU 上切片和类型转换（GPU 内操作，无开销）
+                    x = data_gpu[:, :, 0].to(torch.long)
+                    y_target = data_gpu[:, :, 1].to(torch.long)
+                    mask = data_gpu[:, :, 2].to(torch.bool)
+                    interval_time = data_gpu[:, :, 3].to(torch.float32)
+                    response_time = data_gpu[:, :, 4].to(torch.float32)
                 
-                # 计算acc
-                y_pred = torch.ge(y_prob, torch.tensor(0.5))
-                acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
-                test_right += torch.sum(torch.eq(y_target, y_pred))
-                test_total += torch.sum(mask)
-                # 计算auc
-                if params.train.use_global_auc:
-                    all_y_targets.extend(y_target.cpu().detach().numpy())
-                    all_y_probs.extend(y_prob.cpu().detach().numpy())
-                    test_step += 1
-                    if params.train.verbose:
-                        try:
-                            batch_auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {batch_auc:.4f} (Batch)')
-                        except ValueError:
-                            pass
-                else:
-                    try:
-                        auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                        test_auc += auc * len(x) / test_data_len
+                    # @add_fzq 2026-01-08: 测试集同样需要 NaN 检查
+                    if torch.isnan(interval_time).any():
+                        interval_time = torch.nan_to_num(interval_time, nan=0.0)
+                    if torch.isnan(response_time).any():
+                        response_time = torch.nan_to_num(response_time, nan=0.0)
+
+                    y_hat = model(x, y_target, mask, interval_time, response_time)
+                    # -- add_fzq 2025-12-25 17:15:13-----------------
+                    # --------------------------------------------
+                
+                    y_hat = torch.masked_select(y_hat, mask.to(torch.bool))
+                    y_target = torch.masked_select(y_target, mask.to(torch.bool))
+                
+                    # @add_fzq: Logic Branch for TF Alignment (Testing Phase)
+                    if params.model.enable_tf_alignment:
+                        loss = loss_fun(y_hat, y_target.to(torch.float32))
+                        y_prob = torch.sigmoid(y_hat)
+                    else:
+                        # @add_fzq 2026-01-08: 截断
+                        y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
+                        loss = loss_fun(y_hat, y_target.to(torch.float32))
+                        y_prob = y_hat
+
+                    test_loss += loss.item()
+                    
+                    # 计算acc
+                    y_pred = torch.ge(y_prob, torch.tensor(0.5))
+                    acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
+                    test_right += torch.sum(torch.eq(y_target, y_pred))
+                    test_total += torch.sum(mask)
+                    # 计算auc
+                    if params.train.use_global_auc:
+                        all_y_targets.extend(y_target.cpu().detach().numpy())
+                        all_y_probs.extend(y_prob.cpu().detach().numpy())
                         test_step += 1
                         if params.train.verbose:
-                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
-                    except ValueError:
-                        test_step += 1
+                            try:
+                                batch_auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
+                                print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {batch_auc:.4f} (Batch)')
+                            except ValueError:
+                                pass
+                    else:
+                        try:
+                            auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
+                            test_auc += auc * len(x) / test_data_len
+                            test_step += 1
+                            if params.train.verbose:
+                                print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
+                        except ValueError:
+                            test_step += 1
             
             if params.train.use_global_auc and len(all_y_targets) > 0:
                 test_auc = roc_auc_score(all_y_targets, all_y_probs)
