@@ -310,9 +310,10 @@ class GIKT(Module):
                 # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
                 # @change_fzq: Pass correct input size based on alignment
                 h_new, _ = self.cognitive_cell(lstm_cell_input, h2_pre, curr_interval, curr_response)
-                lstm_output = self.dropout_lstm(h_new)
+                lstm_output = self.dropout_lstm(h_new) if self.training else h_new
             else:
-                lstm_output = self.dropout_lstm(self.lstm_cell(lstm_cell_input)[0]) # [batch_size, emb_dim]
+                lstm_cell_output = self.lstm_cell(lstm_cell_input)[0] # [batch_size, emb_dim]
+                lstm_output = self.dropout_lstm(lstm_cell_output) if self.training else lstm_cell_output
 
             # 找t+1时刻的[习题]以及[其对应的知识点]
             q_next = question[:, t + 1] # [batch_size, ]
@@ -489,7 +490,9 @@ class GIKT(Module):
         # 求和式聚合, 将邻居节点求和平均之后与自己相加, 得到聚合后的特征
         emb_sum_neighbor = torch.mean(emb_neighbor, dim=-2)
         emb_sum = emb_sum_neighbor + emb_self
-        return torch.tanh(self.dropout_gnn(self.mlps4agg[hop](emb_sum)))
+        mlp_output = self.mlps4agg[hop](emb_sum)
+        gnn_output = self.dropout_gnn(mlp_output) if self.training else mlp_output
+        return torch.tanh(gnn_output)
 
     def gat_aggregate(self, emb_self, emb_neighbor, nodes_self, nodes_neighbor, hop):
         """
@@ -558,8 +561,9 @@ class GIKT(Module):
         # GAT原版通常直接对 Layer 2 再次 Attention. 
         # 但这里为了适配 GIKT 架构 (ResNet style)，我们做 (Agg + Self)
         emb_sum = emb_agg + emb_self
-        
-        return torch.tanh(self.dropout_gnn(self.mlps4agg[hop](emb_sum)))
+        mlp_output = self.mlps4agg[hop](emb_sum)
+        gnn_output = self.dropout_gnn(mlp_output) if self.training else mlp_output
+        return torch.tanh(gnn_output)
 
     def recap_hard(self, q_next, q_history):
         # 硬选择, 直接在q_history中选出与q_next有相同技能的问题
