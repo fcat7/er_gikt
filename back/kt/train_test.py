@@ -141,7 +141,9 @@ if __name__ == '__main__':
         data_dir=config.PROCESSED_DATA_DIR,
         agg_method=params.model.agg_method,
         recap_source='hsei' if params.model.use_input_attention else 'hssi', # 通过 toml 配置控制
-        enable_tf_alignment=params.model.enable_tf_alignment
+        enable_tf_alignment=params.model.enable_tf_alignment,
+        use_pid=params.model.use_pid,
+        pid_mode=params.model.pid_mode
     ).to(DEVICE)
 
     # @change_fzq 2026-01-08: 修改损失函数为 BCELoss

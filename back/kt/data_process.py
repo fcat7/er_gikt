@@ -124,13 +124,13 @@ def main():
     # 1. 初始化配置
     ic("初始化配置...")
     # Available: ['assist09', 'assist12', 'ednet_kt1'] 
-    dataset_name = 'assist09-sample_9%'
+    dataset_name = 'ednet_kt1-sample_10%'
+    ratio = 0.1
+    min_seq_len = 20
+    reandom_seed = RANDOM_SEED
 
     config = Config(dataset_name=dataset_name)
-    
-    min_seq_len = 3
-    reandom_seed = RANDOM_SEED
-    
+
     # 2. 数据加载与基础清洗
     ic("Step 1: 数据加载与标准化...")
     adapter = KTDataAdapter(config)
@@ -187,11 +187,11 @@ def main():
     # ==========================================
     # 假设我们想抽取 10% 的数据进行快速测试
     # 注意：如果不需要采样，请将 ratio 设为 1.0 或直接使用 df
-    ic("Step 4: 数据采样 (10%)...")
+    ic(f"Step 4: 数据采样{ratio}...")
     sampler = KTDataSampler(random_seed=reandom_seed)
     
     # [修改] 使用采样数据，或者如果需要全量，可以注释掉下面这行用 sampled_df = df
-    sampled_df = sampler.stratified_sample(df, ratio=0.09, min_seq_len=min_seq_len)
+    sampled_df = sampler.stratified_sample(df, ratio=ratio, min_seq_len=min_seq_len)
 
     # 保存抽样数据集
     sampled_csv_path = os.path.join(config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')
@@ -203,6 +203,7 @@ def main():
     ic("Step 5: 构建模型序列数据...")
     builder = KTDataBuilder(config)
     # build_dataset 会生成 train/test/valid.npy 以及 question2idx.npy
+    # 传递新的参数以控制领域构建
     builder.build_dataset(sampled_df) 
 
     # ==========================================

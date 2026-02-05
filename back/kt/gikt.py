@@ -60,7 +60,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None, use_pid=False):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None, use_pid=False, pid_mode='global'):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -81,6 +81,8 @@ class GIKT(Module):
             agg_method: 聚合方法，默认为'gcn'
             recap_source: 回顾特征来源，默认为'hssi'
             enable_tf_alignment: 是否启用 TF 对齐 (Logits 输出, Xavier Init)，默认为False
+            use_pid: 是否使用PID控制器架构
+            pid_mode: PID 模式 ('global' 或 'domain') 
         '''
         super(GIKT, self).__init__()  # 调用父类的初始化方法
         self.model_name = "gikt" #  模型名称设置
@@ -96,6 +98,8 @@ class GIKT(Module):
         self.recap_source = recap_source # 硬回顾特征来源
         self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
         self.use_pid = use_pid # 是否使用PID控制器架构
+        self.pid_mode = pid_mode # PID模式
+        # pid_num_domains will be set dynamically if mode is 'domain'
 
         # 将邻居表预加载到计算设备上，以便重复使用/缓存
         self.register_buffer('q_neighbors_t', torch.as_tensor(q_neighbors, dtype=torch.long, device=DEVICE))
@@ -211,6 +215,29 @@ class GIKT(Module):
 
         # @add_fzq: PID-GIKT Controller Parameters
         if self.use_pid:
+            # PID Setup
+            if self.pid_mode == 'domain':
+                # Determine data_dir to load skill_domain_map
+                if data_dir is None:
+                    from config import get_config
+                    dataset_name = os.environ.get('DATASET', 'assist09')
+                    config = get_config(dataset_name)
+                    data_dir = config.PROCESSED_DATA_DIR
+                
+                skill_map_path = os.path.join(data_dir, 'skill_domain_map.npy')
+                if os.path.exists(skill_map_path):
+                    import numpy as np
+                    print(f"Loading Skill-Domain Map for PID from: {skill_map_path}")
+                    # skill_domain_map: [num_skill] -> domain_id (0..N-1)
+                    skill_domain_map = np.load(skill_map_path)
+                    self.pid_num_domains = int(np.max(skill_domain_map) + 1)
+                    print(f"Detected {self.pid_num_domains} PID domains from data.")
+                else:
+                    print(f"Error: skill_domain_map.npy not found in {data_dir}. Fallback to 1 domain if needed.")
+                    self.pid_num_domains = 1
+            else:
+                self.pid_num_domains = 1
+
             # Purpose: Introduce "Momentum" (Integral) and "Acceleration" (Derivative) control for student ability
             # ema_alpha: Decay rate for Integral term (0.1 means long-term memory dominant)
             # pid_lambda: Scaling factor for Tanh Limiter on Derivative term
@@ -220,8 +247,45 @@ class GIKT(Module):
             # PID Weights (Learnable): Initialize to near-zero to prevent initial distribution shock
             # w_pid_i: Weight for Integral term (Streak tracking)
             # w_pid_d: Weight for Derivative term (Trend tracking)
-            self.w_pid_i = torch.nn.Parameter(torch.tensor(1e-2))
-            self.w_pid_d = torch.nn.Parameter(torch.tensor(1e-2))
+            # @mod_fzq: Increased initialization from 1e-2 to 0.5 to make PID effect visible
+            # @opt_fzq: Support per-domain learnable weights
+            if self.pid_mode == 'domain':
+                # Vectorized weights: each domain has its own I/D sensitivity
+                # Initialize to 0.5 and 0.1
+                self.w_pid_i = torch.nn.Parameter(torch.full((self.pid_num_domains,), 0.5))
+                self.w_pid_d = torch.nn.Parameter(torch.full((self.pid_num_domains,), 0.1))
+            else:
+                # Global weights: scalar
+                self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
+                self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
+
+            # @add_fzq: Domain-Level PID Initialization (Pre-compute mask)
+            if self.pid_mode == 'domain' and 'skill_domain_map' in locals():
+                # 1. Create mapping tensor
+                s2d_tensor = torch.tensor(skill_domain_map, device=DEVICE, dtype=torch.long) # [S]
+                
+                # 2. Map Q -> S -> D
+                print(f"Building Question-Domain Mask for {num_question} questions...")
+                
+                # Convert Skill-to-Domain mapping to One-hot matrix [S, D]
+                # s2d_tensor is [S] containing domain IDs
+                s_domain_one_hot = F.one_hot(s2d_tensor.long(), num_classes=self.pid_num_domains).float()
+                
+                # Compute Q-D mask via matrix multiplication: [Q, S] @ [S, D] -> [Q, D]
+                # In this version, self.qs_table is the binary [Q, S] matrix.
+                q_domain_counts = torch.matmul(self.qs_table.float(), s_domain_one_hot)
+                
+                # Binarize: [Q, D] where 1 if question is associated with any skill in that domain
+                self.q_domain_mask = (q_domain_counts > 0).float()
+                # Register as buffer to save with model
+                self.register_buffer('q_domain_mask_buffer', self.q_domain_mask)
+                print(f"Question-Domain Mask Built. Shape: {self.q_domain_mask.shape}")
+            elif self.pid_mode == 'domain':
+                 print(f"Error: skill_domain_map.npy not found or loaded. Falling back to Global PID.")
+                 self.pid_num_domains = 1
+                 self.pid_mode = 'global'
+                 self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
+                 self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
 
         # @add_fzq: TF Alignment - Initialize weights if enabled
         if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
@@ -248,8 +312,14 @@ class GIKT(Module):
         # pid_ema: Tracks the running average of correctness (Integral Term)
         # Initialized to 0.5 (Neutral state)
         if self.use_pid:
-            pid_ema = torch.full((batch_size,), 0.5, device=DEVICE)
-            pid_diff = torch.zeros((batch_size,), device=DEVICE)
+            if self.pid_mode == 'domain':
+                # Vectorized State: [Batch, Num_Domains]
+                pid_ema = torch.full((batch_size, self.pid_num_domains), 0.5, device=DEVICE)
+                pid_diff = torch.zeros((batch_size, self.pid_num_domains), device=DEVICE)
+            else:
+                # Scalar State: [Batch]
+                pid_ema = torch.full((batch_size,), 0.5, device=DEVICE)
+                pid_diff = torch.zeros((batch_size,), device=DEVICE)
         else:
             pid_ema = None
             pid_diff = None
@@ -298,17 +368,55 @@ class GIKT(Module):
             # @add_fzq: PID State Update (Integral & Derivative)
             # ----------------------------------------------------
             if self.use_pid:
-                # Update EMA based on current response_t.
-                # Masking check: Only update valid interactions.
-                current_response_float = response_t.float()
-                pid_ema_new = self.ema_alpha * current_response_float + (1.0 - self.ema_alpha) * pid_ema
+                # Calculate Error (Response - EMA)
+                # Note: response_t is 0/1. ema is continuous [0,1].
                 
-                # Calculate Derivative (Change in state)
-                pid_diff_new = pid_ema_new - pid_ema
-                
-                # Update state with mask protection (prevent padding from skewing state)
-                pid_ema = torch.where(mask_t, pid_ema_new, pid_ema)
-                pid_diff = torch.where(mask_t, pid_diff_new, torch.zeros_like(pid_diff))
+                if self.pid_mode == 'domain':
+                    # Vectorized Domain Update
+                    # 1. Get Domain Mask for current question [Batch, Num_Domains]
+                    # Direct lookup using question_t indices
+                    # self.q_domain_mask is [Num_Q, Num_Domains]
+                    # We need to access buffer directly
+                    mask_domains = self.q_domain_mask_buffer[question_t] # [Batch, D]
+                    
+                    # 2. Update EMA only for relevant domains
+                    # Current response broadcast to [Batch, 1]
+                    curr_resp_exp = response_t.float().unsqueeze(1) # [Batch, 1]
+                    
+                    # Target EMA derived from current response for ALL domains (but we only apply to masked)
+                    # New_EMA = Alpha * Resp + (1-Alpha) * Old_EMA
+                    # But we only want to change where mask_domains == 1
+                    
+                    pid_ema_new = self.ema_alpha * curr_resp_exp + (1.0 - self.ema_alpha) * pid_ema
+                    
+                    # Apply Domain Mask: Update if Domain is relevant AND Batch Item is valid (mask_t)
+                    # mask_t: [Batch] -> [Batch, 1]
+                    valid_update_mask = mask_domains * mask_t.unsqueeze(1).float() # [Batch, D] (1 if update, 0 if keep)
+                    
+                    # Soft update (in vectorized form):
+                    # New = Mask * Calculated + (1-Mask) * Old
+                    pid_ema_updated = valid_update_mask * pid_ema_new + (1.0 - valid_update_mask) * pid_ema
+                    
+                    # 3. Calculate Derivative
+                    pid_diff_new = pid_ema_updated - pid_ema
+                    
+                    # Update States
+                    pid_ema = pid_ema_updated
+                    pid_diff = pid_diff_new
+                    
+                else:
+                    # Scalar Global Update (Original Logic)
+                    # Update EMA based on current response_t.
+                    # Masking check: Only update valid interactions.
+                    current_response_float = response_t.float()
+                    pid_ema_new = self.ema_alpha * current_response_float + (1.0 - self.ema_alpha) * pid_ema
+                    
+                    # Calculate Derivative (Change in state)
+                    pid_diff_new = pid_ema_new - pid_ema
+                    
+                    # Update state with mask protection (prevent padding from skewing state)
+                    pid_ema = torch.where(mask_t, pid_ema_new, pid_ema)
+                    pid_diff = torch.where(mask_t, pid_diff_new, torch.zeros_like(pid_diff))
             
             # ----------------------------------------------------
             # @add_fzq v5 optimization: Feature Transform
@@ -686,20 +794,47 @@ class GIKT(Module):
         # @add_fzq: PID-GIKT Bias Injection
         # Modify Student Ability (p) with PID Control Signal
         if pid_data is not None:
-            pid_ema_val, pid_diff_val = pid_data
+            pid_ema, pid_diff = pid_data
+
+            # Prepare PID Signals for current target question
+            if self.pid_mode == 'domain' and q_target is not None:
+                # Retrieve Domain Mask for target question [Batch, D]
+                target_mask = self.q_domain_mask_buffer[q_target] # [Batch, D]
+                
+                # Check for questions with NO domains (all zeros) for safety
+                # Add epsilon to denominator
+                domain_count = target_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                
+                # @mod_fzq: Apply per-domain weights before aggregation
+                # term_i for all domains: [Batch, D]
+                all_term_i = (pid_ema - 0.5) * self.w_pid_i.unsqueeze(0)
+                all_term_d = torch.tanh(self.pid_lambda * pid_diff) * self.w_pid_d.unsqueeze(0)
+                
+                # Aggregate weighted bias: [Batch]
+                pid_bias = (all_term_i * target_mask + all_term_d * target_mask).sum(dim=1) / domain_count.squeeze(-1)
+                
+            else:
+                # Global Mode: pid_ema is [Batch]
+                pid_i_val = pid_ema
+                pid_d_val = pid_diff
+                
+                # Integral Term: Deviation from neutral (0.5), range approx [-0.5, 0.5]
+                # w_pid_i * (S_t - 0.5)
+                term_i = pid_i_val - 0.5
+                
+                # Derivative Term: Trend direction
+                # Tanh Limiter prevents noise amplification
+                term_d = torch.tanh(self.pid_lambda * pid_d_val)
+                
+                # Apply Bias to Student Ability (p)
+                # p represents "Theta" in IRT contexts
+                pid_bias = self.w_pid_i * term_i + self.w_pid_d * term_d
             
-            # Integral Term: Deviation from neutral (0.5), range approx [-0.5, 0.5]
-            # w_pid_i * (S_t - 0.5)
-            term_i = pid_ema_val - 0.5
-            
-            # Derivative Term: Trend direction
-            # Tanh Limiter prevents noise amplification
-            term_d = torch.tanh(self.pid_lambda * pid_diff_val)
-            
-            # Apply Bias to Student Ability (p)
-            # p represents "Theta" in IRT contexts
-            pid_bias = self.w_pid_i * term_i + self.w_pid_d * term_d
             p = p + pid_bias
+            
+            # @debug_fzq: Print PID stats usually once to verify it works
+            if not self.training and torch.rand(1).item() < 0.001:  # Low probability print during testing
+                print(f"[Diff-GIKT Debug] Mode: {self.pid_mode}, PID Bias Mean: {pid_bias.mean().item():.4f}, Max Bias: {pid_bias.max().item():.4f}")
 
         # @add_fzq: P
         # @add_fzq: Path 2 Differential Logic

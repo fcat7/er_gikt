@@ -38,6 +38,7 @@ class DatasetConfig:
         self.FILE_PATH = data.get('file_path') 
         self.ENCODING = data.get('encoding', 'utf-8')
         self.COLUMN_MAP = data.get('column_map', {})
+        self.DOMAIN_CONFIG = data.get('domain_config', {})
 
 class Config:
     def __init__(self, dataset_name=None):

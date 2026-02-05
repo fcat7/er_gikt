@@ -21,30 +21,196 @@ class KTDataBuilder:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
-    def build_dataset(self, df, dataset_type='train'):
+    def build_dataset(self, df):
         """
         构建数据集
         Args:
             df: 输入 DataFrame
-            dataset_type: 'train' or 'test' or 'full' (用于文件命名区分，如果需要)
         """
         ic("开始构建数据集...")
         
         # 1. 构建并保存映射字典 (ID Maps)
-        # 注意：通常我们应该基于全量数据构建 ID 映射，否则测试集可能会有未知 ID
-        # 这里假设传入的 df 包含了所有可能的 ID (或者我们在外部先构建好 ID Map)
         self._build_id_maps(df)
         
         # 2. 构建邻接矩阵 (Adjacency Matrices)
         self._build_adjacency_matrices(df)
         
-        # 3. 构建序列数据 (Sequences)
+        # 3. 构建领域映射 (Domain Map)
+        self._build_domain_map()
+        
+        # 4. 构建序列数据 (Sequences)
         self._build_sequences(df)
         
-        # 4. 构建问题特征 (Question Features)
+        # 5. 构建问题特征 (Question Features)
         self._build_q_features(df)
         
         ic("数据集构建完成！")
+
+    def _build_domain_map(self):
+        """可以根据手动配置或自动聚类构建技能领域映射"""
+        ic("开始构建 Domain Map...")
+
+        # --- 0. 读取配置 ---
+        use_manual = False
+        config_path = ""
+        target_n_clusters = 15
+
+        if hasattr(self.config.dataset, 'DOMAIN_CONFIG'):
+            d_cfg = self.config.dataset.DOMAIN_CONFIG
+            use_manual = d_cfg.get('use_manual_config', False)
+            target_n_clusters = d_cfg.get('target_domains', 15)
+            raw_path = d_cfg.get('manual_config_path', "")
+            
+            if raw_path:
+                if os.path.isabs(raw_path):
+                    config_path = raw_path
+                else:
+                    # 假设 config.PROJECT_ROOT 是项目根目录
+                    config_path = os.path.join(self.config.PROJECT_ROOT, raw_path)
+
+        # 路径验证与回退逻辑
+        if use_manual:
+            if not config_path or not os.path.exists(config_path):
+                ic(f"Warning: 配置启用手动 Domain Map，但文件不存在: '{config_path}'")
+                ic(f"自动回退到 [Ward 聚类]，目标簇数: {target_n_clusters}")
+                use_manual = False
+            else:
+                ic(f"Info: 将使用手动 DomainMap 配置: {config_path}")
+        else:
+            ic(f"Info: 使用自动 [Ward 聚类]，目标簇数: {target_n_clusters}")
+        
+        domain_map = None
+        num_s = len(self.skill2idx)
+        
+        # --- 策略 A: 手动配置 ---
+        if use_manual and config_path and os.path.exists(config_path):
+            ic(f"加载手动 Domain 配置: {config_path}")
+            try:
+                import json
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    manual_config = json.load(f)
+                
+                # 初始化为 -1 (未分配)
+                domain_map = np.full(num_s, -1, dtype=int)
+                assigned_count = 0
+                max_domain_id = 0
+                
+                for d_id_str, skill_list in manual_config.items():
+                    d_id = int(d_id_str)
+                    max_domain_id = max(max_domain_id, d_id)
+                    
+                    for item in skill_list:
+                        # item 可能是 {"skill_id": "...", ...} 或 只是 "name" 或 "id"
+                        # 我们尽量兼容
+                        s_raw_id = None
+                        if isinstance(item, dict):
+                            s_raw_id = item.get('skill_id')
+                        elif isinstance(item, (str, int)):
+                            s_raw_id = item
+                        
+                        # 在 skill2idx 中查找内部索引
+                        # 注意：需要把 s_raw_id 转为 skill2idx 里的 key 类型 (通常是 int, 有时是 str)
+                        # 我们之前 Parse 的时候是 int (如果全是数字)
+                        
+                        # 尝试 int
+                        idx = None
+                        try:
+                            s_int = int(s_raw_id)
+                            idx = self.skill2idx.get(s_int)
+                        except:
+                            idx = self.skill2idx.get(str(s_raw_id))
+                            
+                        if idx is not None:
+                            domain_map[idx] = d_id
+                            assigned_count += 1
+                
+                # 处理未分配的技能
+                unassigned_indices = np.where(domain_map == -1)[0]
+                unassigned_count = len(unassigned_indices)
+                
+                if unassigned_count > 0:
+                    ic(f"警告: 有 {unassigned_count} 个技能未在手动配置中找到。尝试基于关联性智能分配...")
+                    
+                    # 自动确定 "Others" 领域 ID (配置列表长度，例如 15)
+                    others_id = len(manual_config)
+                    
+                    ss_path = os.path.join(self.output_dir, "ss_table.npz")
+                    if os.path.exists(ss_path):
+                        ss_dense = sparse.load_npz(ss_path).toarray()
+                        
+                        smart_count = 0
+                        for s_idx in unassigned_indices:
+                            # 统计该技能对各个已分配领域的关联得分 (0 到 max_domain_id)
+                            domain_scores = np.zeros(max_domain_id + 1)
+                            for d_id in range(max_domain_id + 1):
+                                d_skill_indices = np.where(domain_map == d_id)[0]
+                                if len(d_skill_indices) > 0:
+                                    # 累加与该领域内已知技能的共现次数
+                                    domain_scores[d_id] = ss_dense[s_idx, d_skill_indices].sum()
+                            
+                            if domain_scores.sum() > 0:
+                                domain_map[s_idx] = np.argmax(domain_scores)
+                                smart_count += 1
+                            else:
+                                # 彻底孤立的技能，分配到自动生成的 "Others" 独立领域
+                                domain_map[s_idx] = others_id
+                        ic(f"智能分配完成: {smart_count} 个归类到关联领域，{unassigned_count - smart_count} 个归入独立领域 [Others] (ID: {others_id})")
+                    else:
+                        ic(f"未找到 ss_table.npz，直接分配到 Others 领域 {others_id}。")
+                        domain_map[unassigned_indices] = others_id
+                
+                # 更新最终分配统计
+                unique_domains = np.unique(domain_map)
+                ic(f"手动映射完成: 所有 {num_s} 个技能已分配到 {len(unique_domains)} 个 Domain。")
+                ic(f"最高 Domain ID: {unique_domains.max()} (请确保配置文件中的 target_domains 对应为 {unique_domains.max() + 1})")
+                
+                # 如果手动映射成功，直接保存并返回
+                np.save(os.path.join(self.output_dir, "skill_domain_map.npy"), domain_map)
+                unique, counts = np.unique(domain_map, return_counts=True)
+                ic(f"Domain 分布: {dict(zip(unique, counts))}")
+                return
+
+            except Exception as e:
+                ic(f"处理手动配置失败: {e}。将回退到自动聚类。")
+        
+        # --- 策略 B: 自动聚类 (Ward) ---
+        ic(f"执行自动层次聚类 (Target Clusters={target_n_clusters})...")
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+            from sklearn.preprocessing import normalize
+        except ImportError:
+            ic("警告: 未安装 scikit-learn，无法聚类。")
+            return
+
+        # 1. 加载技能关联矩阵
+        ss_path = os.path.join(self.output_dir, "ss_table.npz")
+        if not os.path.exists(ss_path):
+            ic("错误: ss_table.npz 不存在，无法聚类")
+            return
+            
+        ss_sparse = sparse.load_npz(ss_path)
+        ss_dense = ss_sparse.toarray()
+        
+        # 2. 归一化
+        ss_norm = normalize(ss_dense, norm='l2', axis=1)
+
+        # 3. 聚类
+        if num_s <= target_n_clusters:
+            domain_map = np.arange(num_s)
+        else:
+            cluster = AgglomerativeClustering(
+                n_clusters=target_n_clusters, 
+                linkage='ward' 
+            )
+            domain_map = cluster.fit_predict(ss_norm)
+        
+        # 4. 保存
+        np.save(os.path.join(self.output_dir, "skill_domain_map.npy"), domain_map)
+        
+        # 统计分布
+        unique, counts = np.unique(domain_map, return_counts=True)
+        ic(f"Domain 分布: {dict(zip(unique, counts))}")
+        ic(f"*** 请确保 params.py 的 num_domains 设置为: {len(unique)} 或更安全的 {target_n_clusters} ***")
 
     def _parse_skills(self, raw_skill):
         """解析技能ID，支持 int, float, str (逗号或下划线分隔)"""
