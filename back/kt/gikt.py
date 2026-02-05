@@ -516,14 +516,26 @@ class GIKT(Module):
                 # 第一列始终是问题嵌入 [batch_size, emb_dim]
                 qs_concat[:, 0, :] = emb_q_next
                 
-                # 批量获取技能嵌入：虽然仍需逐样本处理（因为每个样本关联的技能数不同）
-                # 但使用张量索引替代 Python 列表提高效率
-                for i in range(batch_size):
-                    skill_indices = torch.nonzero(skills_related[i], as_tuple=False).squeeze(dim=1)
-                    if len(skill_indices) > 0:
-                        emb_skills = self.emb_table_skill(skill_indices).to(dtype)  # [num_skill, emb_dim]
-                        num_skills = len(skill_indices)
-                        qs_concat[i, 1:1+num_skills, :] = emb_skills
+                # 批量获取技能嵌入 (Level 1 Optimized: Fully Vectorized)
+                # 使用 Masked Scatter 替代 Python Loop
+                active_indices = torch.nonzero(skill_mask, as_tuple=True) # (batch_rows, skill_cols)
+                batch_rows, skill_cols = active_indices[0], active_indices[1]
+                
+                if len(batch_rows) > 0:
+                     # rank: 1-based index within the question logic (cumulative sum on mask row)
+                     # We use skill_mask defined earlier
+                     ranks = torch.cumsum(skill_mask.long(), dim=1)[batch_rows, skill_cols]
+                     
+                     # Filter ranges (sanity check against max_num_skill)
+                     valid_mask = ranks <= max_num_skill
+                     
+                     if valid_mask.any():
+                         valid_b = batch_rows[valid_mask]
+                         valid_s = skill_cols[valid_mask]
+                         valid_r = ranks[valid_mask]
+                         
+                         # Vectorized Assignment
+                         qs_concat[valid_b, valid_r, :] = self.emb_table_skill(valid_s).to(dtype)
 
             ####################################上述代码解释#####################################
             # qs_concat 最终变为 [batch_size, max_num_skill + 1, emb_dim] 的张量
@@ -562,29 +574,48 @@ class GIKT(Module):
                 continue
             # recap硬选择历史问题
             if self.hard_recap:
-                history_time = self.recap_hard(q_next, question[:, 0:t]) # 选取哪些时刻的问题
+                # history_mask: [Batch, t]. True=Retrieved. 
+                # (Level 1: Returns Boolean Mask from Vectorized Method)
+                history_mask = self.recap_hard(q_next, question[:, 0:t]) 
                 
                 # Determine "neighbor" source (retrieved items)
-                if self.recap_source == 'hsei':
-                    neighbor_source = recap_feature
-                else:
-                    neighbor_source = lstm_output
+                # neighbor_source is implicitly used via state_history which was updated in prev steps
+                
+                # Level 1 Optimization: Vectorized Gather with Top-K Clipping
+                # Purpose: Create [Batch, 1+K, Dim] tensor without Loop
+                
+                # 1. Sort to push all True values to the left (virtual "pad_sequence")
+                # casting boolean to int for sorting
+                sorted_mask, sorted_indices = torch.sort(history_mask.int(), dim=1, descending=True)
+                
+                # 2. Determine effective width K (Max retrieved count in this batch)
+                k_active = sorted_mask.sum(dim=1).max().item()
+                
+                # 3. Base State: Always include current_state
+                # lstm_output: [Batch, Dim] -> [Batch, 1, Dim]
+                curr_state_expanded = lstm_output.unsqueeze(1) 
 
-                # @opt_fzq 2026-02-04: 批量化历史状态拼接 - 使用 pad_sequence 替代逐个赋值
-                from torch.nn.utils.rnn import pad_sequence
-                
-                selected_states_list = []
-                for row, selected_time in enumerate(history_time):
-                    current_state = torch.unsqueeze(lstm_output[row], dim=0) # [1, emb_dim]
+                if k_active == 0:
+                    current_history_state = curr_state_expanded
+                else:
+                    # 4. Gather History
+                    # Clip to k_active to reduce compute
+                    gather_cols = sorted_indices[:, :k_active] # [B, k_active] Indices of time steps
+                    valid_mask = sorted_mask[:, :k_active].unsqueeze(-1) # [B, k_active, 1] Valid bit
                     
-                    if len(selected_time) == 0: # 没有历史状态,直接取当前状态
-                        selected_states_list.append(current_state)
-                    else: # 有历史状态,将历史状态和当前状态连接起来
-                        selected_state = state_history[row, torch.tensor(selected_time, dtype=torch.int64)]
-                        selected_states_list.append(torch.cat((current_state, selected_state), dim=0))
-                
-                # 批量填充：pad_sequence 会自动处理不同长度的序列，避免手动逐个赋值
-                current_history_state = pad_sequence(selected_states_list, batch_first=True, padding_value=0.0).to(DEVICE)
+                    # Gather from state_history [B, t, D] along time dimension
+                    # gather_cols needs expansion to [B, k_active, D]
+                    gather_indices = gather_cols.unsqueeze(-1).expand(-1, -1, self.emb_dim)
+                    
+                    # Perform Gather
+                    selected_history_raw = torch.gather(state_history, 1, gather_indices)
+                    
+                    # 5. Masking
+                    # Zero out padding entries (where valid_mask is 0)
+                    selected_history = selected_history_raw * valid_mask 
+                    
+                    # 6. Concatenate: [Current (1) + History (K)]
+                    current_history_state = torch.cat((curr_state_expanded, selected_history), dim=1)
             else: # 软选择
                 # Determine "neighbor" source (retrieved items)
                 if self.recap_source == 'hsei':
@@ -744,13 +775,9 @@ class GIKT(Module):
         valid_history = q_history.ne(0)  # 避免填充位被误选
         match_any = matches.any(dim=-1) & valid_history
 
-        # 3. 提取结果 - 从布尔矩阵中获取匹配的时间索引
-        rows, cols = torch.nonzero(match_any, as_tuple=True)
-        time_select = [[] for _ in range(batch_size)]
-        rows_list, cols_list = rows.tolist(), cols.tolist()
-        for r, c in zip(rows_list, cols_list):
-            time_select[r].append(int(c))
-        return time_select #  返回每个用户的相关时间点列表
+        # 3. 提取结果 - 返回布尔掩码而非列表
+        # Change Level 1: Return mask [Batch, t-1] for vectorization
+        return match_any 
 
     def recap_soft(self, rank_k=10):
         # 软选择
