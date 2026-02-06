@@ -305,7 +305,7 @@ class GIKT(Module):
         q_neighbor_size, s_neighbor_size = self.q_neighbor_size, self.s_neighbor_size
         h1_pre = torch.nn.init.xavier_uniform_(torch.zeros(self.emb_dim, device=DEVICE).repeat(batch_size, 1)) #  使用Xavier初始化方法创建两个全零的嵌入向量，并重复batch_size次
         h2_pre = torch.nn.init.xavier_uniform_(torch.zeros(self.emb_dim, device=DEVICE).repeat(batch_size, 1))
-        state_history = torch.zeros(batch_size, seq_len, self.emb_dim, device=DEVICE) #  初始化状态历史记录和预测结果张量
+        # state_history = torch.zeros(batch_size, seq_len, self.emb_dim, device=DEVICE) #  初始化状态历史记录和预测结果张量
         y_hat = torch.zeros(batch_size, seq_len, device=DEVICE)
 
         # @add_fzq: PID-GIKT State Initialization
@@ -324,97 +324,167 @@ class GIKT(Module):
             pid_ema = None
             pid_diff = None
 
-        # 在每个时间步中预先计算多跳邻居关系，以避免在每次循环中重新构建图结构
-        node_neighbors_cache = [question]
-        cache_curr = question
+        # @add_fzq: PID-GIKT State Initialization
+        # pid_ema: Tracks the running average of correctness (Integral Term)
+        # Initialized to 0.5 (Neutral state)
+        if self.use_pid:
+            if self.pid_mode == 'domain':
+                # Vectorized State: [Batch, Num_Domains]
+                pid_ema = torch.full((batch_size, self.pid_num_domains), 0.5, device=DEVICE)
+                pid_diff = torch.zeros((batch_size, self.pid_num_domains), device=DEVICE)
+            else:
+                # Scalar State: [Batch]
+                pid_ema = torch.full((batch_size,), 0.5, device=DEVICE)
+                pid_diff = torch.zeros((batch_size,), device=DEVICE)
+        else:
+            pid_ema = None
+            pid_diff = None
+
+        # [Level 2 优化] 批次级 GNN 预计算 (第一部分：准备工作)
+        # 仅在需要时预计算唯一问题的聚合逻辑（主要用于下一个问题预测）
+        # 但这里我们也需要当前问题的聚合用于 LSTM 输入。
+        # 所以我们预计算本批次全量唯一问题。
+        
+        # 1. 识别唯一问题（如果可能排除 padding 0，但保持逻辑简单）
+        # unique_questions = torch.unique(question)
+        # 为避免 padding 0 引发索引错误（通常 0 在 embedding 中是有效索引）
+        
+        # 2. 分配本批次查找表
+        # 我们不能轻易为所有问题建立密集表（太大）。
+        # 但我们可以将结果 scatter 回 [Batch, Seq] 或使用临时稀疏映射。
+        # 鉴于 Batch 较小，我们可以仅计算 unique_questions 并使用索引映射。
+        
+        # 构造仅针对 UNIQUE 问题的邻居缓存
+        # Level 2 改动：使用 torch.unique 两次以获取 inverse_indices
+        # 展平 question 以进行映射
+        flat_questions = question.view(-1)
+        unique_q, inverse_ind = torch.unique(flat_questions, return_inverse=True)
+
+        # 构造 unique_q 的邻居缓存
+        unique_neighbors_cache = [unique_q]
+        cache_curr = unique_q
         for hop in range(self.agg_hops):
+            # 使用缓存的邻居表
             if hop % 2 == 0:
                 cache_next = self.q_neighbors_t[cache_curr]
             else:
                 cache_next = self.s_neighbors_t[cache_curr]
-            node_neighbors_cache.append(cache_next)
+            unique_neighbors_cache.append(cache_next)
             cache_curr = cache_next
+
+        # 3. 针对唯一问题的批次聚合
+        # 提取 unique 结构的嵌入
+        # unique_neighbors_cache 结构: List of [Num_Unique_Q, Neighbors]
+        emb_unique_neighbors = [] 
+        for i, nodes in enumerate(unique_neighbors_cache):
+            if i % 2 == 0: 
+                emb_unique_neighbors.append(self.emb_table_question(nodes))
+            else:
+                emb_unique_neighbors.append(self.emb_table_skill(nodes))
+        
+        # 对所有唯一问题执行一次性聚合
+        agg_unique_q, agg_list_unique = self.aggregate(emb_unique_neighbors, unique_neighbors_cache)
+        
+        # 4. 创建查找机制
+        # [Level 2] 直接映射回 [Batch, Seq, Emb] 形状
+        # output = u_agg_q[inverse_ind]
+        precomputed_gnn_features = agg_unique_q[inverse_ind].view(batch_size, seq_len, self.emb_dim)
+        
+        # 如果下一个题目预测需要（hsei target aggregation），我们可能也需要 `agg_list_unique` 特征？
+        # 当前代码仅在 TF 对齐时使用 `agg_list_next[1]`。
+        # 如果 TF 对齐开启，我们也需要映射该特征。
+        precomputed_gnn_skills = None
+        if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
+            # u_agg_list[1] is [Num_Unique_Q, Neighbor_Size, Emb]
+            # agg_list_unique[1] 对应第一层聚合后的 Skill 邻居特征
+            precomputed_gnn_skills = agg_list_unique[1][inverse_ind].view(batch_size, seq_len, -1, self.emb_dim)
+
+        # [Level 2 优化] 投影历史缓存 (KV Cache)
+        # 使用 List 避免 autograd 期间的 In-place 操作错误
+        projected_keys_list = []
+        # [Level 2 Fix] 历史状态列表 (Value Cache)
+        # 同样使用 List 避免 state_history[:, t] = ... 的 In-place 错误
+        state_history_list = []
+
         for t in range(seq_len - 1): # 第t时刻
             question_t = question[:, t] #  取出所有学生在第 t 个时间步所做的题目ID
             response_t = response[:, t] #  取出所有学生在第 t 个时间步所做的题目ID的回答结果
-            # 在实际数据中，每个学生的答题序列长度不同。为了能批量处理，会用0填充（padding）到统一长度 seq_len。
-            # mask 张量就是用来标记哪些位置是真实数据(1)，哪些是填充(0)。
-            # 如果mask[:, t]是[1, 0, 1]，比较结果就是[True, False, True]            
-            mask_t = torch.eq(mask[:, t], torch.tensor(1)) #  创建一个布尔掩码，用于标识第t个时间步中哪些位置是有效的（值为1）
-            emb_response_t = self.emb_table_response(response_t) # [batch_size, emb_dim]
-            # GNN获得习题的embedding
-            # question_t[mask_t]：这是 PyTorch 中的布尔索引操作，它会返回 question_t 中对应 mask_t 为 True 的位置的所有元素。
-            node_neighbors = [level[mask_t, t] for level in node_neighbors_cache] # 当前节点的邻居节点列表,[自己, 第一跳节点, 第二跳节点...]
-            emb_node_neighbor = [] # 每层邻居(问题或者知识点)的嵌入向量,形状为node_neighbor.shape + [emb_dim]
-            for i, nodes in enumerate(node_neighbors):
-                if i % 2 == 0: # 问题索引->问题向量
-                    emb_node_neighbor.append(self.emb_table_question(nodes))
-                else: # 技能索引->技能向量
-                    emb_node_neighbor.append(self.emb_table_skill(nodes)) #  将邻居节点的嵌入表示添加到列表中
             
-            # @mod_fzq: GAT requires node_neighbors indices
-            emb0_question_t, _ = self.aggregate(emb_node_neighbor, node_neighbors) # [batch_size, emb_dim] 该时刻聚合更新过的问题向量
+            mask_t = torch.eq(mask[:, t], torch.tensor(1)) #  创建一个布尔掩码
+            emb_response_t = self.emb_table_response(response_t) 
             
-            # @fix_fzq: AMP FP16 Mismatch Fix
-            # emb0_question_t 在 autocast 模式下会变成 float16，而 emb_question_t 初始化为 float32
-            # 必须显式统一数据类型
+            # [Level 2 变更] 检索预计算的 GNN 特征
+            # 以前: 掩码选择 -> 聚合 -> 填充
+            # 现在: 仅切片。
+            # 注意：为了正确性，我们仍然尊崇 `mask_t`，但预计算处理了一切。
+            # 我们只是取值。对于填充条目，值来自 aggregate(ID=0)，这是可以接受的/被忽略的。
+            emb0_question_t = precomputed_gnn_features[:, t]
+            
+            # @fix_fzq: AMP FP16 不匹配修复 (保留)
             dtype = emb0_question_t.dtype
-            emb_question_t = torch.zeros(batch_size, self.emb_dim, device=DEVICE, dtype=dtype)
             
-            emb_question_t[mask_t] = emb0_question_t
-            emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t]).to(dtype) # Ensure fallback also matches
+            # 我们直接使用 emb0_question_t，但原始代码对 ~mask_t 有降级处理
+            # "emb_question_t[~mask_t] = self.emb_table_question(question_t[~mask_t])"
+            # 由于我们的预计算对所有问题（包括 ID 0 的填充）运行聚合，
+            # ID 0 的结果是 aggregate(0)。如果我们想要 ID 0 的原始嵌入，我们可以混合使用。
+            # 然而，对于填充，这并不重要。
+            # 为了与原始逻辑 "emb_node_neighbor" vs "emb_table_question" 的正确性保持一致，
+            # GIKT 对有效问题应用 GNN。
+            # 让我们信任预计算的值。
+            emb_question_t = emb0_question_t
+
             
             # ----------------------------------------------------
-            # @add_fzq: PID State Update (Integral & Derivative)
+            # @add_fzq: PID 状态更新 (积分 & 微分)
             # ----------------------------------------------------
             if self.use_pid:
-                # Calculate Error (Response - EMA)
-                # Note: response_t is 0/1. ema is continuous [0,1].
+                # 计算误差 (Response - EMA)
+                # 注意: response_t 是 0/1. ema 是连续的 [0,1].
                 
                 if self.pid_mode == 'domain':
-                    # Vectorized Domain Update
-                    # 1. Get Domain Mask for current question [Batch, Num_Domains]
-                    # Direct lookup using question_t indices
-                    # self.q_domain_mask is [Num_Q, Num_Domains]
-                    # We need to access buffer directly
+                    # 向量化领域更新
+                    # 1. 获取当前问题的领域掩码 [Batch, Num_Domains]
+                    #直接使用 question_t 索引查找
+                    # self.q_domain_mask 是 [Num_Q, Num_Domains]
+                    # 我们需要直接访问缓冲区
                     mask_domains = self.q_domain_mask_buffer[question_t] # [Batch, D]
                     
-                    # 2. Update EMA only for relevant domains
-                    # Current response broadcast to [Batch, 1]
+                    # 2. 仅更新相关领域的 EMA
+                    # 当前响应广播到 [Batch, 1]
                     curr_resp_exp = response_t.float().unsqueeze(1) # [Batch, 1]
                     
-                    # Target EMA derived from current response for ALL domains (but we only apply to masked)
+                    # 从当前响应导出的目标 EMA，适用于所有领域（但我们只应用于被掩盖的领域）
                     # New_EMA = Alpha * Resp + (1-Alpha) * Old_EMA
-                    # But we only want to change where mask_domains == 1
+                    # 但我们只想更改 mask_domains == 1 的位置
                     
                     pid_ema_new = self.ema_alpha * curr_resp_exp + (1.0 - self.ema_alpha) * pid_ema
                     
-                    # Apply Domain Mask: Update if Domain is relevant AND Batch Item is valid (mask_t)
+                    # 应用领域掩码：如果领域相关且批次项有效 (mask_t) 则更新
                     # mask_t: [Batch] -> [Batch, 1]
                     valid_update_mask = mask_domains * mask_t.unsqueeze(1).float() # [Batch, D] (1 if update, 0 if keep)
                     
-                    # Soft update (in vectorized form):
+                    # 软更新 (向量化形式):
                     # New = Mask * Calculated + (1-Mask) * Old
                     pid_ema_updated = valid_update_mask * pid_ema_new + (1.0 - valid_update_mask) * pid_ema
                     
-                    # 3. Calculate Derivative
+                    # 3. 计算微分
                     pid_diff_new = pid_ema_updated - pid_ema
                     
-                    # Update States
+                    # 更新状态
                     pid_ema = pid_ema_updated
                     pid_diff = pid_diff_new
                     
                 else:
-                    # Scalar Global Update (Original Logic)
-                    # Update EMA based on current response_t.
-                    # Masking check: Only update valid interactions.
+                    # 标量全局更新 (原始逻辑)
+                    # 基于当前 response_t 更新 EMA。
+                    # 掩码检查：仅更新有效交互。
                     current_response_float = response_t.float()
                     pid_ema_new = self.ema_alpha * current_response_float + (1.0 - self.ema_alpha) * pid_ema
                     
-                    # Calculate Derivative (Change in state)
+                    # 计算微分 (状态变化)
                     pid_diff_new = pid_ema_new - pid_ema
                     
-                    # Update state with mask protection (prevent padding from skewing state)
+                    # 使用掩码保护更新状态 (防止填充扭曲状态)
                     pid_ema = torch.where(mask_t, pid_ema_new, pid_ema)
                     pid_diff = torch.where(mask_t, pid_diff_new, torch.zeros_like(pid_diff))
             
@@ -440,11 +510,11 @@ class GIKT(Module):
             
             # Determine LSTM Input
             if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-                # [Case: TF Alignment] LSTM uses Projected Features (100 dim)
-                # Note: `recap_feature` is calculated above as input_trans_layer(lstm_input)
+                # [Case: TF 对齐] LSTM 使用投影特征 (100 dim)
+                # 注意: `recap_feature` 在上方计算为 input_trans_layer(lstm_input)
                 lstm_cell_input = recap_feature
             else:
-                # [Case: Original] LSTM uses Concatenated Features (200 dim)
+                # [Case: 原始] LSTM 使用拼接特征 (200 dim)
                 lstm_cell_input = lstm_input
 
             if self.use_cognitive_model:
@@ -479,27 +549,28 @@ class GIKT(Module):
 
             if self.recap_source == 'hsei':
                 # [Case: HSEI] 需要特征对齐，执行图聚合
-                # 1. 构建 q_next 的多跳邻居图
-                node_neighbors_next = [level[:, t + 1] for level in node_neighbors_cache] # 初始节点
-                
-                # 2. 转换为 Embedding 并聚合
-                emb_node_neighbor_next = []
-                for i, nodes in enumerate(node_neighbors_next):
-                    if i % 2 == 0: 
-                        emb_node_neighbor_next.append(self.emb_table_question(nodes))
-                    else: 
-                        emb_node_neighbor_next.append(self.emb_table_skill(nodes))
-                
-                # 3. 聚合
-                # Return: (final_res, full_layers_list)
-                # @mod_fzq: GAT requires neighbors indices
-                emb_q_next, agg_list_next = self.aggregate(emb_node_neighbor_next, node_neighbors_next)
-                
-                if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-                    # TF Logic: qs_concat = concat(emb_q_next, agg_results_next[1])
-                    # agg_results_next[1] 是第一层聚合后的 Skill 邻居特征 [Batch, Q_Neighbor_Size, Emb]
-                    emb_skills_next_batch = agg_list_next[1] # [Batch, Q_Neighbor_Size, Emb]
+                # [Level 2 优化] 批次级 GNN 预计算 (第二部分：使用)
+                # 不再重新聚合，而是从预计算张量中获取
+                # precomputed_gnn_features: [Batch, Seq, Emb] -> At t+1
+                emb_q_next = precomputed_gnn_features[:, t+1]
+
+                # 提取 Agg List
+                # 当前仅在 TF 对齐时使用 agg_list_next[1]。
+                # 如果 precomputed_gnn_skills 可用
+                if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment and precomputed_gnn_skills is not None:
+                    emb_skills_next_batch = precomputed_gnn_skills[:, t+1]
                     qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
+                    use_legacy_concat = False
+                elif hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
+                    # 降级逻辑（理论上如果上述逻辑正确，不应进入此分支）
+                    # 重新运行单步传统逻辑（慢速路径）
+                    node_neighbors_next = [level[:, t + 1] for level in node_neighbors_cache] 
+                    emb_node_neighbor_next = []
+                    for i, nodes in enumerate(node_neighbors_next):
+                        if i % 2 == 0: emb_node_neighbor_next.append(self.emb_table_question(nodes))
+                        else: emb_node_neighbor_next.append(self.emb_table_skill(nodes))
+                    emb_q_next_legacy, agg_list_next = self.aggregate(emb_node_neighbor_next, node_neighbors_next)
+                    qs_concat = torch.cat((emb_q_next.unsqueeze(1), agg_list_next[1]), dim=1)
                     use_legacy_concat = False
                 
             if use_legacy_concat:
@@ -516,26 +587,27 @@ class GIKT(Module):
                 # 第一列始终是问题嵌入 [batch_size, emb_dim]
                 qs_concat[:, 0, :] = emb_q_next
                 
-                # 批量获取技能嵌入 (Level 1 Optimized: Fully Vectorized)
+                # 批量获取技能嵌入 (Level 1 优化: 全向量化)
                 # 使用 Masked Scatter 替代 Python Loop
                 active_indices = torch.nonzero(skill_mask, as_tuple=True) # (batch_rows, skill_cols)
                 batch_rows, skill_cols = active_indices[0], active_indices[1]
                 
                 if len(batch_rows) > 0:
-                     # rank: 1-based index within the question logic (cumulative sum on mask row)
-                     # We use skill_mask defined earlier
-                     ranks = torch.cumsum(skill_mask.long(), dim=1)[batch_rows, skill_cols]
-                     
-                     # Filter ranges (sanity check against max_num_skill)
-                     valid_mask = ranks <= max_num_skill
-                     
-                     if valid_mask.any():
-                         valid_b = batch_rows[valid_mask]
-                         valid_s = skill_cols[valid_mask]
-                         valid_r = ranks[valid_mask]
-                         
-                         # Vectorized Assignment
-                         qs_concat[valid_b, valid_r, :] = self.emb_table_skill(valid_s).to(dtype)
+                    # rank: 0基索引（问题嵌入占用了索引0，所以从1开始，cumsum默认从1开始）
+                    # 我们使用之前定义的 skill_mask
+                    # ranks = 1, 2, ...
+                    ranks = torch.cumsum(skill_mask.long(), dim=1)[batch_rows, skill_cols]
+                    
+                    # 过滤范围 (针对 max_num_skill 的健全性检查)
+                    valid_mask = ranks <= max_num_skill
+                    
+                    if valid_mask.any():
+                        valid_b = batch_rows[valid_mask]
+                        valid_s = skill_cols[valid_mask]
+                        valid_r = ranks[valid_mask]
+                        
+                        # 向量化赋值
+                        qs_concat[valid_b, valid_r, :] = self.emb_table_skill(valid_s).to(dtype)
 
             ####################################上述代码解释#####################################
             # qs_concat 最终变为 [batch_size, max_num_skill + 1, emb_dim] 的张量
@@ -571,6 +643,15 @@ class GIKT(Module):
                 y_hat[:, 0] = 0.5 # 第一个问题默认0.5的正确率
                 pid_data = (pid_ema, pid_diff) if self.use_pid else None
                 y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1), q_target=q_next, pid_data=pid_data)
+                
+                # [Level 2 Fix] 列表对齐
+                # 为 t=0 附加零状态，以保持与 state_history 原始逻辑一致（index 0 为空）
+                # 注意：如果我们不想让模型注意 t=0 (因为它是空的)，Key 应该是某种不会触发注意力的值。
+                # 使用 Zero State 生成 Key (Tanh(MLP(0))) 通常会产生较小的分数，这与 Value=0 配合较好。
+                zero_state = torch.zeros(batch_size, self.emb_dim, device=DEVICE)
+                projected_keys_list.append(torch.tanh(self.MLP_query(zero_state)))
+                state_history_list.append(zero_state)
+                
                 continue
             # recap硬选择历史问题
             if self.hard_recap:
@@ -579,72 +660,138 @@ class GIKT(Module):
                 history_mask = self.recap_hard(q_next, question[:, 0:t]) 
                 
                 # Determine "neighbor" source (retrieved items)
-                # neighbor_source is implicitly used via state_history which was updated in prev steps
+                # neighbor_source 是通过 state_history 隐式使用的，而 state_history 是在前几步中更新的
                 
-                # Level 1 Optimization: Vectorized Gather with Top-K Clipping
-                # Purpose: Create [Batch, 1+K, Dim] tensor without Loop
+                # Level 1 优化: 带 Top-K 裁剪的向量化 Gather
+                # 目的: 创建 [Batch, 1+K, Dim] 张量以消除循环
                 
-                # 1. Sort to push all True values to the left (virtual "pad_sequence")
-                # casting boolean to int for sorting
+                # 1. 排序以将所有有效值推向左侧（虚拟 "pad_sequence"）
+                # 将布尔值转换为整数进行排序
                 sorted_mask, sorted_indices = torch.sort(history_mask.int(), dim=1, descending=True)
                 
-                # 2. Determine effective width K (Max retrieved count in this batch)
+                # 2. 确定有效宽度 K (本批次的最大检索计数)
                 k_active = sorted_mask.sum(dim=1).max().item()
                 
-                # 3. Base State: Always include current_state
+                # 3. 基础状态：始终包含 current_state
                 # lstm_output: [Batch, Dim] -> [Batch, 1, Dim]
                 curr_state_expanded = lstm_output.unsqueeze(1) 
 
                 if k_active == 0:
                     current_history_state = curr_state_expanded
                 else:
-                    # 4. Gather History
-                    # Clip to k_active to reduce compute
-                    gather_cols = sorted_indices[:, :k_active] # [B, k_active] Indices of time steps
-                    valid_mask = sorted_mask[:, :k_active].unsqueeze(-1) # [B, k_active, 1] Valid bit
+                    # 4. 聚集历史记录
+                    # 裁剪到 k_active 以减少计算
+                    gather_cols = sorted_indices[:, :k_active] # [B, k_active] 时间步索引
+                    valid_mask = sorted_mask[:, :k_active].unsqueeze(-1) # [B, k_active, 1] 有效位
                     
-                    # Gather from state_history [B, t, D] along time dimension
-                    # gather_cols needs expansion to [B, k_active, D]
+                    # [Level 2 优化] 投影键值 Gather
+                    # 以前：从 state_history 聚集 (Raw)
+                    # 现在：从 projected_keys_list 聚集 (即时转换为张量)
+                    
+                    # 动态构建 History Tensor 避免 In-place 错误
+                    # state_history_list 长度为 t (indices 0..t-1)
+                    # gather_cols 索引范围 [0, t-1]
+                    temp_history_tensor = torch.stack(state_history_list, dim=1) # [Batch, t, Dim]
+                    
+                    # 从 temp_history_tensor 聚集原始值
                     gather_indices = gather_cols.unsqueeze(-1).expand(-1, -1, self.emb_dim)
-                    
-                    # Perform Gather
-                    selected_history_raw = torch.gather(state_history, 1, gather_indices)
-                    
-                    # 5. Masking
-                    # Zero out padding entries (where valid_mask is 0)
-                    selected_history = selected_history_raw * valid_mask 
-                    
-                    # 6. Concatenate: [Current (1) + History (K)]
+                    selected_history = torch.gather(temp_history_tensor, 1, gather_indices) * valid_mask
                     current_history_state = torch.cat((curr_state_expanded, selected_history), dim=1)
+                    
+                    # 从 projected_keys_list 聚集投影值
+                    # 检查列表是否为空
+                    if len(projected_keys_list) > 0:
+                        # 堆叠为 [Batch, Len_List, Dim]
+                        # 注意：projected_keys_list 包含形状为 [Batch, Dim] 的张量
+                        # 堆叠维度 1 -> [Batch, Len_List, Dim]
+                        temp_keys_buffer = torch.stack(projected_keys_list, dim=1)
+                        
+                        # 是否需要填充 temp_buffer 以匹 state_history 大小？
+                        # 不需要，gather_indices 严格位于 [0, t-1] 范围内（概念上）
+                        # state_history 的大小为 seq_len，但我们只填充到了 t。
+                        # projected_keys_list 的长度为 t。索引应小于 t。
+                        # 然而，`recap_hard` 返回的索引是序列中的全局索引？
+                        # `recap_hard` 返回 `time_select`。
+                        # 如果 time_select 引用索引 T，但我们在列表中只有 0..t-1。
+                        # 等等，`recap_hard` 接受 `question[:, 0:t]`。所以索引在 [0, t-1] 中。
+                        # 所以大小为 t 的 temp_keys_buffer 就足够了。
+                        
+                        selected_keys = torch.gather(temp_keys_buffer, 1, gather_indices) * valid_mask
+                    else:
+                        # 降级处理：如果 t=0 或历史记录为空（尽管 hard_recap 通常 t>0）
+                        # 创建正确形状的虚拟张量 [Batch, K_active, Dim]
+                        selected_keys = torch.zeros(batch_size, k_active, self.emb_dim, device=DEVICE)
+
+                    curr_key = torch.tanh(self.MLP_query(curr_state_expanded))
+                    cached_keys_tensor = torch.cat((curr_key, selected_keys), dim=1)
+                    
             else: # 软选择
-                # Determine "neighbor" source (retrieved items)
+                # 确定 "neighbor" 来源 (retrieved items)
                 if self.recap_source == 'hsei':
                     neighbor_source = recap_feature
                 else:
                     neighbor_source = lstm_output
 
                 current_state = lstm_output.unsqueeze(dim=1)
+                
+                # 软选择更新：准备原始值和键值
+                curr_key = torch.tanh(self.MLP_query(current_state))
+                
                 if t <= self.rank_k:
-                    current_history_state = torch.cat((current_state, state_history[:, 0:t]), dim=1)
-                else: # 基于注意力机制，从历史状态中选择最相关的信息来辅助当前决策
+                    # 原始值 (使用 List Stack)
+                    hist_vals = torch.stack(state_history_list, dim=1)
+                    current_history_state = torch.cat((current_state, hist_vals), dim=1)
+                    # 键值
+                    if t == 0:
+                        cached_keys_tensor = curr_key
+                    else:
+                        # 堆叠列表
+                        hist_keys = torch.stack(projected_keys_list, dim=1)
+                        cached_keys_tensor = torch.cat((curr_key, hist_keys), dim=1)
+                else: 
                     Q = self.emb_table_question(q_next).clone().detach().unsqueeze(dim=-1)
                     K = self.emb_table_question(question[:, 0:t]).clone().detach()
                     product_score = torch.bmm(K, Q).squeeze(dim=-1)
                     _, indices = torch.topk(product_score, k=self.rank_k, dim=1)
-                    select_history = torch.cat(tuple(state_history[i][indices[i]].unsqueeze(dim=0) for i in range(batch_size)), dim=0)
+                    
+                    # 原始值 (Level 2 优化: 向量化 Gather 替代 Loop + List Stack Fix)
+                    temp_history_tensor = torch.stack(state_history_list, dim=1)
+                    idx_expanded_raw = indices.unsqueeze(-1).expand(-1, -1, self.emb_dim)
+                    select_history = torch.gather(temp_history_tensor, 1, idx_expanded_raw)
                     current_history_state = torch.cat((current_state, select_history), dim=1)
+                    
+                    # Keys
+                    temp_keys_buffer = torch.stack(projected_keys_list, dim=1)
+                    idx_expanded = indices.unsqueeze(-1).expand(-1, -1, self.emb_dim)
+                    select_keys = torch.gather(temp_keys_buffer, 1, idx_expanded)
+                    cached_keys_tensor = torch.cat((curr_key, select_keys), dim=1)
             
             pid_data = (pid_ema, pid_diff) if self.use_pid else None
-            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next, pid_data=pid_data)
+            
+            # Pass cached_keys to predict
+            y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next, pid_data=pid_data, cached_keys=cached_keys_tensor)
             
             # --- Update History State ---
             if self.recap_source == 'hsei':
                 # 如果配置为 hsei，历史状态存储的是 Input Embedding (Projected)
                 # 使用刚才定义的 neighbor_source (recap_feature)
-                state_history[:, t] = neighbor_source
+                new_state = neighbor_source
             else:
                 # 默认 (hssi): 历史状态存储的是 LSTM Output (Hidden State)
-                state_history[:, t] = lstm_output
+                new_state = lstm_output
+            
+            # state_history[:, t] = new_state
+            # [Level 2 Fix] Append to History List (Avoid Inplace)
+            state_history_list.append(new_state)
+
+            # [Level 2 Optimization] Update Projected Cache
+            # Compute projection for next time step usage
+            # new_state: [Batch, Dim]
+            # MLP_query(new_state) -> Tanh -> Cache
+            projected_val = torch.tanh(self.MLP_query(new_state))
+            
+            # Append to list (Safe for Autograd)
+            projected_keys_list.append(projected_val)
             
             h2_pre = lstm_output
             # state_history[:, t] = lstm_output
@@ -779,43 +926,38 @@ class GIKT(Module):
         # Change Level 1: Return mask [Batch, t-1] for vectorization
         return match_any 
 
-    def recap_soft(self, rank_k=10):
-        # 软选择
-        pass
-
-    def predict(self, qs_concat, current_history_state, q_target=None, pid_data=None):
+    def predict(self, qs_concat, current_history_state, q_target=None, pid_data=None, cached_keys=None):
         # qs_concat: [batch_size, num_qs, dim_emb]
-        # current_history_state: [batch_size, num_state, dim_emb]
-        # q_target: [batch_size] (Optional, for Differential GIKT)
-        # pid_data: tuple(pid_ema, pid_diff) (Optional, for PID-GIKT)
-        # 1. 计算原始相关性
-        output_g = torch.bmm(qs_concat, torch.transpose(current_history_state, 1, 2)) # 计算待预测题目（及关联知识点）与每个历史状态的原始点积分数
+        # current_history_state: [batch_size, num_state, dim_emb] (Values)
+        # cached_keys: [batch_size, num_state, dim_emb] (可选: 预计算键值)
+        # q_target: [batch_size] (可选: 用于 Diff-GIKT)
+        # pid_data: tuple(pid_ema, pid_diff) (可选: 用于 PID-GIKT)
+        
+        # 1. 计算原始相关性 (使用 Values)
+        output_g = torch.bmm(qs_concat, torch.transpose(current_history_state, 1, 2)) 
         num_qs, num_state = qs_concat.shape[1], current_history_state.shape[1]
         
-        # 2. 计算注意力权重 (内存优化版本：先投影后扩展，避免大批量重复计算)
-        # 优化前：Q = tanh(MLP_key(qs_concat.expand(...))) -> 会产生 [Batch, Q, S, Dim] 的物理张量
-        # 优化后：Q = tanh(MLP_key(qs_concat)).unsqueeze(2).expand(...) -> 只在最后一步求和时广播
-        K_base = torch.tanh(self.MLP_query(current_history_state))  # [batch_size, num_state, dim_emb]
+        # 2. 计算注意力权重
+        # If cached_keys provided, use directly. Else compute.
+        if cached_keys is not None:
+            K_base = cached_keys
+        else:
+            K_base = torch.tanh(self.MLP_query(current_history_state))
+            
         Q_base = torch.tanh(self.MLP_key(qs_concat))  # [batch_size, num_qs, dim_emb]
         
-        # 将 MLP_W (2*Dim -> 1) 拆分为两个 (Dim -> 1) 的投影，避免 torch.cat 产生的大张量
         w1 = self.MLP_W.weight[:, :self.emb_dim] # [1, Dim]
         w2 = self.MLP_W.weight[:, self.emb_dim:] # [1, Dim]
         b = self.MLP_W.bias
 
-        # 分别投影
-        score_q = F.linear(Q_base, w1) # [batch_size, num_qs, 1]
-        score_k = F.linear(K_base, w2) # [batch_size, num_state, 1]
+        score_q = F.linear(Q_base, w1) 
+        score_k = F.linear(K_base, w2) 
         
-        # 广播相加得到注意力分数矩阵 [batch_size, num_qs, num_state]
-        # score_q.unsqueeze(2): [B, Q, 1, 1]
-        # score_k.unsqueeze(1): [B, 1, S, 1]
-        tmp = score_q.unsqueeze(2) + score_k.unsqueeze(1) + b # 广播：[B, Q, S, 1]
-        tmp = torch.squeeze(tmp, dim=-1)  # [batch_size, num_qs, num_state]
-        alpha = torch.softmax(tmp, dim=2)  # [batch_size, num_qs, num_state]
+        tmp = score_q.unsqueeze(2) + score_k.unsqueeze(1) + b 
+        tmp = torch.squeeze(tmp, dim=-1)  
+        alpha = torch.softmax(tmp, dim=2) 
         
         # 3. 加权聚合与预测
-        # p = sum(alpha * output_g) -> [batch_size]
         p = torch.sum(alpha * output_g, dim=(1, 2)) 
 
         # @add_fzq: PID-GIKT Bias Injection
