@@ -23,7 +23,7 @@ class ModelParams:
     pre_train: bool = False
     hard_recap: bool = True
     agg_method: str = 'gcn'
-    recap_source: str = 'hssi'  # 回顾特征来源: 'hsei' 或 'hssi' 
+    recap_source: str = 'hssi'  # 回顾特征来源: 'hsei' 或 'hssi'
     use_pid: bool = False # 是否使用 PID-GIKT 控制器架构
     pid_mode: str = 'global' # PID 模式: 'global' (标量) 或 'domain' (向量)
 

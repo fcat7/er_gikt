@@ -520,7 +520,13 @@ class GIKT(Module):
             else:
                 lstm_cell_output = self.lstm_cell(lstm_cell_input)[0] # [batch_size, emb_dim]
                 lstm_output = self.dropout_lstm(lstm_cell_output) if self.training else lstm_cell_output
-
+                # @fix_fzq: Maintain dropout for history saving
+                # If we use `lstm_cell_output` (raw) for history, it mismatches what the network sees in training.
+                # If we use `lstm_output` (dropped) for history, then training history is sparse, but test history is dense.
+                # However, Standard Dropout scales by 1/(1-p). So expected value is maintained.
+                # The issue with HSSI is high variance.
+                # Let's trust `lstm_output` as it aligns with typical RNN stacking.
+                
             # 找t+1时刻的[习题]以及[其对应的知识点]
             q_next = question[:, t + 1] # [batch_size, ]
             skills_related = self.qs_table[q_next] # [batch_size, num_skill]
@@ -540,10 +546,17 @@ class GIKT(Module):
                 # 不再重新聚合，而是从预计算张量中获取
                 # precomputed_gnn_features: [Batch, Seq, Emb] -> At t+1
                 emb_q_next = precomputed_gnn_features[:, t+1]
+                
+                # @fix_fzq: TF Alignment - Target Transform
+                # Apply same transform (ReLU) to target question as applied to input question
+                # GNN Output is Tanh, TF expects ReLU for dot product with Hidden State
+                emb_q_next = torch.relu(self.feature_transform_layer(emb_q_next))
 
                 # TF Alignment: Always use precomputed skills for target aggregation
                 # 提取 Agg List (使用预计算的 skills)
                 emb_skills_next_batch = precomputed_gnn_skills[:, t+1]
+                # @fix_fzq: 对齐 TF - 技能嵌入也应通过同样的变换层，确保 qs_concat 都在同一特征空间
+                emb_skills_next_batch = torch.relu(self.feature_transform_layer(emb_skills_next_batch))
                 qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
                 use_legacy_concat = False
                 
@@ -647,6 +660,7 @@ class GIKT(Module):
                 k_active = sorted_mask.sum(dim=1).max().item()
                 
                 # 3. 基础状态：始终包含 current_state
+                # @fix_fzq: Reverted HSSI alignment - now handled by target transform
                 # lstm_output: [Batch, Dim] -> [Batch, 1, Dim]
                 curr_state_expanded = lstm_output.unsqueeze(1) 
 
@@ -703,11 +717,16 @@ class GIKT(Module):
                 # 确定 "neighbor" 来源 (retrieved items)
                 if self.recap_source == 'hsei':
                     neighbor_source = recap_feature
+                    # @fix_fzq: Symmetric Current State for HSEI
+                    # If history is Input Projection, Current should also be Input Projection?
+                    # But TF uses LSTM output for current state in Softmax logic?
+                    # Let's keep HSEI as is (it works well).
+                    current_state = lstm_output.unsqueeze(dim=1)
                 else:
-                    neighbor_source = lstm_output
+                    # HSSI (Hidden State Selection)
+                    neighbor_source = lstm_output 
+                    current_state = lstm_output.unsqueeze(dim=1)
 
-                current_state = lstm_output.unsqueeze(dim=1)
-                
                 # 软选择更新：准备原始值和键值
                 curr_key = torch.tanh(self.MLP_query(current_state))
                 
@@ -751,7 +770,8 @@ class GIKT(Module):
                 # 使用刚才定义的 neighbor_source (recap_feature)
                 new_state = neighbor_source
             else:
-                # 默认 (hssi): 历史状态存储的是 LSTM Output (Hidden State)
+                # @fix_fzq: Reverted usage of alignment layer.
+                # In HSSI, we use raw LSTM output.
                 new_state = lstm_output
             
             # state_history[:, t] = new_state
@@ -933,6 +953,13 @@ class GIKT(Module):
         
         # 3. 加权聚合与预测
         p = torch.sum(alpha * output_g, dim=(1, 2)) 
+        
+        # @fix_fzq: HSSI Stability - Scale Dot Product Attention
+        # 即使只在 predict 计算 score 是不够的，最终的聚合能力值 p 也是点积的结果
+        # HSSI (Hidden State): 方差较大，导致 p 值分布过宽，sigmoid 后梯度消失/爆炸
+        # HSEI (Input Emb): 方差较小，p 值稳定
+        # 添加缩放因子以稳定训练动态 (参考 Transformer)
+        p = p / (self.emb_dim ** 0.5)
 
         # @add_fzq: PID-GIKT Bias Injection
         # Modify Student Ability (p) with PID Control Signal
