@@ -140,7 +140,7 @@ if __name__ == '__main__':
         pre_train=params.model.pre_train,
         data_dir=config.PROCESSED_DATA_DIR,
         agg_method=params.model.agg_method,
-        recap_source='hsei' if params.model.use_input_attention else 'hssi', # 通过 toml 配置控制
+        recap_source=params.model.recap_source,  # 直接使用配置值
         use_pid=params.model.use_pid,
         pid_mode=params.model.pid_mode
     ).to(DEVICE)

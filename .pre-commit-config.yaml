@@ -17,6 +17,7 @@ repos:
     # - id: ruff-format # 统一 Python 代码格式
 
 # Conventional Commits 提交信息校验（commit-msg 阶段）
+# (build|ci|docs|feat|fix|perf|refactor|style|test|chore|revert|bump)(\(\S+\))?!?: [^\n\r]+((\n\n.*)|(\s*))?$
 - repo: https://github.com/commitizen-tools/commitizen
   rev: v3.27.0
   hooks:

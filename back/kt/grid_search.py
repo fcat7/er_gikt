@@ -211,7 +211,7 @@ def run_grid_search():
             pre_train=current_params.model.pre_train,
             data_dir=config.PROCESSED_DATA_DIR,
             agg_method='gcn', # 这里固定，也可以加入搜索
-            recap_source='hsei' if current_params.model.use_input_attention else 'hssi'
+            recap_source=current_params.model.recap_source
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(model.parameters(), lr=current_params.train.lr)

@@ -62,7 +62,7 @@ def init_model(model_name, num_question, num_skill, config, params):
             use_cognitive_model=params.model.use_cognitive_model,
             pre_train=params.model.pre_train,
             agg_method=params.model.agg_method,
-            recap_source='hsei' if params.model.use_input_attention else 'hssi',
+            recap_source=params.model.recap_source,
             use_pid=params.model.use_pid,
             pid_mode=params.model.pid_mode
         ).to(DEVICE)
