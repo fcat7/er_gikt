@@ -167,7 +167,7 @@ class GIKT(Module):
             _input_size = emb_dim if (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment) else emb_dim * 2
             self.lstm_cell = LSTMCell(input_size=_input_size, hidden_size=emb_dim) # 使用LSTM网络
 
-        if self.recap_source == 'hsei':
+        if self.recap_source == 'hsei' or (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment):
             # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
             # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
             self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
@@ -499,8 +499,8 @@ class GIKT(Module):
             lstm_input = torch.cat((emb_question_trans, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
             
             # --- Prepare Recap Feature ---
-            if self.recap_source == 'hsei':
-                # 使用 Input (经过线性变换) 作为 History State
+            if self.recap_source == 'hsei' or (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment):
+                # 使用 Input (经过线性变换) 作为 History State (或用于 TF 对齐的 LSTM Input)
                 # Align with TF: input_trans_embedding (Dense layer, Linear activation)
                 # Removed torch.tanh to match TF default
                 recap_feature = self.input_trans_layer(lstm_input) 
