@@ -41,7 +41,6 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--name', type=str, default='default', help='Name of the experiment config')
     parser.add_argument('--full', action='store_true', help='Use "full" config type (if not set, auto-detects based on dataset name)')
-    parser.add_argument('--enable_tf_alignment', action='store_true', default=True, help='Align GIKT with TF logic')
     parser.add_argument('--verbose', action='store_true', default=True, help='Print detailed logs')
     return parser.parse_args()
 
@@ -64,7 +63,8 @@ def init_model(model_name, num_question, num_skill, config, params):
             pre_train=params.model.pre_train,
             agg_method=params.model.agg_method,
             recap_source='hsei' if params.model.use_input_attention else 'hssi',
-            enable_tf_alignment=params.model.enable_tf_alignment
+            use_pid=params.model.use_pid,
+            pid_mode=params.model.pid_mode
         ).to(DEVICE)
     elif model_name.lower() == 'dkt':
         return DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout[0] if isinstance(params.model.dropout, list) else 0.1).to(DEVICE)

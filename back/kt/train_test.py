@@ -141,22 +141,12 @@ if __name__ == '__main__':
         data_dir=config.PROCESSED_DATA_DIR,
         agg_method=params.model.agg_method,
         recap_source='hsei' if params.model.use_input_attention else 'hssi', # 通过 toml 配置控制
-        enable_tf_alignment=params.model.enable_tf_alignment,
         use_pid=params.model.use_pid,
         pid_mode=params.model.pid_mode
     ).to(DEVICE)
 
-    # @change_fzq 2026-01-08: 修改损失函数为 BCELoss
-    # 原因：模型输出已经是 Sigmoid 概率，BCEWithLogitsLoss 会再次 Sigmoid，导致梯度消失
-    # 原始损失函数备份：
+    # TF Alignment is now always enabled (Logits output, BCEWithLogitsLoss)
     loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) # 损失函数
-    if params.train.use_bce_loss:
-        loss_fun = torch.nn.BCELoss().to(DEVICE)
-
-    # @add_fzq: TF Alignment Override
-    if params.model.enable_tf_alignment:
-        # If alignment enabled, Model outputs Logits -> Must use BCEWithLogitsLoss
-        loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE)
     
     dataset = UserDataset(config)  # 数据集
     data_len = len(dataset)  # 数据总长度
@@ -254,20 +244,12 @@ if __name__ == '__main__':
                     y_hat = torch.masked_select(y_hat, mask)
                     y_target = torch.masked_select(y_target, mask)
 
-                    # @add_fzq: Logic Branch for TF Alignment (Logits vs Probs)
-                    if params.model.enable_tf_alignment:
-                        # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
-                        loss = loss_fun(y_hat, y_target.to(torch.float32))
-                        
-                        # Metrics: Convert to Probabilities
-                        y_prob = torch.sigmoid(y_hat) 
-                    else: 
-                        # Original Behavior: y_hat is probabilities (Sigmoid applied in model)
-                        # @add_fzq 2026-01-08: Clamping for BCELoss numerical stability
-                        y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                        loss = loss_fun(y_hat, y_target.to(torch.float32))
-                        
-                        y_prob = y_hat # Already probabilities
+                    # @add_fzq: TF Alignment Logic (Always Enabled)
+                    # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    
+                    # Metrics: Convert to Probabilities
+                    y_prob = torch.sigmoid(y_hat)
                     
                     # @add_fzq: Regularization Constraint (Path 2 & 3)
                     # 防止区分度参数爆炸。对于 Step 2 (scalar)，约束其趋近 0(即gain=1)；
@@ -358,15 +340,9 @@ if __name__ == '__main__':
                     y_hat = torch.masked_select(y_hat, mask.to(torch.bool))
                     y_target = torch.masked_select(y_target, mask.to(torch.bool))
                 
-                    # @add_fzq: Logic Branch for TF Alignment (Testing Phase)
-                    if params.model.enable_tf_alignment:
-                        loss = loss_fun(y_hat, y_target.to(torch.float32))
-                        y_prob = torch.sigmoid(y_hat)
-                    else:
-                        # @add_fzq 2026-01-08: 截断
-                        y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                        loss = loss_fun(y_hat, y_target.to(torch.float32))
-                        y_prob = y_hat
+                    # @add_fzq: TF Alignment Logic (Testing Phase, Always Enabled)
+                    loss = loss_fun(y_hat, y_target.to(torch.float32))
+                    y_prob = torch.sigmoid(y_hat)
 
                     test_loss += loss.item()
                     
@@ -460,6 +436,6 @@ if __name__ == '__main__':
 
     output_file.close()
 
-    torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+    # torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)

@@ -84,7 +84,7 @@ def train_epoch(model, dataloader, optimizer, criterion):
     avg_auc = epoch_auc_sum / total_samples if total_samples > 0 else 0
     return avg_loss, avg_auc
 
-def evaluate(model, dataloader, enable_tf_alignment=True):
+def evaluate(model, dataloader):
     model.eval()
     all_preds = []
     all_targets = []
@@ -105,9 +105,8 @@ def evaluate(model, dataloader, enable_tf_alignment=True):
             
             y_hat = model(question, response, mask, interval_time, response_time)
             
-            # Logits -> Prob
-            if enable_tf_alignment:
-                y_hat = torch.sigmoid(y_hat)
+            # TF Alignment: Always convert Logits to Prob
+            y_hat = torch.sigmoid(y_hat)
 
             preds = y_hat[:, :-1][mask[:, 1:] == 1]
             targets = response[:, 1:][mask[:, 1:] == 1].float()
@@ -212,8 +211,7 @@ def run_grid_search():
             pre_train=current_params.model.pre_train,
             data_dir=config.PROCESSED_DATA_DIR,
             agg_method='gcn', # 这里固定，也可以加入搜索
-            recap_source='hsei' if current_params.model.use_input_attention else 'hssi',
-            enable_tf_alignment=current_params.model.enable_tf_alignment
+            recap_source='hsei' if current_params.model.use_input_attention else 'hssi'
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(model.parameters(), lr=current_params.train.lr)
@@ -223,7 +221,7 @@ def run_grid_search():
         
         for epoch in range(current_params.train.epochs):
             loss, train_auc = train_epoch(model, train_loader, optimizer, criterion)
-            test_auc = evaluate(model, test_loader, current_params.model.enable_tf_alignment)
+            test_auc = evaluate(model, test_loader)
             
             if test_auc > best_auc:
                 best_auc = test_auc

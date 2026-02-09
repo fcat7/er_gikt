@@ -60,7 +60,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', enable_tf_alignment=False, q_features_path=None, use_pid=False, pid_mode='global'):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global'):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -80,7 +80,6 @@ class GIKT(Module):
             data_dir: 数据目录，用于加载预训练向量，默认为None
             agg_method: 聚合方法，默认为'gcn'
             recap_source: 回顾特征来源，默认为'hssi'
-            enable_tf_alignment: 是否启用 TF 对齐 (Logits 输出, Xavier Init)，默认为False
             use_pid: 是否使用PID控制器架构
             pid_mode: PID 模式 ('global' 或 'domain') 
         '''
@@ -96,7 +95,6 @@ class GIKT(Module):
         self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
-        self.enable_tf_alignment = enable_tf_alignment # 是否启用TF对齐
         self.use_pid = use_pid # 是否使用PID控制器架构
         self.pid_mode = pid_mode # PID模式
         # pid_num_domains will be set dynamically if mode is 'domain'
@@ -160,17 +158,16 @@ class GIKT(Module):
         # self.gru1 = GRUCell(emb_dim * 2, emb_dim) # 使用GRU网络
         # self.gru2 = GRUCell(emb_dim, emb_dim)
         if self.use_cognitive_model:
-            # Step 3 Init: TF Alignment uses projected input (emb_dim), Original uses concatenated (emb_dim*2)
-            _input_size = emb_dim if (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment) else emb_dim * 2
-            self.cognitive_cell = CognitiveRNNCell(input_size=_input_size, hidden_size=emb_dim)
+            # TF Alignment: Uses projected input (emb_dim)
+            self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim, hidden_size=emb_dim)
         else:
-            _input_size = emb_dim if (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment) else emb_dim * 2
-            self.lstm_cell = LSTMCell(input_size=_input_size, hidden_size=emb_dim) # 使用LSTM网络
+            # TF Alignment: Uses projected input (emb_dim)
+            self.lstm_cell = LSTMCell(input_size=emb_dim, hidden_size=emb_dim) # 使用LSTM网络
 
-        if self.recap_source == 'hsei' or (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment):
-            # 如果使用 Input Embedding 作为回顾特征，需要将其从 2*emb_dim 映射到 emb_dim (假设)
-            # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
-            self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
+        # TF Alignment: Always initialize input_trans_layer for projected input
+        # 将 2*emb_dim 的拼接特征映射到 emb_dim
+        # 参考 TF 源码: input_trans_embedding = dense(concat([feature_trans, input_answers]), hidden_size)
+        self.input_trans_layer = Linear(emb_dim * 2, emb_dim)
 
         # ----------------------------------------------------
         # @add_fzq v5 optimization: Feature Transform Layer
@@ -287,9 +284,8 @@ class GIKT(Module):
                  self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
                  self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
 
-        # @add_fzq: TF Alignment - Initialize weights if enabled
-        if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-            self.reset_parameters()
+        # @add_fzq: TF Alignment - Initialize weights
+        self.reset_parameters()
         
         # # 可学习的融合参数 beta，初始化为 0.1
         # self.beta = torch.nn.Parameter(torch.tensor(0.1))
@@ -390,14 +386,10 @@ class GIKT(Module):
         # output = u_agg_q[inverse_ind]
         precomputed_gnn_features = agg_unique_q[inverse_ind].view(batch_size, seq_len, self.emb_dim)
         
-        # 如果下一个题目预测需要（hsei target aggregation），我们可能也需要 `agg_list_unique` 特征？
-        # 当前代码仅在 TF 对齐时使用 `agg_list_next[1]`。
-        # 如果 TF 对齐开启，我们也需要映射该特征。
-        precomputed_gnn_skills = None
-        if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-            # u_agg_list[1] is [Num_Unique_Q, Neighbor_Size, Emb]
-            # agg_list_unique[1] 对应第一层聚合后的 Skill 邻居特征
-            precomputed_gnn_skills = agg_list_unique[1][inverse_ind].view(batch_size, seq_len, -1, self.emb_dim)
+        # TF Alignment: Always precompute gnn_skills for target aggregation
+        # u_agg_list[1] is [Num_Unique_Q, Neighbor_Size, Emb]
+        # agg_list_unique[1] 对应第一层聚合后的 Skill 邻居特征
+        precomputed_gnn_skills = agg_list_unique[1][inverse_ind].view(batch_size, seq_len, -1, self.emb_dim)
 
         # [Level 2 优化] 投影历史缓存 (KV Cache)
         # 使用 List 避免 autograd 期间的 In-place 操作错误
@@ -498,24 +490,19 @@ class GIKT(Module):
             # 使用变换后的 Question Embedding 进行拼接
             lstm_input = torch.cat((emb_question_trans, emb_response_t), dim=1) # [batch_size, emb_dim * 2]
             
-            # --- Prepare Recap Feature ---
-            if self.recap_source == 'hsei' or (hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment):
-                # 使用 Input (经过线性变换) 作为 History State (或用于 TF 对齐的 LSTM Input)
-                # Align with TF: input_trans_embedding (Dense layer, Linear activation)
-                # Removed torch.tanh to match TF default
-                recap_feature = self.input_trans_layer(lstm_input) 
-                # TF code snippet shows: input_trans_embedding = tf.reshape(tf.layers.dense(input_fa_embedding, hidden_size), ...) 
-                # Default activation of dense is None (Linear). But RNN usually operates on Tanh/ReLU. 
-                # Model GIKT aggregate uses Tanh. Let's assume Tanh for consistency with state.
+            # --- Prepare Recap Feature (TF Alignment) ---
+            # 使用 Input (经过线性变换) 作为 History State 或 LSTM Input
+            # Align with TF: input_trans_embedding (Dense layer, Linear activation)
+            # Removed torch.tanh to match TF default
+            recap_feature = self.input_trans_layer(lstm_input) 
+            # TF code snippet shows: input_trans_embedding = tf.reshape(tf.layers.dense(input_fa_embedding, hidden_size), ...) 
+            # Default activation of dense is None (Linear). But RNN usually operates on Tanh/ReLU. 
+            # Model GIKT aggregate uses Tanh. Let's assume Tanh for consistency with state.
             
-            # Determine LSTM Input
-            if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-                # [Case: TF 对齐] LSTM 使用投影特征 (100 dim)
-                # 注意: `recap_feature` 在上方计算为 input_trans_layer(lstm_input)
-                lstm_cell_input = recap_feature
-            else:
-                # [Case: 原始] LSTM 使用拼接特征 (200 dim)
-                lstm_cell_input = lstm_input
+            # Determine LSTM Input (TF Alignment)
+            # LSTM 使用投影特征 (100 dim)
+            # 注意: `recap_feature` 在上方计算为 input_trans_layer(lstm_input)
+            lstm_cell_input = recap_feature
 
             if self.use_cognitive_model:
                 if interval_time is None or response_time is None:
@@ -554,24 +541,11 @@ class GIKT(Module):
                 # precomputed_gnn_features: [Batch, Seq, Emb] -> At t+1
                 emb_q_next = precomputed_gnn_features[:, t+1]
 
-                # 提取 Agg List
-                # 当前仅在 TF 对齐时使用 agg_list_next[1]。
-                # 如果 precomputed_gnn_skills 可用
-                if hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment and precomputed_gnn_skills is not None:
-                    emb_skills_next_batch = precomputed_gnn_skills[:, t+1]
-                    qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
-                    use_legacy_concat = False
-                elif hasattr(self, 'enable_tf_alignment') and self.enable_tf_alignment:
-                    # 降级逻辑（理论上如果上述逻辑正确，不应进入此分支）
-                    # 重新运行单步传统逻辑（慢速路径）
-                    node_neighbors_next = [level[:, t + 1] for level in node_neighbors_cache] 
-                    emb_node_neighbor_next = []
-                    for i, nodes in enumerate(node_neighbors_next):
-                        if i % 2 == 0: emb_node_neighbor_next.append(self.emb_table_question(nodes))
-                        else: emb_node_neighbor_next.append(self.emb_table_skill(nodes))
-                    emb_q_next_legacy, agg_list_next = self.aggregate(emb_node_neighbor_next, node_neighbors_next)
-                    qs_concat = torch.cat((emb_q_next.unsqueeze(1), agg_list_next[1]), dim=1)
-                    use_legacy_concat = False
+                # TF Alignment: Always use precomputed skills for target aggregation
+                # 提取 Agg List (使用预计算的 skills)
+                emb_skills_next_batch = precomputed_gnn_skills[:, t+1]
+                qs_concat = torch.cat((emb_q_next.unsqueeze(1), emb_skills_next_batch), dim=1)
+                use_legacy_concat = False
                 
             if use_legacy_concat:
                 # @fix_fzq: AMP Fix - qs_concat 必须与 emb_q_next (FP16/Full) 保持相同类型
@@ -1042,25 +1016,18 @@ class GIKT(Module):
                     p_base = torch.sigmoid(logits)
                     p_final = c_q + (1.0 - c_q - d_q) * p_base
                     
-                    if self.enable_tf_alignment:
-                        # 为了兼容 BCEWithLogitsLoss，将概率反向映射回 logit：L = log(p/(1-p))
-                        p_final = torch.clamp(p_final, 1e-7, 1.0 - 1e-7)
-                        p = torch.log(p_final / (1.0 - p_final))
-                    else:
-                        p = p_final
+                    # TF Alignment: 为了兼容 BCEWithLogitsLoss，将概率反向映射回 logit：L = log(p/(1-p))
+                    p_final = torch.clamp(p_final, 1e-7, 1.0 - 1e-7)
+                    p = torch.log(p_final / (1.0 - p_final))
                 else:
                     # Fallback to Step 1/2: 使用全局判别增益 (Discrimination Gain)
                     gain = getattr(self, 'discrimination_gain', torch.tensor(1.0))
                     gain_clamped = torch.clamp(gain, 0.1, 3.0)
                     p = gain_clamped * (p - difficulty)
         
-        # @add_fzq: Output Alignment
-        if self.enable_tf_alignment:
-            # 返回 Logits (或经映射的伪 Logits) 给 BCEWithLogitsLoss
-            result = p
-        else:
-            # 4PL 逻辑下 p 已经是最终概率，非 4PL 则补充 Sigmoid
-            result = p if is_4pl else torch.sigmoid(p) 
+        # @add_fzq: TF Alignment - Always return Logits for BCEWithLogitsLoss
+        # 4PL 预测的预处理结果已经是 Logits 形式，直接返回
+        result = p if is_4pl else torch.sigmoid(p) 
         
         return result
 

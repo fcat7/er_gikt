@@ -24,7 +24,6 @@ class ModelParams:
     hard_recap: bool = True
     agg_method: str = 'gcn'
     use_input_attention: bool = False
-    enable_tf_alignment: bool = False # TF Alignment (Logits Output, Xavier Init)
     use_pid: bool = False # 是否使用 PID-GIKT 控制器架构
     pid_mode: str = 'global' # PID 模式: 'global' (标量) 或 'domain' (向量)
 
