@@ -403,6 +403,7 @@ class KTDataBuilder:
             all_mask = []
             all_interval = []
             all_response = []
+            all_groups = [] # 记录原始 User ID (用于防泄漏划分)
             
             grouped = df.groupby('user_id')
             
@@ -483,12 +484,18 @@ class KTDataBuilder:
                     if has_time:
                         all_interval.append(win_interval)
                         all_response.append(win_response)
+                        
+                    # 记录该窗口属于哪个原始用户
+                    all_groups.append(u_idx)
 
             # 保存增强结果
             ic(f"滑动窗口结果: 原用户数 {num_users} -> 窗口总数 {len(all_seq)}")
             np.save(os.path.join(self.output_dir, 'user_seq.npy'), np.array(all_seq))
             np.save(os.path.join(self.output_dir, 'user_res.npy'), np.array(all_res))
             np.save(os.path.join(self.output_dir, 'user_mask.npy'), np.array(all_mask))
+            # 保存用户组信息 (关键修复: 数据泄露)
+            np.save(os.path.join(self.output_dir, 'user_window_groups.npy'), np.array(all_groups))
+
             if has_time:
                 np.save(os.path.join(self.output_dir, 'user_interval_time.npy'), np.array(all_interval))
                 np.save(os.path.join(self.output_dir, 'user_response_time.npy'), np.array(all_response))

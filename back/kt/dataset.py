@@ -29,6 +29,13 @@ class UserDataset(Dataset):
             self.user_interval_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
             self.user_response_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
 
+        # @fix_fzq: 加载 Group 信息 (用于 GroupKFold 防泄露)
+        try:
+            self.groups = np.load(os.path.join(processed_dir, 'user_window_groups.npy'))
+            print("Loaded user groups for leakage-free splitting.")
+        except FileNotFoundError:
+            self.groups = None
+
     # # 假设原始数据：
     # user_seq = [1, 2, 3, …]      # 问题ID序列
     # user_res = [1, 0, 1, …]      # 答题结果序列

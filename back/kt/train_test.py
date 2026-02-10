@@ -175,13 +175,30 @@ if __name__ == '__main__':
     y_label_aver = np.zeros([3, params.train.epochs]) # 平均精度值
     y_label_all = np.zeros([3, params.train.epochs * params.train.k_fold]) # 全部精度值
 
-    # KFold的shuffle操作是在用户级别进行的，而不是在答题记录级别
-    if params.train.k_fold == 1:
-        # 如果 k_fold 为 1，使用 ShuffleSplit 进行单次划分 (80% 训练, 20% 测试)
-        k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    # @fix_fzq: 防数据泄露划分 (Group-aware splitting)
+    # 如果存在 groups 信息 (即滑动窗口模式)，必须使用 GroupShuffleSplit/GroupKFold
+    groups = dataset_full_clean.groups
+    
+    if groups is not None:
+        print(f"🔒 Detecting Windowed Dataset with {len(np.unique(groups))} unique users. Using Group-based splitting to prevent leakage.")
+        from sklearn.model_selection import GroupKFold, GroupShuffleSplit
+        
+        if params.train.k_fold == 1:
+            k_fold = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        else:
+            k_fold = GroupKFold(n_splits=params.train.k_fold)
+            
+        # GroupSplit 需要传入 groups 参数，因此我们需要稍微修改 split 调用方式
+        # 为了兼容下面的循环，我们定义一个 generator 或者 hack
+        split_generator = k_fold.split(dataset_full_clean, groups=groups)
     else:
-        # 否则使用 KFold 进行交叉验证
-        k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
+        # 标准模式 (每个样本是一个独立用户)
+        print("🔓 Using Standard Shuffled splitting.")
+        if params.train.k_fold == 1:
+            k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        else:
+            k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
+        split_generator = k_fold.split(dataset_full_clean)
 
     # @add_fzq: Early Stopping Init
     best_epoch_auc = 0.0
@@ -191,10 +208,21 @@ if __name__ == '__main__':
         train_loss_aver = train_acc_aver = train_auc_aver = 0
         test_loss_aver = test_acc_aver = test_auc_aver = 0
         # 五折的平均值
-        for fold, (train_indices, test_indices) in enumerate(k_fold.split(dataset)):
+        # 注意：这里我们使用统一的 split_generator，但在每个 epoch 重置它是不行的 (generator 只能用一次)
+        # 修正：将 generator 的创建移到 epoch 循环外部，或者每次重新创建
+        # 对于 KFold, split 每次返回相同的划分 (只要 random_state 固定)
+        
+        if groups is not None:
+            current_splits = k_fold.split(dataset_full_clean, groups=groups)
+        else:
+            current_splits = k_fold.split(dataset_full_clean)
+
+        for fold, (train_indices, test_indices) in enumerate(current_splits):
             # 使用五折交叉验证，每次的训练集和测试集都不相同
-            train_set = Subset(dataset, train_indices)  # 训练集
-            test_set = Subset(dataset, test_indices)  # 测试集
+            # 训练集使用 dataset_full_augment (可能带有数据增强)
+            # 测试集使用 dataset_full_clean (原始数据)
+            train_set = Subset(dataset_full_augment, train_indices)  # 训练集
+            test_set = Subset(dataset_full_clean, test_indices)  # 测试集
             if DEVICE.type == 'cpu':  # Cpu(本机)
                 train_loader = DataLoader(train_set, batch_size=batch_size)  # 训练数据加载器
                 test_loader = DataLoader(test_set, batch_size=batch_size)  # 测试数据加载器
