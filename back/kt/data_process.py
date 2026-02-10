@@ -1,5 +1,8 @@
 import sys
 import os
+# @fix_fzq: 解决 OpenMP 多副本冲突报错 (放在其他 import 之前)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import pandas as pd
 from config import Config, RANDOM_SEED
 try:
@@ -108,12 +111,10 @@ def build_feature_matrix(features_df, q2idx_path, output_path, feature_cols=['di
         try: oid_candidates.append(int(original_id))
         except: pass
         
-        matched = False
         for oid in oid_candidates:
             if oid in df.index:
                 final_matrix[mapped_id] = df.loc[oid, cols_to_use].values
                 found += 1
-                matched = True
                 break
     
     ic(f"特征矩阵构建完成: {found}/{num_q-1} matched. Shape: {final_matrix.shape}")
@@ -124,16 +125,48 @@ def main():
     # 1. 初始化配置
     ic("初始化配置...")
     # Available: ['assist09', 'assist12', 'ednet_kt1'] 
-    dataset_name = 'ednet_kt1-sample_10%'
-    ratio = 0.1
+    base_dataset_name = 'assist09'  # 基础数据集名称 (如 assist09, assist12)
+    ratio = 0.1                     # 采样率 (0.0 < ratio <= 1.0)
     min_seq_len = 20
     reandom_seed = RANDOM_SEED
+    
+    # 校验 ratio
+    if not (0 < ratio <= 1.0):
+        ic(f"Error: ratio must be in range (0, 1]. Current: {ratio}")
+        return
 
-    config = Config(dataset_name=dataset_name)
+    # 根据 ratio 生成中间数据集名称 (不含窗口后缀)
+    if ratio == 1.0:
+        current_dataset_name = base_dataset_name
+    else:
+        current_dataset_name = f"{base_dataset_name}-sample_{int(ratio*100)}%"
 
-    # 2. 数据加载与基础清洗
+    # 兼容后续代码使用的 dataset_name 变量
+    dataset_name = current_dataset_name 
+    
+    # @add_fzq: 数据增强配置开关
+    ENABLE_SLIDING_WINDOW = True  # <--- 在这里控制是否启用滑动窗口！
+    WINDOW_STRIDE = 100            # 滑动步长
+
+    # 1. 配置加载策略 
+    # src_config 始终读取基础数据集 (确保能正确加载原始数据)
+    src_config = Config(dataset_name=base_dataset_name) 
+    
+    # target_config 决定输出目录
+    if ENABLE_SLIDING_WINDOW:
+        # 如果启用增强，在 dataset_name 基础上增加后缀
+        target_dataset_name = f"{dataset_name}_window"
+        ic(f"模式: 滑动窗口增强开启。")
+    else:
+        target_dataset_name = dataset_name
+        ic(f"模式: 标准/采样处理。")
+
+    target_config = Config(dataset_name=target_dataset_name)
+    ic(f"配置生成 -> 源: {base_dataset_name}, 目标: {target_dataset_name}")
+
+    # 2. 数据加载与基础清洗 (使用源配置读取)
     ic("Step 1: 数据加载与标准化...")
-    adapter = KTDataAdapter(config)
+    adapter = KTDataAdapter(src_config)
     try:
         df = adapter.load_data()
         df = adapter.clean_data(df)
@@ -142,7 +175,7 @@ def main():
         return
     
     # 3. 数据集特定过滤
-    if config.dataset.DATA_NAME == 'assist09':
+    if src_config.dataset.DATA_NAME == 'assist09':
         if 'original' in df.columns:
             df = df[df['original'] == 1]
         if 'skill_id' in df.columns:
@@ -159,9 +192,9 @@ def main():
         df['skill_id'] = df['skill_id'].apply(lambda x: str(x).replace(',', '_').replace(';', '_'))
     
     # 保存标准全量数据集
-    standard_csv_path = os.path.join(config.PROCESSED_DATA_DIR, f'{dataset_name}_standard.csv')
-    if not os.path.exists(config.PROCESSED_DATA_DIR):
-        os.makedirs(config.PROCESSED_DATA_DIR)
+    standard_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, f'{dataset_name}_standard.csv')
+    if not os.path.exists(target_config.PROCESSED_DATA_DIR):
+        os.makedirs(target_config.PROCESSED_DATA_DIR)
     adapter.save_standard_csv(df, standard_csv_path)
 
     # ==========================================
@@ -171,7 +204,7 @@ def main():
     q_features_df = calculate_question_features(df)
     
     if q_features_df is not None:
-        feat_csv_path = os.path.join(config.PROCESSED_DATA_DIR, 'q_features_analysis.csv')
+        feat_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'q_features_analysis.csv')
         q_features_df.to_csv(feat_csv_path, index=False)
         ic(f"特征分析表已保存: {feat_csv_path}")
     
@@ -179,7 +212,7 @@ def main():
     # Step 3: 数据探查
     # ==========================================
     ic("Step 3: 数据探查...")
-    inspector = KTDataInspector(df, config)
+    inspector = KTDataInspector(df, target_config)
     # inspector.get_stats()
     
     # ==========================================
@@ -194,25 +227,25 @@ def main():
     sampled_df = sampler.stratified_sample(df, ratio=ratio, min_seq_len=min_seq_len)
 
     # 保存抽样数据集
-    sampled_csv_path = os.path.join(config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')
+    sampled_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')
     adapter.save_standard_csv(sampled_df, sampled_csv_path)
     
     # ==========================================
     # Step 5: 构建模型输入 (.npy)
     # ==========================================
     ic("Step 5: 构建模型序列数据...")
-    builder = KTDataBuilder(config)
+    builder = KTDataBuilder(target_config)
     # build_dataset 会生成 train/test/valid.npy 以及 question2idx.npy
     # 传递新的参数以控制领域构建
-    builder.build_dataset(sampled_df) 
+    builder.build_dataset(sampled_df, enable_window_aug=ENABLE_SLIDING_WINDOW, stride=WINDOW_STRIDE) 
 
     # ==========================================
     # Step 6: 生成特征矩阵 (.npy)
     # ==========================================
     if q_features_df is not None:
         ic("Step 6: 生成题目特征矩阵 q_features.npy...")
-        q2idx_path = os.path.join(config.PROCESSED_DATA_DIR, 'question2idx.npy')
-        output_matrix_path = os.path.join(config.PROCESSED_DATA_DIR, 'q_features.npy')
+        q2idx_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'question2idx.npy')
+        output_matrix_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'q_features.npy')
         
         build_feature_matrix(q_features_df, q2idx_path, output_matrix_path)
     else:
