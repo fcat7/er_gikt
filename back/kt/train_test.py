@@ -162,7 +162,7 @@ if __name__ == '__main__':
 
     # 优化器
     epoch_total = 0
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr)
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
     torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
     
     # 在matplotlib中绘制的y轴数据，三行分别表示loss, acc, auc
@@ -176,6 +176,10 @@ if __name__ == '__main__':
     else:
         # 否则使用 KFold 进行交叉验证
         k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
+
+    # @add_fzq: Early Stopping Init
+    best_epoch_auc = 0.0
+    patience_limit_counter = 0
 
     for epoch in range(params.train.epochs):
         train_loss_aver = train_acc_aver = train_auc_aver = 0
@@ -421,6 +425,18 @@ if __name__ == '__main__':
         # @add_fzq: 实时保存 aver 数据，防止训练中断丢失数据
         # 每次 epoch 结束都覆盖保存一次，确保即使中断也能保留已完成的 epoch 数据
         # np.savetxt(f'{LOGCHART_DIR}/{time_now}_aver.txt', y_label_aver)
+
+        # @add_fzq: Early Stopping Logic
+        if params.train.patience > 0:
+            if test_auc_aver > best_epoch_auc:
+                best_epoch_auc = test_auc_aver
+                patience_limit_counter = 0
+                # Optional: Save best model here if needed
+            else:
+                patience_limit_counter += 1
+                if patience_limit_counter >= params.train.patience:
+                    print(f"{COLOR_LOG_Y}Early stopping triggered at epoch {epoch_total} (Best AUC: {best_epoch_auc:.4f}){COLOR_LOG_END}")
+                    break
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 计算总耗时 

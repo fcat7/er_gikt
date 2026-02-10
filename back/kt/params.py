@@ -39,6 +39,8 @@ class TrainParams:
     lr: float = 0.001
     lr_gamma: float = 0.95
     epochs: int = 100
+    weight_decay: float = 0.0 # 权重衰减 (L2 正则化)
+    patience: int = 0 # 早停机制 (0 表示禁用)
     prefetch_factor: int = 4
     k_fold: int = 1
     use_bce_loss: bool = False
