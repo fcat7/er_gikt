@@ -7,7 +7,7 @@ import torch.nn as nn
 from sklearn.metrics import roc_auc_score, accuracy_score
 from scipy import sparse
 from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import KFold, StratifiedShuffleSplit
+from sklearn.model_selection import KFold, StratifiedShuffleSplit, GroupKFold, GroupShuffleSplit
 import random
 import pandas as pd
 
@@ -74,6 +74,18 @@ def init_model(model_name, num_question, num_skill, config, params):
 def get_stratified_split(dataset, test_ratio=0.2, seed=42):
     total_len = len(dataset)
     indices = np.arange(total_len)
+    groups = dataset.groups
+    
+    # @fix_fzq: If groups exist, use GroupShuffleSplit instead
+    if groups is not None:
+        print(f"🔒 Detecting Windowed Dataset. Using Group-based stratified split.")
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_ratio, random_state=seed)
+        train_index, test_index = next(splitter.split(indices, groups=groups))
+        print(f"Group-aware Stratified Split Done. Train: {len(train_index)}, Test: {len(test_index)}")
+        return train_index, test_index
+    
+    # Standard stratified split (no groups)
+    print(f"🔓 Using Standard Stratified splitting (no groups detected).")
     print(f"Generating stratification labels for {total_len} samples...")
     masks = dataset.user_mask.float()
     res = dataset.user_res.float()
@@ -212,18 +224,41 @@ def run_comparison():
     num_question = qs_table.shape[0]
     num_skill = qs_table.shape[1]
 
-    print(f"\n{COLOR_LOG_B}Step 1: Splitting 20% Test Set (Stratified){COLOR_LOG_END}")
-    dev_idx, test_idx = get_stratified_split(dataset, test_ratio=0.2)
+    # @fix_fzq: Group-aware splitting for initial holdout
+    groups = dataset.groups
+    if groups is not None:
+        print(f"🔒 Detecting Windowed Dataset. Using GroupShuffleSplit for Holdout Split (20%).")
+        from sklearn.model_selection import GroupShuffleSplit
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        dev_idx, test_idx = next(gss.split(dataset, groups=groups))
+    else:
+        print(f"\n{COLOR_LOG_B}Step 1: Splitting 20% Test Set (Stratified){COLOR_LOG_END}")
+        dev_idx, test_idx = get_stratified_split(dataset, test_ratio=0.2)
+
     test_set = Subset(dataset, test_idx)
     dev_set_base = Subset(dataset, dev_idx)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
     
-    k_fold = KFold(n_splits=5, shuffle=True, random_state=42)
+    # @fix_fzq: Group-aware KFold to prevent data leakage in windowed mode
+    groups = None
+    if dataset.groups is not None:
+        groups = dataset.groups[dev_idx]
+
     model_list = args.models.split(',')
     final_results = {m: [] for m in model_list}
     dev_indices_array = np.arange(len(dev_set_base))
     
-    for fold_i, (train_rel_idx, val_rel_idx) in enumerate(k_fold.split(dev_indices_array)):
+    if groups is not None:
+        print(f"🔒 Detecting Windowed Dataset. Using GroupKFold for CV.")
+        # Groups are already extracted for dev subset
+        dev_groups = groups
+        k_fold = GroupKFold(n_splits=5)
+    else:
+        print(f"🔓 Using Standard KFold.")
+        dev_groups = None
+        k_fold = KFold(n_splits=5, shuffle=True, random_state=42)
+    
+    for fold_i, (train_rel_idx, val_rel_idx) in enumerate(k_fold.split(dev_indices_array, groups=dev_groups)):
         print(f"\n{COLOR_LOG_B}=== CV Fold {fold_i+1}/5 ==={COLOR_LOG_END}")
         train_ds = Subset(dev_set_base, train_rel_idx)
         val_ds = Subset(dev_set_base, val_rel_idx)

@@ -154,8 +154,16 @@ if __name__ == '__main__':
     # TF Alignment is now always enabled (Logits output, BCEWithLogitsLoss)
     loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) # 损失函数
     
-    dataset = UserDataset(config)  # 数据集
-    data_len = len(dataset)  # 数据总长度
+    # 实例化两个数据集对象：一个用于训练（可能开启数据增强），一个用于验证/测试（关闭数据增强）
+    # @update_fzq: 使用细粒度的数据增强配置
+    dataset_full_augment = UserDataset(
+        config, 
+        augment=params.train.enable_data_augmentation,
+        prob_mask=params.train.aug_mask_prob
+    )
+    dataset_full_clean = UserDataset(config, augment=False)
+    
+    data_len = len(dataset_full_clean)  # 数据总长度
 
     # 写当前数据量
     output_file.write(f'Total number of users in dataset: {data_len}\n')
@@ -470,6 +478,7 @@ if __name__ == '__main__':
                 patience_limit_counter += 1
                 if patience_limit_counter >= params.train.patience:
                     print(f"{COLOR_LOG_Y}Early stopping triggered at epoch {epoch_total} (Best AUC: {best_epoch_auc:.4f}){COLOR_LOG_END}")
+                    output_file.write(f"Early stopping triggered at epoch {epoch_total} (Best AUC: {best_epoch_auc:.4f})\n")
                     break
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------

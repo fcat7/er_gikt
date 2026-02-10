@@ -5,11 +5,14 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from scipy import sparse
 
 class UserDataset(Dataset):
 
-    def __init__(self, config):
+    def __init__(self, config, augment=False, prob_mask=0.1):
         processed_dir = config.PROCESSED_DATA_DIR
+        self.augment = augment
+        self.prob_mask = prob_mask # 随机掩码概率
         
         # 输入数据
         self.user_seq = torch.tensor(np.load(os.path.join(processed_dir, 'user_seq.npy')), dtype=torch.int64)
@@ -48,12 +51,40 @@ class UserDataset(Dataset):
     #     ...
     # ]
     def __getitem__(self, index): # index: 用户索引，指定要获取哪个用户的数据
+        seq = self.user_seq[index]
+        res = self.user_res[index]
+        mask = self.user_mask[index]
+        interval = self.user_interval_time[index]
+        response_time = self.user_response_time[index]
+
+        if self.augment:
+            # 随机掩码 (Random Masking)
+            if self.prob_mask > 0:
+                # 创建一个随机概率掩码 (prob < prob_mask)
+                prob_random = torch.rand(seq.shape) < self.prob_mask
+                
+                # 不能掩盖所有数据，至少保留一个
+                # 只有原来是 True 的地方才允许被 mask 掉
+                mask_to_drop = prob_random & mask
+                
+                # 如果全部被 drop 了，强行保留至少一个（防止报错）
+                if mask_to_drop.sum() == mask.sum() and mask.sum() > 0:
+                    # 随机选一个不 drop
+                    valid_indices = torch.nonzero(mask, as_tuple=True)[0]
+                    keep_idx = valid_indices[torch.randint(0, len(valid_indices), (1,))]
+                    mask_to_drop[keep_idx] = False
+                    
+                # 应用由于数据增强导致的 mask 变更 (设置为 0)
+                # 克隆 mask 以避免修改原始数据 (Tensor切片可能是视图)
+                mask = mask.clone() 
+                mask[mask_to_drop] = False
+
         return torch.stack([
-            self.user_seq[index], 
-            self.user_res[index], 
-            self.user_mask[index],
-            self.user_interval_time[index],
-            self.user_response_time[index]
+            seq, 
+            res, 
+            mask,
+            interval,
+            response_time
         ], dim=-1)
         # 将5个一维张量沿着最后一个维度（dim=-1）堆叠，结果是一个二维张量，形状为 [max_seq_len, 5]
 

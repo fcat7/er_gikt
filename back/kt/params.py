@@ -46,6 +46,8 @@ class TrainParams:
     lr_gamma: float = 0.95
     epochs: int = 100
     weight_decay: float = 0.0 # 权重衰减 (L2 正则化)
+    enable_data_augmentation: bool = False # 是否启用数据增强 (总开关)
+    aug_mask_prob: float = 0.1 # 随机Mask概率 (默认 10%)
     reg_4pl: float = 1e-5 # 4PL/IRT 正则化系数 (针对区分度/猜测率/失误率)
     patience: int = 0 # 早停机制 (0 表示禁用)
     prefetch_factor: int = 4
