@@ -97,6 +97,7 @@ class GIKT(Module):
         self.recap_source = recap_source # 硬回顾特征来源
         self.use_pid = use_pid # 是否使用PID控制器架构
         self.pid_mode = pid_mode # PID模式
+        self.pre_train = pre_train # 是否预训练
         # pid_num_domains will be set dynamically if mode is 'domain'
 
         # 将邻居表预加载到计算设备上，以便重复使用/缓存
@@ -191,24 +192,19 @@ class GIKT(Module):
         # 1. 静态难度基准 (Common Mode): 层次化难度建模
         # (1) 题目级难度偏置: 捕捉题目特有的细微难度差异
         self.difficulty_bias = Embedding(num_question, 1)
-        torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
         
         # (2) 知识点级难度偏置 (Hierarchical Step 2): 
         # 用于抑制题目稀疏性带来的噪声，为关联同一知识点的题目提供稳健的共模难度基准
         self.skill_difficulty_bias = Embedding(num_skill, 1)
-        torch.nn.init.constant_(self.skill_difficulty_bias.weight, 0.0)
         
         # 2. 区分度 (Discrimination): a_q (Step 3: 4PL 升级为题目级参数)
         # 初始化为 0，后期配合 softplus(x) + 1.0 得到约为 1.69 的初始区分度
         self.discrimination_bias = Embedding(num_question, 1)
-        torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
         
         # 3. 猜测率 (Guessing) c_q 与 失误率 (Slipping) d_q: 噪声吸收器
         # 使用较大的负数初始化，使得初始状态下 c_q 约为 0.05, d_q 约为 0.02
         self.guessing_bias = Embedding(num_question, 1)
         self.slipping_bias = Embedding(num_question, 1)
-        torch.nn.init.constant_(self.guessing_bias.weight, -3.0)
-        torch.nn.init.constant_(self.slipping_bias.weight, -4.0)
 
         # @add_fzq: PID-GIKT Controller Parameters
         if self.use_pid:
@@ -287,6 +283,18 @@ class GIKT(Module):
         # @add_fzq: TF Alignment - Initialize weights
         self.reset_parameters()
         
+        # @fix_fzq: Re-apply 4PL initialization (must be done AFTER reset_parameters)
+        if hasattr(self, 'difficulty_bias'):
+             torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
+        if hasattr(self, 'skill_difficulty_bias'):
+             torch.nn.init.constant_(self.skill_difficulty_bias.weight, 0.0)
+        if hasattr(self, 'discrimination_bias'):
+             torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
+        if hasattr(self, 'guessing_bias'):
+             torch.nn.init.constant_(self.guessing_bias.weight, -3.0)
+        if hasattr(self, 'slipping_bias'):
+             torch.nn.init.constant_(self.slipping_bias.weight, -4.0)
+
         # # 可学习的融合参数 beta，初始化为 0.1
         # self.beta = torch.nn.Parameter(torch.tensor(0.1))
 
@@ -1063,6 +1071,10 @@ class GIKT(Module):
         Initialize parameters with Xavier Uniform to match TensorFlow implementation
         """
         for name, param in self.named_parameters():
+            # Skip initialization for pre-trained embeddings
+            if self.pre_train and 'emb_table' in name:
+                continue
+                
             if 'weight' in name:
                 if len(param.shape) >= 2:
                     torch.nn.init.xavier_uniform_(param)
