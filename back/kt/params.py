@@ -28,6 +28,8 @@ class ModelParams:
     pid_mode: str = 'global' # PID 模式: 'global' (标量) 或 'domain' (向量)
     pid_ema_alpha: float = 0.1 # PID 积分项衰减率
     pid_lambda: float = 1.0 # PID 微分项缩放系数
+    pid_init_i: float = 0.5 # PID 积分项权重初始化 (W_i)
+    pid_init_d: float = 0.1 # PID 微分项权重初始化 (W_d)
     guessing_prob_init: float = 0.05 # 4PL 猜测率初始概率 (0.05 = 5%)
     slipping_prob_init: float = 0.02 # 4PL 失误率初始概率 (0.02 = 2%)
 
@@ -44,6 +46,7 @@ class TrainParams:
     lr_gamma: float = 0.95
     epochs: int = 100
     weight_decay: float = 0.0 # 权重衰减 (L2 正则化)
+    reg_4pl: float = 1e-5 # 4PL/IRT 正则化系数 (针对区分度/猜测率/失误率)
     patience: int = 0 # 早停机制 (0 表示禁用)
     prefetch_factor: int = 4
     k_fold: int = 1

@@ -61,7 +61,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -246,12 +246,12 @@ class GIKT(Module):
             if self.pid_mode == 'domain':
                 # Vectorized weights: each domain has its own I/D sensitivity
                 # Initialize to 0.5 and 0.1
-                self.w_pid_i = torch.nn.Parameter(torch.full((self.pid_num_domains,), 0.5))
-                self.w_pid_d = torch.nn.Parameter(torch.full((self.pid_num_domains,), 0.1))
+                self.w_pid_i = torch.nn.Parameter(torch.full((self.pid_num_domains,), pid_init_i))
+                self.w_pid_d = torch.nn.Parameter(torch.full((self.pid_num_domains,), pid_init_d))
             else:
                 # Global weights: scalar
-                self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
-                self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
+                self.w_pid_i = torch.nn.Parameter(torch.tensor(pid_init_i))
+                self.w_pid_d = torch.nn.Parameter(torch.tensor(pid_init_d))
 
             # @add_fzq: Domain-Level PID Initialization (Pre-compute mask)
             if self.pid_mode == 'domain' and 'skill_domain_map' in locals():
@@ -278,10 +278,8 @@ class GIKT(Module):
                 print(f"Error: skill_domain_map.npy not found or loaded. Falling back to Global PID.")
                 self.pid_num_domains = 1
                 self.pid_mode = 'global'
-                self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
-                self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
-
-        # @add_fzq: TF Alignment - Initialize weights
+                self.w_pid_i = torch.nn.Parameter(torch.tensor(pid_init_i))
+                self.w_pid_d = torch.nn.Parameter(torch.tensor(pid_init_d))
         self.reset_parameters()
         
         # @fix_fzq: Re-apply 4PL initialization (must be done AFTER reset_parameters)

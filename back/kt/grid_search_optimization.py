@@ -245,6 +245,8 @@ def run_optimization_search():
             pid_mode=current_params.model.pid_mode,
             pid_ema_alpha=current_params.model.pid_ema_alpha,
             pid_lambda=current_params.model.pid_lambda,
+            pid_init_i=current_params.model.pid_init_i,
+            pid_init_d=current_params.model.pid_init_d,
             guessing_prob_init=current_params.model.guessing_prob_init,
             slipping_prob_init=current_params.model.slipping_prob_init
         ).to(DEVICE)

@@ -145,6 +145,8 @@ if __name__ == '__main__':
         pid_mode=params.model.pid_mode,
         pid_ema_alpha=params.model.pid_ema_alpha,
         pid_lambda=params.model.pid_lambda,
+        pid_init_i=params.model.pid_init_i,
+        pid_init_d=params.model.pid_init_d,
         guessing_prob_init=params.model.guessing_prob_init,
         slipping_prob_init=params.model.slipping_prob_init
     ).to(DEVICE)
@@ -267,14 +269,14 @@ if __name__ == '__main__':
                         reg_loss += 0.01 * (model.discrimination_gain ** 2)
                     if hasattr(model, 'discrimination_bias'):
                         # 区分度正则：鼓励其靠近 1.0 (即偏差靠近 0)
-                        reg_loss += 1e-5 * torch.sum(model.discrimination_bias.weight ** 2)
+                        reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
                     
                     if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
                         # 猜测和失误率正则：防止它们过大
                         # 因为 sigmoid(-3) 约等于 0.05，我们不希望这些参数漂移回 0 (0.5) 或更高
                         # 这里限制其权重的 L2，但更重要的是限制其不要变得太大
-                        reg_loss += 1e-5 * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
-                        reg_loss += 1e-5 * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                        reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
+                        reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
                     
                     loss += reg_loss
                 
