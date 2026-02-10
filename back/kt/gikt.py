@@ -61,7 +61,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -76,6 +76,7 @@ class GIKT(Module):
             dropout_linear: 线性层/RNN层的 dropout 率
             dropout_gnn: GNN 聚合后的 dropout 率
             drop_edge_rate: [New] 图结构的随机丢边率 (DropEdge)
+            feature_noise_scale: [New] 特征扰动强度 (0.0 表示关闭)
             hard_recap: 是否使用硬回顾，默认为True
             rank_k: 排序的k值，默认为10
             pre_train: 是否预训练，默认为False
@@ -97,6 +98,9 @@ class GIKT(Module):
         self.dropout_linear_val = dropout_linear
         self.dropout_gnn_val = dropout_gnn
         self.drop_edge_rate = drop_edge_rate # 丢边率
+        
+        # @add_fzq: Feature Perturbation Parameters
+        self.feature_noise_scale = feature_noise_scale
 
         self.hard_recap = hard_recap #  困难回顾设置
         self.rank_k = rank_k #  排名参数k设置
@@ -391,9 +395,19 @@ class GIKT(Module):
         emb_unique_neighbors = [] 
         for i, nodes in enumerate(unique_neighbors_cache):
             if i % 2 == 0: 
-                emb_unique_neighbors.append(self.emb_table_question(nodes))
+                # 问题节点 Embedding
+                emb = self.emb_table_question(nodes)
+                # @add_fzq: Feature Perturbation (特征扰动) for Question
+                if self.training and self.feature_noise_scale > 1e-6:
+                    emb = emb + torch.randn_like(emb) * self.feature_noise_scale
+                emb_unique_neighbors.append(emb)
             else:
-                emb_unique_neighbors.append(self.emb_table_skill(nodes))
+                # 技能节点 Embedding
+                emb = self.emb_table_skill(nodes)
+                # @add_fzq: Feature Perturbation (特征扰动) for Skill
+                if self.training and self.feature_noise_scale > 1e-6:
+                    emb = emb + torch.randn_like(emb) * self.feature_noise_scale
+                emb_unique_neighbors.append(emb)
         
         # 对所有唯一问题执行一次性聚合
         agg_unique_q, agg_list_unique = self.aggregate(emb_unique_neighbors, unique_neighbors_cache)

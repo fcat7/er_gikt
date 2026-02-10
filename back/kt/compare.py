@@ -60,6 +60,7 @@ def init_model(model_name, num_question, num_skill, config, params):
             dropout_linear=params.model.dropout_linear,
             dropout_gnn=params.model.dropout_gnn,
             drop_edge_rate=params.model.drop_edge_rate,
+            feature_noise_scale=params.model.feature_noise_scale,
             hard_recap=params.model.hard_recap,
             use_cognitive_model=params.model.use_cognitive_model,
             pre_train=params.model.pre_train,

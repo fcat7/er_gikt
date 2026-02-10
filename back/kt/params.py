@@ -22,6 +22,9 @@ class ModelParams:
     dropout_gnn: float = 0.4    # 针对 GNN 聚合后的 Dropout
     drop_edge_rate: float = 0.0 # [New] 图结构增强：随机丢边率 (建议 0.1~0.2)
     
+    # @add_fzq: Feature Perturbation (特征扰动)
+    feature_noise_scale: float = 0.0  # 噪声强度 σ ~ N(0, σ²)，0.0 表示关闭。推荐 [0.005, 0.01, 0.02]
+
     rank_k: int = 10
     use_cognitive_model: bool = True
     pre_train: bool = False
