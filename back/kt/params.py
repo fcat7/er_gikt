@@ -26,6 +26,10 @@ class ModelParams:
     recap_source: str = 'hssi'  # 回顾特征来源: 'hsei' 或 'hssi'
     use_pid: bool = False # 是否使用 PID-GIKT 控制器架构
     pid_mode: str = 'global' # PID 模式: 'global' (标量) 或 'domain' (向量)
+    pid_ema_alpha: float = 0.1 # PID 积分项衰减率
+    pid_lambda: float = 1.0 # PID 微分项缩放系数
+    guessing_prob_init: float = 0.05 # 4PL 猜测率初始概率 (0.05 = 5%)
+    slipping_prob_init: float = 0.02 # 4PL 失误率初始概率 (0.02 = 2%)
 
     def __post_init__(self):
         # 自动转换 list 为 tuple (适应 toml 加载后的数据类型)

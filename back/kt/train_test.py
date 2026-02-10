@@ -142,7 +142,11 @@ if __name__ == '__main__':
         agg_method=params.model.agg_method,
         recap_source=params.model.recap_source,  # 直接使用配置值
         use_pid=params.model.use_pid,
-        pid_mode=params.model.pid_mode
+        pid_mode=params.model.pid_mode,
+        pid_ema_alpha=params.model.pid_ema_alpha,
+        pid_lambda=params.model.pid_lambda,
+        guessing_prob_init=params.model.guessing_prob_init,
+        slipping_prob_init=params.model.slipping_prob_init
     ).to(DEVICE)
 
     # TF Alignment is now always enabled (Logits output, BCEWithLogitsLoss)

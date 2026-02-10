@@ -242,7 +242,11 @@ def run_optimization_search():
             agg_method='gcn', 
             recap_source=current_params.model.recap_source,
             use_pid=current_params.model.use_pid,
-            pid_mode=current_params.model.pid_mode
+            pid_mode=current_params.model.pid_mode,
+            pid_ema_alpha=current_params.model.pid_ema_alpha,
+            pid_lambda=current_params.model.pid_lambda,
+            guessing_prob_init=current_params.model.guessing_prob_init,
+            slipping_prob_init=current_params.model.slipping_prob_init
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(model.parameters(), lr=current_params.train.lr, weight_decay=current_params.train.weight_decay)

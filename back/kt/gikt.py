@@ -1,5 +1,6 @@
 import os
 import torch
+import math
 import torch.nn.functional as F
 from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell
 
@@ -60,7 +61,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global'):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -234,8 +235,8 @@ class GIKT(Module):
             # Purpose: Introduce "Momentum" (Integral) and "Acceleration" (Derivative) control for student ability
             # ema_alpha: Decay rate for Integral term (0.1 means long-term memory dominant)
             # pid_lambda: Scaling factor for Tanh Limiter on Derivative term
-            self.ema_alpha = 0.1
-            self.pid_lambda = 1.0
+            self.ema_alpha = pid_ema_alpha
+            self.pid_lambda = pid_lambda
             
             # PID Weights (Learnable): Initialize to near-zero to prevent initial distribution shock
             # w_pid_i: Weight for Integral term (Streak tracking)
@@ -274,27 +275,30 @@ class GIKT(Module):
                 self.register_buffer('q_domain_mask_buffer', self.q_domain_mask)
                 print(f"Question-Domain Mask Built. Shape: {self.q_domain_mask.shape}")
             elif self.pid_mode == 'domain':
-                 print(f"Error: skill_domain_map.npy not found or loaded. Falling back to Global PID.")
-                 self.pid_num_domains = 1
-                 self.pid_mode = 'global'
-                 self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
-                 self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
+                print(f"Error: skill_domain_map.npy not found or loaded. Falling back to Global PID.")
+                self.pid_num_domains = 1
+                self.pid_mode = 'global'
+                self.w_pid_i = torch.nn.Parameter(torch.tensor(0.5))
+                self.w_pid_d = torch.nn.Parameter(torch.tensor(0.1))
 
         # @add_fzq: TF Alignment - Initialize weights
         self.reset_parameters()
         
         # @fix_fzq: Re-apply 4PL initialization (must be done AFTER reset_parameters)
-        if hasattr(self, 'difficulty_bias'):
-             torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
-        if hasattr(self, 'skill_difficulty_bias'):
-             torch.nn.init.constant_(self.skill_difficulty_bias.weight, 0.0)
-        if hasattr(self, 'discrimination_bias'):
-             torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
-        if hasattr(self, 'guessing_bias'):
-             torch.nn.init.constant_(self.guessing_bias.weight, -3.0)
-        if hasattr(self, 'slipping_bias'):
-             torch.nn.init.constant_(self.slipping_bias.weight, -4.0)
+        # Convert Probability to Logits (Bias): x = ln(p / (1-p))
+        guessing_bias = math.log(guessing_prob_init / (1 - guessing_prob_init)) if 0 < guessing_prob_init < 1 else -3.0
+        slipping_bias = math.log(slipping_prob_init / (1 - slipping_prob_init)) if 0 < slipping_prob_init < 1 else -4.0
 
+        if hasattr(self, 'difficulty_bias'):
+            torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
+        if hasattr(self, 'skill_difficulty_bias'):
+            torch.nn.init.constant_(self.skill_difficulty_bias.weight, 0.0)
+        if hasattr(self, 'discrimination_bias'):
+            torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
+        if hasattr(self, 'guessing_bias'):
+            torch.nn.init.constant_(self.guessing_bias.weight, guessing_bias)
+        if hasattr(self, 'slipping_bias'):
+            torch.nn.init.constant_(self.slipping_bias.weight, slipping_bias)
         # # 可学习的融合参数 beta，初始化为 0.1
         # self.beta = torch.nn.Parameter(torch.tensor(0.1))
 
