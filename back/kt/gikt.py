@@ -61,7 +61,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout=(0.2, 0.4), hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -73,7 +73,9 @@ class GIKT(Module):
             qs_table: 问题-技能表
             agg_hops: 聚合层数，默认为3
             emb_dim: 嵌入维度，默认为100
-            dropout: dropout率，默认为(0.2, 0.4)
+            dropout_linear: 线性层/RNN层的 dropout 率
+            dropout_gnn: GNN 聚合后的 dropout 率
+            drop_edge_rate: [New] 图结构的随机丢边率 (DropEdge)
             hard_recap: 是否使用硬回顾，默认为True
             rank_k: 排序的k值，默认为10
             pre_train: 是否预训练，默认为False
@@ -91,6 +93,11 @@ class GIKT(Module):
         self.agg_hops = agg_hops #  聚合跳跃层数设置
         self.qs_table = qs_table #  问题-技能关系表设置
         self.emb_dim = emb_dim #  嵌入维度设置
+        
+        self.dropout_linear_val = dropout_linear
+        self.dropout_gnn_val = dropout_gnn
+        self.drop_edge_rate = drop_edge_rate # 丢边率
+
         self.hard_recap = hard_recap #  困难回顾设置
         self.rank_k = rank_k #  排名参数k设置
         self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
@@ -181,9 +188,9 @@ class GIKT(Module):
         self.mlps4agg = ModuleList(Linear(emb_dim, emb_dim) for _ in range(agg_hops)) #  创建多个线性层用于聚合操作
         
         self.MLP_AGG_last = Linear(emb_dim, emb_dim) #  最后一个聚合操作的线性层
-        self.dropout_lstm = Dropout(dropout[0]) #  LSTM网络的dropout层
+        self.dropout_lstm = Dropout(self.dropout_linear_val) #  LSTM网络的dropout层
         # self.dropout_gru = Dropout(dropout[0]) #  GRU网络的dropout层
-        self.dropout_gnn = Dropout(dropout[1]) #  GNN网络的dropout层
+        self.dropout_gnn = Dropout(self.dropout_gnn_val) #  GNN网络的dropout层
         self.MLP_query = Linear(emb_dim, emb_dim) #  查询向量转换的线性层
         self.MLP_key = Linear(emb_dim, emb_dim) #  键向量转换的线性层
         # 公式10中的W
@@ -827,8 +834,33 @@ class GIKT(Module):
         return final_res, emb_node_neighbor
 
     def sum_aggregate(self, emb_self, emb_neighbor, hop):
-        # 求和式聚合, 将邻居节点求和平均之后与自己相加, 得到聚合后的特征
-        emb_sum_neighbor = torch.mean(emb_neighbor, dim=-2)
+        """
+        GCN-style Sum Aggregation with DropEdge support.
+        将邻居节点求和平均之后与自己相加，得到聚合后的特征。
+        """
+        # @add_fzq: DropEdge Implementation for GCN
+        # 在训练阶段随机 Mask 掉一部分邻居
+        if self.training and self.drop_edge_rate > 0.0:
+            # emb_neighbor shape: [Batch, ..., K, Dim]
+            # 生成邻居级别的 mask: [Batch, ..., K, 1]
+            edge_keep_prob = 1.0 - self.drop_edge_rate
+            
+            # 创建 mask，形状与邻居维度匹配
+            edge_mask = torch.bernoulli(
+                torch.full((*emb_neighbor.shape[:-1], 1), edge_keep_prob, device=emb_neighbor.device)
+            )
+            
+            # 应用 mask (被 drop 的邻居置为 0)
+            emb_neighbor_masked = emb_neighbor * edge_mask
+            
+            # 重新归一化：只对保留的邻居求平均
+            # edge_mask sum 得到每个节点保留的邻居数量
+            kept_count = edge_mask.sum(dim=-2, keepdim=True).clamp(min=1.0)  # 至少保留 1，防止除零
+            emb_sum_neighbor = emb_neighbor_masked.sum(dim=-2) / kept_count.squeeze(-1)
+        else:
+            # 标准聚合：对所有邻居求平均
+            emb_sum_neighbor = torch.mean(emb_neighbor, dim=-2)
+        
         emb_sum = emb_sum_neighbor + emb_self
         mlp_output = self.mlps4agg[hop](emb_sum)
         gnn_output = self.dropout_gnn(mlp_output) if self.training else mlp_output
@@ -887,7 +919,14 @@ class GIKT(Module):
         # 3. 计算分数与权重
         # scores = self.gat_attn_layers[hop](cat_input) # [Batch, ..., K, 1]
         # scores = torch.nn.functional.leaky_relu(scores, negative_slope=0.2)
-        scores = F.leaky_relu(self.gat_attn_layers[hop](cat_input), negative_slope=0.2)
+        scores = torch.nn.functional.leaky_relu(self.gat_attn_layers[hop](cat_input), negative_slope=0.2)
+
+        # @add_fzq: DropEdge Implementation (Masking Attention Scores)
+        if self.training and self.drop_edge_rate > 0.0:
+            # DropEdge: set scores to -inf for dropped edges before softmax
+            edge_keep_prob = 1.0 - self.drop_edge_rate
+            edge_mask = torch.bernoulli(torch.full_like(scores, edge_keep_prob))
+            scores = scores.masked_fill(edge_mask == 0, -1e9)
         
         # Softmax over neighbors
         alpha = torch.softmax(scores, dim=-2) # [Batch, ..., K, 1]

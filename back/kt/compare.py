@@ -57,7 +57,9 @@ def init_model(model_name, num_question, num_skill, config, params):
             qs_table=qs_table,
             agg_hops=params.model.agg_hops,
             emb_dim=params.model.emb_dim,
-            dropout=tuple(params.model.dropout) if isinstance(params.model.dropout, list) else params.model.dropout,
+            dropout_linear=params.model.dropout_linear,
+            dropout_gnn=params.model.dropout_gnn,
+            drop_edge_rate=params.model.drop_edge_rate,
             hard_recap=params.model.hard_recap,
             use_cognitive_model=params.model.use_cognitive_model,
             pre_train=params.model.pre_train,
@@ -67,7 +69,7 @@ def init_model(model_name, num_question, num_skill, config, params):
             pid_mode=params.model.pid_mode
         ).to(DEVICE)
     elif model_name.lower() == 'dkt':
-        return DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout[0] if isinstance(params.model.dropout, list) else 0.1).to(DEVICE)
+        return DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 

@@ -17,7 +17,11 @@ class ModelParams:
     size_q_neighbors: int = 4
     size_s_neighbors: int = 10
     agg_hops: int = 3
-    dropout: Tuple[float, float] = (0.2, 0.4)
+    # 拆分原 dropoput = [0.2, 0.4] 为具名参数
+    dropout_linear: float = 0.2 # 针对 LSTM/Linear 层的 Dropout
+    dropout_gnn: float = 0.4    # 针对 GNN 聚合后的 Dropout
+    drop_edge_rate: float = 0.0 # [New] 图结构增强：随机丢边率 (建议 0.1~0.2)
+    
     rank_k: int = 10
     use_cognitive_model: bool = True
     pre_train: bool = False
@@ -33,10 +37,6 @@ class ModelParams:
     guessing_prob_init: float = 0.05 # 4PL 猜测率初始概率 (0.05 = 5%)
     slipping_prob_init: float = 0.02 # 4PL 失误率初始概率 (0.02 = 2%)
 
-    def __post_init__(self):
-        # 自动转换 list 为 tuple (适应 toml 加载后的数据类型)
-        if isinstance(self.dropout, list):
-            self.dropout = tuple(self.dropout)
 
 @dataclass
 class TrainParams:

@@ -124,17 +124,14 @@ if __name__ == '__main__':
     q_neighbors = torch.tensor(q_neighbors, dtype=torch.int64, device=DEVICE)
     s_neighbors = torch.tensor(s_neighbors, dtype=torch.int64, device=DEVICE)
 
-    # 处理 dropout (list -> tuple)
-    dropout_val = params.model.dropout
-    if isinstance(dropout_val, list):
-        dropout_val = tuple(dropout_val)
-
     # 初始化模型
     model = GIKT(
         num_question, num_skill, q_neighbors, s_neighbors, qs_table,
         agg_hops=params.model.agg_hops,
         emb_dim=params.model.emb_dim,
-        dropout=dropout_val,
+        dropout_linear=params.model.dropout_linear,
+        dropout_gnn=params.model.dropout_gnn,
+        drop_edge_rate=params.model.drop_edge_rate,
         hard_recap=params.model.hard_recap,
         use_cognitive_model=params.model.use_cognitive_model,
         pre_train=params.model.pre_train,
