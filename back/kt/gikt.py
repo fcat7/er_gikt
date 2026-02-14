@@ -1065,9 +1065,9 @@ class GIKT(Module):
             
             p = p + pid_bias
             
-            # @debug_fzq: Print PID stats usually once to verify it works
-            if not self.training and torch.rand(1).item() < 0.001:  # Low probability print during testing
-                print(f"[Diff-GIKT Debug] Mode: {self.pid_mode}, PID Bias Mean: {pid_bias.mean().item():.4f}, Max Bias: {pid_bias.max().item():.4f}")
+            # # @debug_fzq: Print PID stats usually once to verify it works
+            # if not self.training and torch.rand(1).item() < 0.001:  # Low probability print during testing
+            #     print(f"[Diff-GIKT Debug] Mode: {self.pid_mode}, PID Bias Mean: {pid_bias.mean().item():.4f}, Max Bias: {pid_bias.max().item():.4f}")
 
         # @add_fzq: P
         # @add_fzq: Path 2 Differential Logic

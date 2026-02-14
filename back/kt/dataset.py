@@ -9,33 +9,49 @@ from scipy import sparse
 
 class UserDataset(Dataset):
 
-    def __init__(self, config, augment=False, prob_mask=0.1):
+    def __init__(self, config, augment=False, prob_mask=0.1, mode='train'):
+        """
+        Args:
+            mode: 'train' or 'test'. Loads {mode}_seq.npy etc.
+        """
         processed_dir = config.PROCESSED_DATA_DIR
         self.augment = augment
         self.prob_mask = prob_mask # 随机掩码概率
         
+        prefix = f"{mode}_"
+        
         # 输入数据
-        self.user_seq = torch.tensor(np.load(os.path.join(processed_dir, 'user_seq.npy')), dtype=torch.int64)
-        # [num_user, max_seq_len] 输入数据
-        self.user_res = torch.tensor(np.load(os.path.join(processed_dir, 'user_res.npy')), dtype=torch.int64)
-        # [num_user, max_seq_len] 输入标签
-        self.user_mask = torch.tensor(np.load(os.path.join(processed_dir, 'user_mask.npy')), dtype=torch.bool)
-        # [num_user, max_seq_len] 有值效记录
+        try:
+            self.user_seq = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'seq.npy')), dtype=torch.int64)
+            # [num_user, max_seq_len] 输入数据
+            self.user_res = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'res.npy')), dtype=torch.int64)
+            # [num_user, max_seq_len] 输入标签
+            self.user_mask = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'mask.npy')), dtype=torch.bool)
+            # [num_user, max_seq_len] 有值效记录
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Could not find dataset files with prefix '{prefix}' in {processed_dir}. Did you run data_process.py?")
         
         # 新增时间特征
         # 检查文件是否存在，如果不存在则使用全0初始化 (兼容旧代码)
         try:
-            self.user_interval_time = torch.tensor(np.load(os.path.join(processed_dir, 'user_interval_time.npy')), dtype=torch.float32)
-            self.user_response_time = torch.tensor(np.load(os.path.join(processed_dir, 'user_response_time.npy')), dtype=torch.float32)
+            self.user_interval_time = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'interval_time.npy')), dtype=torch.float32)
+            self.user_response_time = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'response_time.npy')), dtype=torch.float32)
         except FileNotFoundError:
-            print("Warning: Time feature files not found. Using zeros.")
+            print(f"Warning: Time feature files for '{mode}' not found. Using zeros.")
             self.user_interval_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
             self.user_response_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
 
+        # @fix_fzq: 加载 Eval Mask (用于区分评估区间，避免冷启动与泄露)
+        try:
+            self.user_eval_mask = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'eval_mask.npy')), dtype=torch.bool)
+        except FileNotFoundError:
+            # 兼容旧数据：若不存在 eval_mask，则默认与 user_mask 一致
+            self.user_eval_mask = self.user_mask.clone()
+
         # @fix_fzq: 加载 Group 信息 (用于 GroupKFold 防泄露)
         try:
-            self.groups = np.load(os.path.join(processed_dir, 'user_window_groups.npy'))
-            print("Loaded user groups for leakage-free splitting.")
+            self.groups = np.load(os.path.join(processed_dir, prefix + 'window_groups.npy'))
+            # print("Loaded user groups for leakage-free splitting.")
         except FileNotFoundError:
             self.groups = None
 
@@ -56,6 +72,7 @@ class UserDataset(Dataset):
         mask = self.user_mask[index]
         interval = self.user_interval_time[index]
         response_time = self.user_response_time[index]
+        eval_mask = self.user_eval_mask[index]
 
         if self.augment:
             # 随机掩码 (Random Masking)
@@ -78,15 +95,19 @@ class UserDataset(Dataset):
                 # 克隆 mask 以避免修改原始数据 (Tensor切片可能是视图)
                 mask = mask.clone() 
                 mask[mask_to_drop] = False
+                # eval_mask 同步更新，避免对被丢弃位置进行评估
+                eval_mask = eval_mask.clone()
+                eval_mask[mask_to_drop] = False
 
         return torch.stack([
             seq, 
             res, 
             mask,
             interval,
-            response_time
+            response_time,
+            eval_mask
         ], dim=-1)
-        # 将5个一维张量沿着最后一个维度（dim=-1）堆叠，结果是一个二维张量，形状为 [max_seq_len, 5]
+        # 将6个一维张量沿着最后一个维度（dim=-1）堆叠，结果是一个二维张量，形状为 [max_seq_len, 6]
 
     def __len__(self):
         return self.user_seq.shape[0]

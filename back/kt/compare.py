@@ -49,7 +49,7 @@ def init_model(model_name, num_question, num_skill, config, params):
         qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.int64).to(DEVICE)
         q_neighbors_list, s_neighbors_list = build_adj_list(config.PROCESSED_DATA_DIR)
         q_neighbors, s_neighbors = gen_gikt_graph(q_neighbors_list, s_neighbors_list, params.model.size_q_neighbors, params.model.size_s_neighbors)
-        return GIKT(
+        model = GIKT(
             num_question=num_question,
             num_skill=num_skill,
             q_neighbors=torch.tensor(q_neighbors, dtype=torch.int64).to(DEVICE),
@@ -67,10 +67,15 @@ def init_model(model_name, num_question, num_skill, config, params):
             agg_method=params.model.agg_method,
             recap_source=params.model.recap_source,
             use_pid=params.model.use_pid,
-            pid_mode=params.model.pid_mode
+            pid_mode=params.model.pid_mode,
+            data_dir=config.PROCESSED_DATA_DIR
         ).to(DEVICE)
+        model.model_name = 'gikt'
+        return model
     elif model_name.lower() == 'dkt':
-        return DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
+        model = DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
+        model.model_name = 'dkt'
+        return model
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -125,9 +130,11 @@ def train_epoch(model, dataloader, optimizer, criterion):
         mask = batch[:, :, 2].to(torch.bool).to(DEVICE)
         interval = batch[:, :, 3].to(torch.float32).to(DEVICE)
         r_time = batch[:, :, 4].to(torch.float32).to(DEVICE)
+        eval_mask = batch[:, :, 5].to(torch.bool).to(DEVICE)
         
         interval = torch.nan_to_num(interval, nan=0.0)
         r_time = torch.nan_to_num(r_time, nan=0.0)
+
         
         optimizer.zero_grad()
         if getattr(model, 'model_name', '').lower() == 'gikt':
@@ -135,14 +142,20 @@ def train_epoch(model, dataloader, optimizer, criterion):
             preds = y_hat[:, 1:]
             targets = response[:, 1:].float()
             mask_valid = mask[:, 1:]
-        else:
+        elif getattr(model, 'model_name', '').lower() == 'dkt':
+            # DKT: Input (Q, R) -> Output (Logits if no sigmoid) -> y_hat[:, k+1] predicts R[k+1]
             y_hat = model(question, response, mask)
+            # The current output of DKT is actually probabilities or logits?
+            # Standard DKT usually predicts logits -> Sigmoid.
             preds = y_hat[:, :-1]
             targets = response[:, 1:].float()
             mask_valid = mask[:, 1:]
+        
+        eval_mask_valid = eval_mask[:, 1:]
+        final_mask = mask_valid & eval_mask_valid
             
-        preds = preds[mask_valid == 1]
-        targets = targets[mask_valid == 1]
+        preds = preds[final_mask == 1]
+        targets = targets[final_mask == 1]
         
         if preds.numel() == 0: continue
 
@@ -167,31 +180,41 @@ def evaluate(model, dataloader):
             mask = batch[:, :, 2].to(torch.bool).to(DEVICE)
             interval = batch[:, :, 3].to(torch.float32).to(DEVICE)
             r_time = batch[:, :, 4].to(torch.float32).to(DEVICE)
+            eval_mask = batch[:, :, 5].to(torch.bool).to(DEVICE)
             
             interval = torch.nan_to_num(interval, nan=0.0)
             r_time = torch.nan_to_num(r_time, nan=0.0)
-            
+
             if getattr(model, 'model_name', '').lower() == 'gikt':
                 y_hat = model(question, response, mask, interval, r_time)
                 y_hat = torch.sigmoid(y_hat)
                 preds = y_hat[:, 1:]
                 targets = response[:, 1:].float()
                 mask_valid = mask[:, 1:]
-            else:
+            elif getattr(model, 'model_name', '').lower() == 'dkt':
                 y_hat = model(question, response, mask)
+                # Ensure DKT output is activated if it's logits!
+                # Assuming your DKT outputs logits directly.
+                y_hat = torch.sigmoid(y_hat) 
                 preds = y_hat[:, :-1]
                 targets = response[:, 1:].float()
                 mask_valid = mask[:, 1:]
+            eval_mask_valid = eval_mask[:, 1:]
+            final_mask = mask_valid & eval_mask_valid
 
-            preds_flat = preds[mask_valid == 1]
-            targets_flat = targets[mask_valid == 1]
+            preds_flat = preds[final_mask == 1]
+            targets_flat = targets[final_mask == 1]
             
             all_preds.extend(preds_flat.cpu().numpy())
             all_targets.extend(targets_flat.cpu().numpy())
-    
+
     if len(all_targets) == 0: return 0, 0
     auc = roc_auc_score(all_targets, all_preds)
     acc = accuracy_score(all_targets, np.array(all_preds) >= 0.5)
+
+    # @add_fzq: Quick Diagnostic (Only print if it seems like a validation step)
+    # Check if we have access to unfiltered data implies we need to track it.
+    # For compare.py, we keep it simple but informative.
     return auc, acc
 
 def run_comparison():
@@ -212,12 +235,12 @@ def run_comparison():
         # 尝试回退到 full
         fallback_path = f"config/experiments/exp_full_{args.name}.toml"
         if os.path.exists(fallback_path):
-             print(f"{COLOR_LOG_Y}Config {exp_config_path} not found. Fallback to {fallback_path}{COLOR_LOG_END}")
-             exp_config_path = fallback_path
-             params = HyperParameters.load(exp_config_path=exp_config_path)
+            print(f"{COLOR_LOG_Y}Config {exp_config_path} not found. Fallback to {fallback_path}{COLOR_LOG_END}")
+            exp_config_path = fallback_path
+            params = HyperParameters.load(exp_config_path=exp_config_path)
         else:
-             print(f"{COLOR_LOG_Y}Config not found. Using default params.{COLOR_LOG_END}")
-             params = HyperParameters()
+            print(f"{COLOR_LOG_Y}Config not found. Using default params.{COLOR_LOG_END}")
+            params = HyperParameters()
     else:
         params = HyperParameters.load(exp_config_path=exp_config_path)
 
@@ -246,43 +269,70 @@ def run_comparison():
     groups = None
     if dataset.groups is not None:
         groups = dataset.groups[dev_idx]
-
-    model_list = args.models.split(',')
-    final_results = {m: [] for m in model_list}
-    dev_indices_array = np.arange(len(dev_set_base))
-    
-    if groups is not None:
-        print(f"🔒 Detecting Windowed Dataset. Using GroupKFold for CV.")
-        # Groups are already extracted for dev subset
-        dev_groups = groups
+        print(f"🔒 Detecting Windowed Dataset with {len(np.unique(groups))} unique groups. Using GroupKFold for CV.")
         k_fold = GroupKFold(n_splits=5)
     else:
         print(f"🔓 Using Standard KFold.")
-        dev_groups = None
+        groups = None
         k_fold = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    model_list = [m.strip().lower() for m in args.models.split(',')]
+    final_results = {m: [] for m in model_list}
+    dev_indices_array = np.arange(len(dev_set_base))
     
-    for fold_i, (train_rel_idx, val_rel_idx) in enumerate(k_fold.split(dev_indices_array, groups=dev_groups)):
-        print(f"\n{COLOR_LOG_B}=== CV Fold {fold_i+1}/5 ==={COLOR_LOG_END}")
+    for fold_i, (train_rel_idx, val_rel_idx) in enumerate(k_fold.split(dev_indices_array, groups=groups)):
+        print(f"\n{COLOR_LOG_B}=== CV Fold {fold_i+1}/5 (Double-Check Leakage: Groups Unique) ==={COLOR_LOG_END}")
+        if groups is not None:
+            train_groups = groups[train_rel_idx]
+            val_groups = groups[val_rel_idx]
+            intersect = np.intersect1d(train_groups, val_groups)
+            if len(intersect) > 0:
+                print(f"{COLOR_LOG_Y}⚠️ CRITICAL LEAKAGE DETECTED: {len(intersect)} users in both train and val!{COLOR_LOG_END}")
+            else:
+                print(f"{COLOR_LOG_G}✅ No User Leakage Detected.{COLOR_LOG_END}")
+
+        print(f"Train samples: {len(train_rel_idx)}, Val samples: {len(val_rel_idx)}")
         train_ds = Subset(dev_set_base, train_rel_idx)
         val_ds = Subset(dev_set_base, val_rel_idx)
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+        loader_kwargs = {'batch_size': args.batch_size, 'num_workers': 0, 'pin_memory': True}
+        train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+        val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
+
         
         for model_name in model_list:
-            print(f"--> Training {model_name}...")
+            print(f"\n  → Training {model_name.upper()}...")
+            # For DKT, we should use Skill IDs vs Question IDs. 
+            # Current Implementation: Uses Question IDs (Sparse Item-KT). This is OK for fairness if embeddings are same dim.
             model = init_model(model_name, num_question, num_skill, config, params)
             optimizer = torch.optim.Adam(model.parameters(), lr=params.train.lr)
-            criterion = nn.BCEWithLogitsLoss() if model_name == 'gikt' else nn.BCELoss()
+            criterion = nn.BCEWithLogitsLoss() if model_name.lower() in ['gikt', 'dkt'] else nn.BCELoss() # @fix_fzq: DKT also output logits if we use unmodified dkt.py 
+            # Wait, dkt.py usually has sigmoid? Current dkt.py (from context) has output linear layer -> need sigmoid?
+            # Actually, let's check dkt.py. The attached dkt.py doesn't have sigmoid in forward method final return if it's logits.
+            # But the evaluate function applies sigmoid. The training loop does NOT apply sigmoid to preds before criterion if using BCEWithLogitsLoss.
+            # But wait, original train_epoch for non-GIKT uses:
+            # y_hat = model(...)
+            # preds = y_hat
+            # loss = criterion(preds, targets)
+            # If criterion is BCELoss, then preds must be probabilities (0-1).
+            # If criterion is BCEWithLogitsLoss, then preds must be logits.
+            # Your DKT implementation seems to match GIKT's style (logits). Update criterion to be safe.
+            criterion = nn.BCEWithLogitsLoss() 
+            
             best_val_auc = 0.0
+
             patience = 5
             counter = 0
             best_model_state = None
+            epoch_times = []
             
             for epoch in range(args.epochs):
+                epoch_start = time.time()
                 avg_loss = train_epoch(model, train_loader, optimizer, criterion)
                 val_auc, val_acc = evaluate(model, val_loader)
-                if args.verbose:
-                    print(f"    Epoch {epoch+1}: Loss={avg_loss:.4f}, Val AUC={val_auc:.4f}")
+                epoch_time = time.time() - epoch_start
+                epoch_times.append(epoch_time)
+                
+                print(f"    Epoch {epoch+1}/{args.epochs}: Loss={avg_loss:.4f}, Val AUC={val_auc:.4f}, Acc={val_acc:.4f}, Time={epoch_time:.2f}s")
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     best_model_state = model.state_dict()
@@ -293,17 +343,27 @@ def run_comparison():
                         print(f"    Early stopping at epoch {epoch+1}")
                         break
             
+            avg_epoch_time = np.mean(epoch_times)
             if best_model_state is not None:
                 model.load_state_dict(best_model_state)
             test_auc, test_acc = evaluate(model, test_loader)
-            print(f"    {model_name} Fold {fold_i+1} Test AUC: {test_auc:.4f}")
+            print(f"  ✓ {model_name.upper()} Fold {fold_i+1} | Best Val AUC: {best_val_auc:.4f} | Test AUC: {test_auc:.4f} | Test Acc: {test_acc:.4f} | Avg Epoch Time: {avg_epoch_time:.2f}s")
             final_results[model_name].append(test_auc)
 
-    print(f"\n{COLOR_LOG_Y}=== Final Report (Average on 20% Test Set) ==={COLOR_LOG_END}")
-    for m, aucs in final_results.items():
+    print(f"\n{COLOR_LOG_Y}{'='*70}")
+    print(f"Final Report: 5-Fold CV Results (Test on 20% Holdout Set)")
+    print(f"{'='*70}{COLOR_LOG_END}")
+    for m in model_list:
+        aucs = final_results[m]
         mean_v = np.mean(aucs)
         std_v = np.std(aucs)
-        print(f"Model: {m:<10} | Mean AUC: {mean_v:.4f} (+/- {std_v:.4f})")
+        min_v = np.min(aucs)
+        max_v = np.max(aucs)
+        print(f"\n{COLOR_LOG_B}{m.upper():<10}{COLOR_LOG_END}")
+        print(f"  Per-Fold AUC: {[f'{a:.4f}' for a in aucs]}")
+        print(f"  Mean AUC: {mean_v:.4f} ± {std_v:.4f}")
+        print(f"  Range: [{min_v:.4f}, {max_v:.4f}]")
+    print(f"{COLOR_LOG_G}{'='*70}{COLOR_LOG_END}")
 
 if __name__ == '__main__':
     run_comparison()

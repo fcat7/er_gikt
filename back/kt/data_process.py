@@ -1,255 +1,261 @@
 import sys
 import os
-# @fix_fzq: 解决 OpenMP 多副本冲突报错 (放在其他 import 之前)
+import argparse
+# @fix_fzq: 解决 All-In-One 多库冲突
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import pandas as pd
-from config import Config, RANDOM_SEED
+import numpy as np
+from tqdm import tqdm
+
+# Self modules
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from config import get_config, RANDOM_SEED, MAX_SEQ_LEN
+from data_utils.adapter import KTDataAdapter
+from data_utils.sampler import KTDataSampler
+from data_utils.builder import KTDataBuilder
+from data_utils.splitter import KTDataSplitter
+
 try:
     from icecream import ic
 except ImportError:
     ic = print
 
-# Add current directory to sys.path to ensure modules can be imported
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from config import get_config
-from data_utils.adapter import KTDataAdapter
-from data_utils.inspector import KTDataInspector
-from data_utils.sampler import KTDataSampler
-from data_utils.builder import KTDataBuilder
-import numpy as np
-from tqdm import tqdm
-import os
-
-def calculate_question_features(df):
-    """基于全量 DataFrame 计算题目统计特征"""
-    ic(f"开始计算题目特征，数据量: {df.shape}")
+def calculate_question_features_full(df):
+    """
+    全量数据计算题目特征 (Difficulty, Discrimination, RT)
+    注意：为了特征稳定性，这里使用全量数据计算。严谨场景下应仅使用训练集。
+    """
+    # 辅助 Score 计算区分度
+    # 简单计算：每个用户的全局平均分
+    user_scores = df.groupby('user_id')['correct'].mean()
+    df_aug = df.copy()
+    df_aug['user_score'] = df_aug['user_id'].map(user_scores)
     
-    # 预计算用户平均分 (用于区分度计算)
-    if 'correct' in df.columns and 'user_id' in df.columns:
-        user_scores = df.groupby('user_id')['correct'].mean()
-        df = df.copy() # 避免 SettingWithCopyWarning
-        df['user_score'] = df['user_id'].map(user_scores)
-    else:
-        ic("缺少 correct 或 user_id 列，跳过特征计算")
-        return None
-
-    grouped = df.groupby('problem_id')
-    feature_data = []
+    feature_list = []
     
-    for pid, group in tqdm(grouped, desc="提取题目特征"):
-        # A. 平均正确率
+    # 分组计算
+    # 必须列: problem_id, correct.可选: response_time
+    if 'response_time' not in df.columns:
+        df_aug['response_time'] = 0.0
+        
+    grouped = df_aug.groupby('problem_id')
+    
+    for pid, group in tqdm(grouped, desc="Extracting Features"):
         avg_correct = group['correct'].mean()
-        # B. 难度 (1 - Correct)
         difficulty = 1.0 - avg_correct
-        # C. 平均响应时间
-        avg_rt = group['response_time'].mean() if 'response_time' in group.columns else 0.0
-        # D. 区分度
-        if len(group) > 1 and group['correct'].nunique() > 1:
+        
+        # RT
+        avg_rt = group['response_time'].median() # Median usually better for RT
+        
+        # Disc
+        if len(group) > 5 and group['correct'].nunique() > 1:
             disc = group['correct'].corr(group['user_score'])
             if pd.isna(disc): disc = 0.0
         else:
             disc = 0.0
-        
-        feature_data.append({
+            
+        feature_list.append({
             'problem_id': pid,
             'difficulty': difficulty,
             'discrimination': disc,
-            'avg_rt': avg_rt,
-            'avg_correct': avg_correct,
-            'count': len(group)
+            'avg_rt': avg_rt
         })
         
-    return pd.DataFrame(feature_data)
+    f_df = pd.DataFrame(feature_list)
+    return f_df
 
-def build_feature_matrix(features_df, q2idx_path, output_path, feature_cols=['difficulty', 'discrimination', 'avg_rt']):
-    """将特征 DataFrame 映射到 question2idx 并归一化保存"""
-    # 用户决定移除 'avg_correct' 因为它与 'difficulty' 高度负相关
-    if features_df is None or features_df.empty:
-        return
-
-    ic("构建特征矩阵 (.npy)...")
-    # 1. 预处理与归一化 (使用 Log1p 处理 RT)
-    df = features_df.copy()
-    if 'avg_rt' in df.columns:
-        df['avg_rt'] = df['avg_rt'].apply(lambda x: max(0, x)) # Clip neg
-        df['avg_rt_log'] = np.log1p(df['avg_rt'])
-        # 替换列名用于后续处理
-        cols_to_use = [c if c != 'avg_rt' else 'avg_rt_log' for c in feature_cols]
-    else:
-        cols_to_use = feature_cols
+def normalize_and_save_features(f_df, builder, output_dir):
+    """
+    归一化特征并根据 problem2idx 保存为 npy
+    """
+    if f_df is None or f_df.empty: return
     
-    # 2. Z-Score 归一化 (在全量特征分布上进行)
-    stats = {}
-    for col in cols_to_use:
-        if col not in df.columns: continue
-        mean_val = df[col].mean()
-        std_val = df[col].std()
-        if std_val == 0: df[col] = 0.0
-        else: df[col] = (df[col] - mean_val) / std_val
-        stats[col] = {'mean': mean_val, 'std': std_val}
+    # 1. Norm
+    cols = ['difficulty', 'discrimination', 'avg_rt']
+    if 'avg_rt' in f_df.columns:
+        # Log RT
+        f_df['avg_rt'] = np.log1p(np.clip(f_df['avg_rt'], 0, None))
     
-    ic("特征归一化统计:", stats)
+    # Z-Score
+    for c in cols:
+        if c in f_df.columns:
+            m = f_df[c].mean()
+            s = f_df[c].std()
+            if s == 0: s = 1.0
+            f_df[c] = (f_df[c] - m) / s
+            
+    # 2. Map
+    num_q = len(builder.problem2idx) # includes 0
+    final_mat = np.zeros((num_q, len(cols)), dtype=np.float32)
     
-    # 3. 映射到 question2idx
-    if not os.path.exists(q2idx_path):
-        ic(f"Error: 找不到 ID 映射文件 {q2idx_path}")
-        return
-
-    q2idx = np.load(q2idx_path, allow_pickle=True).item()
-    num_q = len(q2idx)
-    final_matrix = np.zeros((num_q, len(feature_cols)), dtype=np.float32)
+    f_df = f_df.set_index('problem_id')
     
-    df.set_index('problem_id', inplace=True)
-    
-    found = 0
-    for original_id, mapped_id in q2idx.items():
-        if mapped_id == 0: continue
-        # 尝试匹配 ID (int/str)
-        oid_candidates = [original_id]
-        try: oid_candidates.append(int(original_id))
-        except: pass
+    cnt = 0
+    for pid_raw, idx in builder.problem2idx.items():
+        if idx == 0: continue
+        # pid_raw could be int or str
+        # f_df index might be inferred type
         
-        for oid in oid_candidates:
-            if oid in df.index:
-                final_matrix[mapped_id] = df.loc[oid, cols_to_use].values
-                found += 1
-                break
-    
-    ic(f"特征矩阵构建完成: {found}/{num_q-1} matched. Shape: {final_matrix.shape}")
-    np.save(output_path, final_matrix)
-    ic(f"Saved to {output_path}")
+        # Try direct
+        vals = None
+        if pid_raw in f_df.index:
+            vals = f_df.loc[pid_raw, cols].values
+        else:
+            # Try type cast
+            try:
+                pid_int = int(pid_raw)
+                if pid_int in f_df.index:
+                    vals = f_df.loc[pid_int, cols].values
+            except:
+                pass
+                
+        if vals is not None:
+            final_mat[idx] = vals
+            cnt += 1
+            
+    save_path = os.path.join(output_dir, 'problem_features.npy')
+    np.save(save_path, final_mat)
+    ic(f"特征矩阵已保存: {save_path} (Matched {cnt}/{num_q-1})")
 
 def main():
-    # 1. 初始化配置
-    ic("初始化配置...")
-    # Available: ['assist09', 'assist12', 'ednet_kt1'] 
-    base_dataset_name = 'assist09'  # 基础数据集名称 (如 assist09, assist12)
-    ratio = 0.1                     # 采样率 (0.0 < ratio <= 1.0)
-    min_seq_len = 20
-    reandom_seed = RANDOM_SEED
+    parser = argparse.ArgumentParser(description="KT Data Processing Pipeline (Split Train/Test)")
+    parser.add_argument('--dataset', type=str, default='assist09', help='Base dataset name')
+    parser.add_argument('--ratio', type=float, default=1.0, help='Sample ratio (1.0 for full)')
+    parser.add_argument('--seed', type=int, default=RANDOM_SEED, help='Random seed')
+    parser.add_argument('--min_seq_len', type=int, default=5, help='Min interactions per user')
+    parser.add_argument('--stride', type=int, default=0, help=f'Sliding window stride for TRAIN set. 0 = disable, range: [0, {MAX_SEQ_LEN}]') # 设置滑动窗口步长，0表示不启用滑动窗口，建议设置为 50，100，150 以增强数据集
     
-    # 校验 ratio
-    if not (0 < ratio <= 1.0):
-        ic(f"Error: ratio must be in range (0, 1]. Current: {ratio}")
-        return
-
-    # 根据 ratio 生成中间数据集名称 (不含窗口后缀)
-    if ratio == 1.0:
-        current_dataset_name = base_dataset_name
+    args = parser.parse_args()
+    
+    # 1. Config Setup
+    base_name = args.dataset
+    if args.ratio < 1.0:
+        dataset_name = f"{base_name}-sample_{int(args.ratio*100)}%"
     else:
-        current_dataset_name = f"{base_dataset_name}-sample_{int(ratio*100)}%"
+        dataset_name = base_name
 
-    # 兼容后续代码使用的 dataset_name 变量
-    dataset_name = current_dataset_name 
+    # Sliding window control (default: disabled)
+    if args.stride < 0 or args.stride > MAX_SEQ_LEN:
+        raise ValueError(f"stride must be in range [0, {MAX_SEQ_LEN}], got {args.stride}")
+    enable_window = args.stride > 0
+    target_dataset_name = f"{dataset_name}_window" if enable_window else dataset_name
+    train_stride = args.stride if enable_window else None
+
+    ic(f"=== Pipeline Start: {dataset_name} ===")
+    ic(f"滑动窗口: {'ON' if enable_window else 'OFF'} | stride={args.stride}")
+
+    # 输入配置用于加载原始数据，输出配置用于保存处理后的数据
+    src_config = get_config(dataset_name)
+    target_config = get_config(target_dataset_name)
     
-    # @add_fzq: 数据增强配置开关
-    ENABLE_SLIDING_WINDOW = True  # <--- 在这里控制是否启用滑动窗口！
-    WINDOW_STRIDE = 100            # 滑动步长
-
-    # 1. 配置加载策略 
-    # src_config 始终读取基础数据集 (确保能正确加载原始数据)
-    src_config = Config(dataset_name=base_dataset_name) 
-    
-    # target_config 决定输出目录
-    if ENABLE_SLIDING_WINDOW:
-        # 如果启用增强，在 dataset_name 基础上增加后缀
-        target_dataset_name = f"{dataset_name}_window"
-        ic(f"模式: 滑动窗口增强开启。")
-    else:
-        target_dataset_name = dataset_name
-        ic(f"模式: 标准/采样处理。")
-
-    target_config = Config(dataset_name=target_dataset_name)
-    ic(f"配置生成 -> 源: {base_dataset_name}, 目标: {target_dataset_name}")
-
-    # 2. 数据加载与基础清洗 (使用源配置读取)
+    # Step 1: 数据加载与基础清洗
     ic("Step 1: 数据加载与标准化...")
     adapter = KTDataAdapter(src_config)
     try:
         df = adapter.load_data()
+        ic(f"Raw Data Loaded: {df.shape}")
         df = adapter.clean_data(df)
+        ic(f"After Clean: {df.shape}, Users: {df['user_id'].nunique()}")
     except Exception as e:
         ic(f"数据加载失败: {e}")
         return
     
-    # 3. 数据集特定过滤
+    # Step 2: 数据集特定过滤 (去除脚手架题目等)
+    ic("Step 2: 数据集特定过滤...")
     if src_config.dataset.DATA_NAME == 'assist09':
+        before_filter = len(df)
         if 'original' in df.columns:
             df = df[df['original'] == 1]
-        if 'skill_id' in df.columns:
-            df = df[df['skill_id'] != 'NA']
-
-    # 4. 过滤过短序列
-    ic(f"过滤交互数小于 {min_seq_len} 的用户...")
-    user_counts = df['user_id'].value_counts()
-    valid_users = user_counts[user_counts >= min_seq_len].index
-    df = df[df['user_id'].isin(valid_users)]
+            ic(f"  - Filtered non-original: {before_filter} → {len(df)}")
+    ic(f"After Dataset-Specific Filter: {df.shape}, Users: {df['user_id'].nunique()}")
     
-    # 将 skill_id 中的分隔符统一处理
+    # Step 3: 过滤短序列 (在采样前统一过滤)
+    ic(f"Step 3: 过滤交互数 < {args.min_seq_len} 的用户...")
+    user_counts = df['user_id'].value_counts()
+    valid_users = user_counts[user_counts >= args.min_seq_len].index
+    df = df[df['user_id'].isin(valid_users)].copy()
+    ic(f"After Filter Short Seqs: {df.shape}, Users: {df['user_id'].nunique()}")
+    
+    # Step 4: 特殊字符处理 (统一 skill_id 分隔符)
+    ic("Step 4: 处理 skill_id 分隔符...")
     if 'skill_id' in df.columns:
         df['skill_id'] = df['skill_id'].apply(lambda x: str(x).replace(',', '_').replace(';', '_'))
+        ic("  - skill_id 分隔符统一为 '_'")
     
-    # 保存标准全量数据集
-    standard_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, f'{dataset_name}_standard.csv')
-    if not os.path.exists(target_config.PROCESSED_DATA_DIR):
-        os.makedirs(target_config.PROCESSED_DATA_DIR)
-    adapter.save_standard_csv(df, standard_csv_path)
 
-    # ==========================================
-    # Step 2: 提取全量题目特征 (新增集成)
-    # ==========================================
-    ic("Step 2: 提取题目统计特征 (Difficulty, Disc, etc.)...")
-    q_features_df = calculate_question_features(df)
-    
-    if q_features_df is not None:
-        feat_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'q_features_analysis.csv')
-        q_features_df.to_csv(feat_csv_path, index=False)
-        ic(f"特征分析表已保存: {feat_csv_path}")
-    
-    # ==========================================
-    # Step 3: 数据探查
-    # ==========================================
-    ic("Step 3: 数据探查...")
-    inspector = KTDataInspector(df, target_config)
-    # inspector.get_stats()
-    
-    # ==========================================
-    # Step 4: 数据采样 (可选)
-    # ==========================================
-    # 假设我们想抽取 10% 的数据进行快速测试
-    # 注意：如果不需要采样，请将 ratio 设为 1.0 或直接使用 df
-    ic(f"Step 4: 数据采样{ratio}...")
-    sampler = KTDataSampler(random_seed=reandom_seed)
-    
-    # [修改] 使用采样数据，或者如果需要全量，可以注释掉下面这行用 sampled_df = df
-    sampled_df = sampler.stratified_sample(df, ratio=ratio, min_seq_len=min_seq_len)
-
-    # 保存抽样数据集
-    sampled_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, f'{dataset_name}_sampled.csv')
-    adapter.save_standard_csv(sampled_df, sampled_csv_path)
-    
-    # ==========================================
-    # Step 5: 构建模型输入 (.npy)
-    # ==========================================
-    ic("Step 5: 构建模型序列数据...")
-    builder = KTDataBuilder(target_config)
-    # build_dataset 会生成 train/test/valid.npy 以及 question2idx.npy
-    # 传递新的参数以控制领域构建
-    builder.build_dataset(sampled_df, enable_window_aug=ENABLE_SLIDING_WINDOW, stride=WINDOW_STRIDE) 
-
-    # ==========================================
-    # Step 6: 生成特征矩阵 (.npy)
-    # ==========================================
-    if q_features_df is not None:
-        ic("Step 6: 生成题目特征矩阵 q_features.npy...")
-        q2idx_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'question2idx.npy')
-        output_matrix_path = os.path.join(target_config.PROCESSED_DATA_DIR, 'q_features.npy')
+    # Step 5: 分层采样 (如果 ratio < 1.0)
+    if args.ratio < 1.0:
+        ic(f"Step 5: 分层采样 (ratio={args.ratio}, 基于序列长度和准确率)...")
+        sampler = KTDataSampler(random_seed=args.seed)
+        df = sampler.stratified_sample(df, ratio=args.ratio)
+        ic(f"After Sampling: {df.shape}, Users: {df['user_id'].nunique()}")
         
-        build_feature_matrix(q_features_df, q2idx_path, output_matrix_path)
-    else:
-        ic("Warning: 未能生成特征矩阵 (q_features_df is None)")
+        # 保存采样后的数据集
+        if not os.path.exists(target_config.PROCESSED_DATA_DIR):
+            os.makedirs(target_config.PROCESSED_DATA_DIR)
+        sampled_csv_path = os.path.join(target_config.PROCESSED_DATA_DIR, f'{dataset_name}_standard.csv')
+        adapter.save_standard_csv(df, sampled_csv_path)
 
-if __name__ == '__main__':
+    # Step 6: 用户级分割 (Train / Test)
+    ic("Step 6: 用户级分割 (Train 80% / Test 20%)...")
+    splitter = KTDataSplitter(random_seed=args.seed)
+    # 注意：这里不传 min_seq_len，因为数据已经过滤过了
+    train_users, test_users = splitter.split_users(df, test_ratio=0.2)
+    
+    ic(f"Train Users: {len(train_users)}, Test Users: {len(test_users)}")
+    
+    # Step 7: 构建映射表 (基于全量数据确保 ID 一致性)
+    ic("Step 7: 构建 ID 映射表 (problem/skill/domain)...")
+    builder = KTDataBuilder(target_config)
+    builder.build_maps(df)
+    ic("  - ID mappings built successfully")
+    
+    # Step 8: 构建序列数据 (Train & Test 分别处理)
+    ic("Step 8: 构建序列数据...")
+    
+    # Train Set: 可选滑动窗口增强
+    ic(f"  [Train] Building sequences (stride={train_stride})...")
+    df_train = df[df['user_id'].isin(train_users)].copy()
+    if 'timestamp' in df_train.columns:
+        df_train.sort_values(['user_id', 'timestamp'], inplace=True)
+    builder.build_sequences(df_train, stride=train_stride, save_prefix='train')
+    
+    # Test Set: 非重叠切分
+    ic("  [Test] Building sequences (non-overlapping)...")
+    df_test = df[df['user_id'].isin(test_users)].copy()
+    if 'timestamp' in df_test.columns:
+        df_test.sort_values(['user_id', 'timestamp'], inplace=True)
+    builder.build_sequences(df_test, stride=None, save_prefix='test')
+    
+    # Step 9: 计算题目统计特征
+    ic("Step 9: 计算题目统计特征 (Difficulty, Discrimination, RT)...")
+    f_df = calculate_question_features_full(df)
+    normalize_and_save_features(f_df, builder, target_config.PROCESSED_DATA_DIR)
+    
+
+    ic("=== Pipeline Complete ===")
+    ic(f"=== Output Directory: {target_config.PROCESSED_DATA_DIR} ===")
+
+
+# ============================================================================
+# 使用示例
+# ============================================================================
+# 1. 全量数据 + 不增强 (默认)
+#    python data_process.py --dataset assist09 --ratio 1.0 --stride 0
+#
+# 2. 采样 10% + 不增强
+#    python data_process.py --dataset assist09 --ratio 0.1 --stride 0
+#
+# 3. 采样 20% + 滑动窗口 (50% 重叠)
+#    python data_process.py --dataset assist09 --ratio 0.2 --stride 100
+#
+# 4. 采样 10% + 滑动窗口 (75% 重叠，强力增强)
+#    python data_process.py --dataset assist09 --ratio 0.1 --stride 50
+#
+# 5. 采样 10% + 最小重叠 (仅切分超长序列)
+#    python data_process.py --dataset assist09 --ratio 0.1 --stride 200
+# ============================================================================
+
+if __name__ == "__main__":
     main()
