@@ -155,7 +155,7 @@ if __name__ == '__main__':
             k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
         splits = list(k_fold.split(dataset_full_clean))
 
-    fold_results_val_auc = []
+    fold_results_test_auc = []
     
     # 初始化记录数组 (Metric x Fold*Epoch)
     # y_label_aver: [Metric, Epoch] (Averaged across folds)
@@ -218,6 +218,9 @@ if __name__ == '__main__':
         
         print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(test_set)}")
         print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        
+        # @add_fzq: 样本量告警 - eval_mask 会显著减少有效样本
+        print(f"{COLOR_LOG_Y}⚠️ Note: Actual training samples will be filtered by eval_mask (typically -30%~50% of raw samples){COLOR_LOG_END}")
 
         # ----------------------------------------------------------------------
         # Inner Loop: Epochs
@@ -320,6 +323,9 @@ if __name__ == '__main__':
                 train_auc = roc_auc_score(all_train_targets, all_train_probs)
                 train_auc_no_mask = roc_auc_score(all_train_targets_no_mask, all_train_probs_no_mask) if len(all_train_targets_no_mask) > 0 else train_auc
                 eval_mask_filter_ratio = 1.0 - (len(all_train_targets) / max(1, len(all_train_targets_no_mask)))
+                # @add_fzq: 告警 - 如果有效样本过少
+                if train_total < train_set_len * 0.1:
+                    print(f"{COLOR_LOG_Y}⚠️ Warning: Only {train_total} effective training samples (< 10% of {train_set_len}). Model may underfit. Consider increasing epochs or reducing stride.{COLOR_LOG_END}")
             else:
                 train_auc_no_mask = 0.0
                 eval_mask_filter_ratio = 0.0
@@ -524,17 +530,17 @@ if __name__ == '__main__':
         print('\n' + '='*70)
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
         print('='*70 + '\n')
-        fold_results_val_auc.append(best_fold_test_auc)
+        fold_results_test_auc.append(best_fold_test_auc)
         
     print('\n' + '='*70)
     print(COLOR_LOG_G + '🎉 交叉验证完成！' + COLOR_LOG_END)
     print('='*70)
-    print(f"各折AUC: {[f'{auc:.4f}' for auc in fold_results_val_auc]}")
-    print(f"平均AUC: {np.mean(fold_results_val_auc):.4f} ± {np.std(fold_results_val_auc):.4f}")
-    print(f"最佳AUC: {np.max(fold_results_val_auc):.4f} (Fold {np.argmax(fold_results_val_auc)+1})")
-    print(f"最差AUC: {np.min(fold_results_val_auc):.4f} (Fold {np.argmin(fold_results_val_auc)+1})")
+    print(f"各折测试集AUC: {[f'{auc:.4f}' for auc in fold_results_test_auc]}")
+    print(f"平均AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f} ± {np.std(fold_results_test_auc):.4f}")
+    print(f"最佳AUC: {np.max(fold_results_test_auc):.4f} (Fold {np.argmax(fold_results_test_auc)+1})")
+    print(f"最差AUC: {np.min(fold_results_test_auc):.4f} (Fold {np.argmin(fold_results_test_auc)+1})")
     print('='*70 + '\n')
-    output_file.write(f"CV Mean AUC: {np.mean(fold_results_val_auc):.4f}\n")
+    output_file.write(f"CV Mean AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f}\n")
 
     # Normalize Averages
     if len(splits) > 0:
