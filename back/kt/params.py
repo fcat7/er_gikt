@@ -27,6 +27,7 @@ class ModelParams:
 
     rank_k: int = 10
     use_cognitive_model: bool = True
+    cognitive_mode: str = 'autonomous' # 认知模型模式: 'classic' 或 'autonomous' (推荐)
     pre_train: bool = False
     hard_recap: bool = True
     agg_method: str = 'gcn'

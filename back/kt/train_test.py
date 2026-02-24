@@ -181,6 +181,7 @@ if __name__ == '__main__':
             feature_noise_scale=params.model.feature_noise_scale,
             hard_recap=params.model.hard_recap,
             use_cognitive_model=params.model.use_cognitive_model,
+            cognitive_mode=params.model.cognitive_mode,
             pre_train=params.model.pre_train,
             data_dir=config.PROCESSED_DATA_DIR,
             agg_method=params.model.agg_method,
@@ -248,14 +249,22 @@ if __name__ == '__main__':
             for batch_idx, data in enumerate(train_loader, 1):
                 optimizer.zero_grad()
                 data_gpu = data.to(DEVICE)
+                
+                # @update_fzq: Extract columns based on DataLoader shape
                 x = data_gpu[:, :, 0].to(torch.long)
                 y_target = data_gpu[:, :, 1].to(torch.long)
-                mask = data_gpu[:, :, 2].to(torch.bool)
+                mask = data_gpu[:, :, 2].to(torch.bool) # Mask should be int for logic operations
                 interval_time = data_gpu[:, :, 3].to(torch.float32)
                 response_time = data_gpu[:, :, 4].to(torch.float32)
-                eval_mask = data_gpu[:, :, 5].to(torch.bool)
+                
+                # Check for eval_mask (compat for datasets without it)
+                if data_gpu.shape[2] > 5:
+                    eval_mask = data_gpu[:, :, 5].to(torch.bool)
+                else:
+                    eval_mask = mask.bool()
 
                 with autocast(enabled=use_amp):
+                    # @fix_fzq: Pass mask as tensor for GIKT internal logic
                     y_hat = model(x, y_target, mask, interval_time, response_time)
                     # @fix_fzq: Skip first timestep (no history for prediction)
                     y_hat = y_hat[:, 1:]

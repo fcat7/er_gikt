@@ -33,6 +33,7 @@ def set_seed(seed=42):
 
 set_seed(42)
 
+# python compare.py --models dkt,gikt --batch_size 256 --full
 def get_args():
     parser = argparse.ArgumentParser(description='Compare KT Models (Standard Experiment)')
     parser.add_argument('--dataset', type=str, default='assist09', help='Dataset name')
@@ -245,6 +246,18 @@ def run_comparison():
         params = HyperParameters.load(exp_config_path=exp_config_path)
 
     config = Config(args.dataset)
+    
+    # 打印配置信息
+    print(f"\n{COLOR_LOG_G}{'='*80}{COLOR_LOG_END}")
+    print(f"{COLOR_LOG_G}Experiment Configuration{COLOR_LOG_END}")
+    print(f"{COLOR_LOG_G}{'='*80}{COLOR_LOG_END}")
+    print(f"📂 Dataset: {args.dataset}")
+    print(f"📁 Data Directory: {config.PROCESSED_DATA_DIR}")
+    print(f"⚙️  Config File: {exp_config_path}")
+    print(f"🖥️  Device: {torch.cuda.is_available() and torch.cuda.get_device_name(0) or 'cpu'}")
+    print(f"\n{params}")
+    print(f"{COLOR_LOG_G}{'='*80}{COLOR_LOG_END}\n")
+    
     dataset = UserDataset(config)
     qs_table = sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz'))
     num_question = qs_table.shape[0]
@@ -264,6 +277,8 @@ def run_comparison():
     test_set = Subset(dataset, test_idx)
     dev_set_base = Subset(dataset, dev_idx)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
+    
+    print(f"📚 Loaded Holdout Test Set: {len(test_set)} samples.")
     
     # @fix_fzq: Group-aware KFold to prevent data leakage in windowed mode
     groups = None
@@ -305,6 +320,7 @@ def run_comparison():
             # Current Implementation: Uses Question IDs (Sparse Item-KT). This is OK for fairness if embeddings are same dim.
             model = init_model(model_name, num_question, num_skill, config, params)
             optimizer = torch.optim.Adam(model.parameters(), lr=params.train.lr)
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
             criterion = nn.BCEWithLogitsLoss() if model_name.lower() in ['gikt', 'dkt'] else nn.BCELoss() # @fix_fzq: DKT also output logits if we use unmodified dkt.py 
             # Wait, dkt.py usually has sigmoid? Current dkt.py (from context) has output linear layer -> need sigmoid?
             # Actually, let's check dkt.py. The attached dkt.py doesn't have sigmoid in forward method final return if it's logits.
@@ -329,6 +345,7 @@ def run_comparison():
                 epoch_start = time.time()
                 avg_loss = train_epoch(model, train_loader, optimizer, criterion)
                 val_auc, val_acc = evaluate(model, val_loader)
+                scheduler.step()
                 epoch_time = time.time() - epoch_start
                 epoch_times.append(epoch_time)
                 

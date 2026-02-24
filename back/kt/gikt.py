@@ -7,6 +7,82 @@ from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell
 from config import DEVICE
 
 # @add_fzq 2025-12-25 -------------------------------------------
+class AutonomousCognitiveCell(Module):
+    """
+    Scheme 2: 自治型认知单元 (Autonomous Cognitive Cell)
+    
+    设计哲学 (Design Philosophy):
+    1. 接纳不完美 (Accept Imperfection): 承认模型会有预测误差。
+    2. 转化矛盾 (Convert Contradiction): 将 "预测误差 (Surprise)" 转化为 "主要学习动力 (Plasticity Control)"。
+       - 如果我预判我会做对，且真的做对了 -> 矛盾小 -> 巩固模式 (Consolidation Mode)。
+       - 如果我预判我会做对，结果做错了 -> 矛盾大 -> 重组模式 (Adaptation Mode)。
+    3. 追求自治 (Pursue Autonomy): 整个调节过程在 Cell 内部闭环完成，无需外部手动调整超参。
+    """
+    def __init__(self, input_size, hidden_size):
+        super(AutonomousCognitiveCell, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        
+        # 1. 内部预测器 (Internal Predictor)
+        # 输入: [Hidden, Question_Embedding] -> 输出: [1] (Logits)
+        # 注意: 这里的 input_size 应该是单纯问题嵌入的维度，但在 GIKT 调用中，
+        # 我们可能会传入变换后的 input_trans (融合了 Q+A)。
+        # 为了结构严谨性，我们需要在 forward 中分离 Q 和 A，或者传入 Q_emb.
+        # 鉴于 GIKT 现有架构，input_size 实际上是 emb_dim。
+        # 我们假设传入的 'question_input' 是问题的特征。
+        self.predictor = Linear(hidden_size + input_size, 1)
+        
+        # 2. 惊奇度编码器 (Surprise Encoder)
+        self.surprise_encoder = Linear(1, hidden_size)
+
+        # 3. 基础门控 (Basic Gates) - 改进版 GRU
+        # 输入扩展: [Hidden + Question + Response + Surprise]
+        # Gate Input Size = Hidden + Input(Q+A) + Surprise
+        # 注意: 标准 input_data 已经是 Q+A 的融合/拼接
+        gate_input_dim = hidden_size + input_size + hidden_size 
+        
+        self.linear_z = Linear(gate_input_dim, hidden_size) # Update Gate
+        self.linear_r = Linear(gate_input_dim, hidden_size) # Reset Gate
+        self.linear_h = Linear(gate_input_dim, hidden_size) # Candidate
+        
+    def forward(self, input_data, h_prev, question_input, response_val):
+        """
+        input_data: [batch, input_size] (可能是 Q+A 的融合特征，用于常规状态更新)
+        h_prev: [batch, hidden_size]
+        question_input: [batch, input_size] (仅问题的特征，用于无偏预测)
+        response_val: [batch, 1] (真实的 0/1 结果，用于计算 Surprise)
+        """
+        # 1. 自治预测 (Autonomous Prediction)
+        # 使用旧状态 + 问题 -> 预测结果
+        # 这一步体现"结构": 在看到答案之前，先建立期望
+        combined_predict = torch.cat((h_prev, question_input), dim=1)
+        pred_logits = self.predictor(combined_predict)
+        pred_prob = torch.sigmoid(pred_logits)
+        
+        # 2. 感知矛盾 (Perceive Contradiction)
+        # 计算 Surprise
+        # response_val 必须是 float 类型
+        with torch.no_grad(): # Surprise 是信号，不是 Loss 来源 (或者我们可以让它传导梯度以优化 predictor，但在 KT 中通常 predictor 是隐式的)
+             # 为保持 predictor 与主任务一致，我们允许梯度回传，让 predictor 学会准确预测
+             pass
+             
+        surprise = torch.abs(response_val - pred_prob)
+        surprise_vec = F.relu(self.surprise_encoder(surprise))
+        
+        # 3. 动态调节 (Dynamic Regulation)
+        combined_gate = torch.cat((h_prev, input_data, surprise_vec), dim=1)
+        
+        z_t = torch.sigmoid(self.linear_z(combined_gate))
+        r_t = torch.sigmoid(self.linear_r(combined_gate))
+        
+        combined_candidate = torch.cat((r_t * h_prev, input_data, surprise_vec), dim=1)
+        h_tilde = torch.tanh(self.linear_h(combined_candidate))
+        
+        h_new = (1 - z_t) * h_prev + z_t * h_tilde
+        
+        return h_new, pred_prob, surprise, z_t
+
+# @add_fzq 2025-12-25 -------------------------------------------
 class CognitiveRNNCell(Module):
     def __init__(self, input_size, hidden_size):
         super(CognitiveRNNCell, self).__init__()
@@ -61,7 +137,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -81,6 +157,7 @@ class GIKT(Module):
             rank_k: 排序的k值，默认为10
             pre_train: 是否预训练，默认为False
             use_cognitive_model: 是否使用认知模型(CognitiveRNNCell)，默认为False
+            cognitive_mode: 认知模型模式 ('classic' or 'autonomous'), 默认为 'autonomous'
             data_dir: 数据目录，用于加载预训练向量，默认为None
             agg_method: 聚合方法，默认为'gcn'
             recap_source: 回顾特征来源，默认为'hssi'
@@ -105,6 +182,7 @@ class GIKT(Module):
         self.hard_recap = hard_recap #  困难回顾设置
         self.rank_k = rank_k #  排名参数k设置
         self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
+        self.cognitive_mode = cognitive_mode # 认知模型模式
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
         self.use_pid = use_pid # 是否使用PID控制器架构
@@ -172,7 +250,12 @@ class GIKT(Module):
         # self.gru2 = GRUCell(emb_dim, emb_dim)
         if self.use_cognitive_model:
             # TF Alignment: Uses projected input (emb_dim)
-            self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim, hidden_size=emb_dim)
+            if self.cognitive_mode == 'autonomous':
+                # @change_fzq: Switch to AutonomousCognitiveCell (Scheme 2)
+                self.cognitive_cell = AutonomousCognitiveCell(input_size=emb_dim, hidden_size=emb_dim)
+            else:
+                # Classic Cognitive Model
+                self.cognitive_cell = CognitiveRNNCell(input_size=emb_dim, hidden_size=emb_dim)
         else:
             # TF Alignment: Uses projected input (emb_dim)
             self.lstm_cell = LSTMCell(input_size=emb_dim, hidden_size=emb_dim) # 使用LSTM网络
@@ -536,17 +619,39 @@ class GIKT(Module):
             lstm_cell_input = recap_feature
 
             if self.use_cognitive_model:
-                if interval_time is None or response_time is None:
-                    raise ValueError("CognitiveRNNCell requires interval_time and response_time")
+                # Mode 1: Autonomous Cognitive Cell (Scheme 2)
+                if self.cognitive_mode == 'autonomous':
+                    # We need to extract the raw answer correctness for the internal error signal
+                    # response_t is [batch_size], we need [batch_size, 1] float
+                    curr_response_val = response_t.float().unsqueeze(1)
+                    
+                    if 'emb_question_trans' not in locals():
+                        # Just in case (though it should be defined above)
+                        emb_question_trans = torch.relu(self.feature_transform_layer(emb_question_t))
+
+                    # Invoke AutonomousCognitiveCell
+                    # Arguments: (input_data_fused, h_prev, question_emb, response_val)
+                    h_new, pred_prob, surprise, z_t = self.cognitive_cell(
+                        lstm_cell_input, 
+                        h2_pre, 
+                        emb_question_trans, 
+                        curr_response_val
+                    )
+                # Mode 2: Classic Cognitive Cell (Ebbinghaus + Style)
+                else:
+                    if interval_time is None or response_time is None:
+                        raise ValueError("Classic CognitiveRNNCell requires interval_time and response_time")
+                    
+                    # 获取当前时刻的时间特征 [batch_size, 1]
+                    curr_interval = interval_time[:, t].unsqueeze(1)
+                    curr_response = response_time[:, t].unsqueeze(1)
+                    
+                    # h2_pre 作为上一个时刻的 hidden state
+                    # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
+                     # Arguments: (input_data_fused, h_prev, interval, response_time)
+                    h_new, _ = self.cognitive_cell(lstm_cell_input, h2_pre, curr_interval, curr_response)
                 
-                # 获取当前时刻的时间特征 [batch_size, 1]
-                curr_interval = interval_time[:, t].unsqueeze(1)
-                curr_response = response_time[:, t].unsqueeze(1)
-                
-                # h2_pre 作为上一个时刻的 hidden state
-                # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
-                # @change_fzq: Pass correct input size based on alignment
-                h_new, _ = self.cognitive_cell(lstm_cell_input, h2_pre, curr_interval, curr_response)
+                # Common Output handling for Cognitive Models
                 lstm_output = self.dropout_lstm(h_new) if self.training else h_new
             else:
                 lstm_cell_output = self.lstm_cell(lstm_cell_input)[0] # [batch_size, emb_dim]
