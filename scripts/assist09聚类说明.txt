@@ -1,0 +1,95 @@
+# 来自 Genmini Pro
+
+如果对其进行聚类，基于课程结构和知识点相似度，建议聚类为 13-16 个 Domains (领域)。
+
+强烈推荐设置为 15 个。
+
+详细分类建议 (15个聚类)
+我将这些技能点按照数学语义进行了人工归类，这可以作为自动聚类（如 Spectral Clustering 或 Agglomerative Clustering）的参考目标：
+
+1. 基础算术与运算 (Arithmetic Operations)
+包含：整数/小数的加减乘除、运算顺序、绝对值等
+
+Addition/Subtraction/Multiplication/Division (Whole Numbers, Integers, Positive Decimals)
+Calculation with + - * /, Order of Operations
+Absolute Value, Square Root, Computation with Real Numbers
+2. 数论基础 (Number Theory)
+包含：因数、倍数、质数、科学计数法
+
+Greatest Common Factor, Least Common Multiple
+Prime Number, Divisibility Rules, Exponents, Scientific Notation
+Properties of Numbers, Rounding, Estimation
+3. 分数与比例 (Fractions & Proportions)
+包含：分数运算、比例、单位比率
+
+Fractions (Add/Sub/Mult/Div, Equivalent, Ordering)
+Proportion, Ratio, Rate, Unit Rate, Finding fractions and ratios
+4. 百分比应用 (Percentages)
+包含：百分数计算、折扣、增长率
+
+Percents, Finding Percents, Percent Of
+Percent Discount, Percent Increase or Decrease
+Conversion of Fraction Decimals Percents
+5. 代数基础与表达式 (Algebraic Expressions)
+包含：化简、代入、分配律
+
+Algebraic Simplification, Combining Like Terms
+Distributive/Commutative Property
+Substitution, Symbolization, Inverse Relations
+6. 线性方程与不等式 (Linear Equations & Inequalities)
+包含：解方程、不等式求解
+
+Linear Equations, Solving Systems of Linear Equations
+Equation Solving (Two Steps, More Than Two Steps)
+Solving Inequalities, Solving for a variable
+7. 线性函数与解析几何 (Slope & Coordinate Geometry)
+包含：斜率、截距、直线方程、坐标点
+
+Slope (Finding from Graph/Equation/Ordered Pairs/Situation)
+Intercept, Line of Best-Fit
+Write Linear Equation, Point Plotting, Coordinate Geometry
+8. 多项式与二次方程 (Polynomials & Quadratics)
+包含：多项式运算、因式分解、二次方程
+
+Polynomials (Monomial, Factors, Multiplying)
+Quadratic Equation Solving, Factoring Trinomials
+Finding Max and Min from a Quadratic Equation
+9. 平面几何基础 (Basic Geometry: Angles & Shapes)
+包含：角度、三角形、四边形性质
+
+Angles (Obtuse, Acute, Parallel Lines, Interior)
+Triangles (Properties, Classification, Pythagorean Theorem)
+Quadrilaterals, Polygons, Geometric Definitions
+10. 周长与面积 (Perimeter & Area)
+包含：2D图形的测度
+
+Area (Circle, Triangle, Rectangle, Trapezoid, Irregular)
+Perimeter, Circumference, Definition Pi
+11. 立体几何 (Volume & Surface Area)
+包含：3D图形的体积与表面积
+
+Volume (Cone, Cylinder, Prism, Sphere, Pyramid)
+Surface Area (Cylinder, Prism, Sphere)
+Nets of 3D Figures
+12. 变换与相似 (Transformations & Similarity)
+包含：平移、旋转、缩放、相似图形
+
+Transformation, Translations, Reflection, Rotations, Symmetry
+Similar Figures, Scale Factor, Congruence
+13. 统计分析 (Statistics)
+包含：平均数、中位数、统计图表
+
+Mean, Median, Mode, Range
+Histogram, Box and Whisker, Stem and Leaf Plot, Scatter Plot, Circle Graph
+14. 概率与计数 (Probability & Counting)
+包含：概率计算、排列组合
+
+Probability (Single/Two Events)
+Combinatorics, Counting Methods, Sampling Techniques
+15. 度量与单位 (Measurement)
+包含：单位换算、读数
+
+Unit Conversion, English and Metric Terminology
+Reading a Ruler or Scale
+结论
+建议将 num_domains 设置为 15。

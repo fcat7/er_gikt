@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 
 class UnifiedParquetDataset(Dataset):
     """
-    统一的 Parquet 数据集加载器 V2
+    统一的 Parquet 数据集加载器
     支持动态 Padding 和数据增强
     """
     def __init__(self, config, augment=False, prob_mask=0.1, mode='train'):

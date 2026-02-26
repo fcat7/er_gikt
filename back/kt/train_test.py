@@ -14,7 +14,7 @@ from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_
 from params import HyperParameters
 from util.utils import gen_gikt_graph, build_adj_list
 import argparse
-from gikt import GIKT
+from models.gikt import GIKT
 
 try:
     from dataset import UnifiedParquetDataset

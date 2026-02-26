@@ -4,5 +4,6 @@
     ],
     "python.defaultInterpreterPath": "/Users/fcatnoby/miniconda3/envs/kt/bin/python",
     "python.envFile": "${workspaceFolder}/.env", // 指定环境变量文件的位置
-    "python.terminal.executeInFileDir": true
+    "python.terminal.executeInFileDir": true,
+    "Codegeex.RepoIndex": true
 }
