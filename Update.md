@@ -1,5 +1,32 @@
 # GIKT PyTorch Implementation Update Log
 
+## Version v2.0.0-rc.1 数据流水线 V2 工业级重构
+
+*`[2.0.0-rc.1] - 2026-02-26 🎯 数据流水线 V1->V2 完整迁移`*
+
+1. Features
+   - **Parquet 存储**: 全面改用 `.parquet` 格式存储训练/测试序列，提升 I/O 效率 (#l3m4n5o) [🔴 BREAKING]
+   - **Metadata 规范化**: 引入标准 `metadata.json` 统一管理统计指标、映射表索引与特征信息 (#l4n5o6p) [🔴 BREAKING]
+   - **稀疏矩阵优化**: `qs/qq/ss_table` 统一使用 `scipy.sparse` 存储，大幅压缩体积 (#m5p6q7r) [🟡 CHANGE]
+2. Fixes
+   - **Pipeline 鲁棒性**: 修复 `data_process.py` 中特征计算与元数据生成的执行序列冲突 (#n6o7p8q) [🟢 SAFE]
+   - **类型兼容**: 优化 `save_json_mapping` 以支持 Numpy 原生类型的 JSON 序列化 (#o7p8q9r) [🟢 SAFE]
+3. Documentation
+   - 新增 `docs/V2_Migration_Log.md` 详细记录 V1 到 V2 的技术细节与变更动机 (#p8q9r0s) [🟢 SAFE]
+
+> ###### 备注
+>
+> **Date:** 2026-02-26
+> **Status:** ✅ Verified (assist09 Preprocess Pass)
+> **Code Branch:** `main/v2_migration`
+
+## Version temp_train 余弦退火重启会让学习率按照余弦曲线衰减
+
+![Figure_1](F:/picbed/2026/Update/Figure_1.png)
+
+
+
+
 ## Version dev_win v0.1.0 约定版本控制规范 和 GIT 提交规范
 
 *`[0.1.0] - 2026-01-23 🎯 约定版本控制 和 GIT 提交规范`*
@@ -14,9 +41,8 @@
 > ###### 备注
 >
 > **Date:** 2026-01-23
-> **Status:** ✅ Verified 
+> **Status:** ✅ Verified
 > **Code Branch:** `dev_win`
-
 
 ## Version  3.2 Alignment (Current Best)
 

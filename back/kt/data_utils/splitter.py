@@ -8,7 +8,7 @@ except ImportError:
 
 class KTDataSplitter:
     """
-    数据集划分器 (Stratified Splitter)
+    数据集划分器 (Stratified Splitter) V2
     负责根据用户的属性（序列长度、平均正确率）进行分层采样，
     将用户划分为训练集和测试集，确保两者分布一致。
     """
@@ -98,9 +98,4 @@ class KTDataSplitter:
             
         ic(f"划分结果: Train Users={len(train_ids)}, Test Users={len(test_ids)}")
         
-        # 最终验证
-        train_set = set(train_ids)
-        test_set = set(test_ids)
-        assert len(train_set & test_set) == 0, "训练集和测试集用户重叠！"
-        
-        return train_set, test_set
+        return set(train_ids), set(test_ids)

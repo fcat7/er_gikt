@@ -14,12 +14,13 @@ import pandas as pd
 # 导入项目模块
 from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
 from params import HyperParameters
-from dataset import UserDataset
+from dataset import UnifiedParquetDataset
 from util.utils import gen_gikt_graph, build_adj_list
 
 # 导入模型
 from gikt import GIKT
 from dkt import DKT
+from baselines import DKVMN, AKT, SimpleKT, QIKT, LBKT
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -77,48 +78,30 @@ def init_model(model_name, num_question, num_skill, config, params):
         model = DKT(num_question=num_question, num_skill=num_skill, emb_dim=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
         model.model_name = 'dkt'
         return model
+    elif model_name.lower() == 'dkvmn':
+        model = DKVMN(num_question=num_question, dim_s=params.model.emb_dim, size_m=20, dropout=params.model.dropout_linear).to(DEVICE)
+        model.model_name = 'dkvmn'
+        return model
+    elif model_name.lower() == 'akt':
+        model = AKT(n_question=num_question, d_model=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
+        model.model_name = 'akt'
+        return model
+    elif model_name.lower() == 'simplekt':
+        model = SimpleKT(n_question=num_question, d_model=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
+        model.model_name = 'simplekt'
+        return model
+    elif model_name.lower() == 'qikt':
+        qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(DEVICE)
+        model = QIKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_emb=params.model.emb_dim, dropout=params.model.dropout_linear).to(DEVICE)
+        model.model_name = 'qikt'
+        return model
+    elif model_name.lower() == 'lbkt':
+        qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(DEVICE)
+        model = LBKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_h=params.model.emb_dim).to(DEVICE)
+        model.model_name = 'lbkt'
+        return model
     else:
         raise ValueError(f"Unknown model: {model_name}")
-
-def get_stratified_split(dataset, test_ratio=0.2, seed=42):
-    total_len = len(dataset)
-    indices = np.arange(total_len)
-    groups = dataset.groups
-    
-    # @fix_fzq: If groups exist, use GroupShuffleSplit instead
-    if groups is not None:
-        print(f"🔒 Detecting Windowed Dataset. Using Group-based stratified split.")
-        splitter = GroupShuffleSplit(n_splits=1, test_size=test_ratio, random_state=seed)
-        train_index, test_index = next(splitter.split(indices, groups=groups))
-        print(f"Group-aware Stratified Split Done. Train: {len(train_index)}, Test: {len(test_index)}")
-        return train_index, test_index
-    
-    # Standard stratified split (no groups)
-    print(f"🔓 Using Standard Stratified splitting (no groups detected).")
-    print(f"Generating stratification labels for {total_len} samples...")
-    masks = dataset.user_mask.float()
-    res = dataset.user_res.float()
-    lengths = masks.sum(dim=1).numpy()
-    corrects = (res * masks).sum(dim=1).numpy()
-    accuracies = np.divide(corrects, lengths, out=np.zeros_like(corrects), where=lengths!=0)
-    len_bins = [0, 50, 100, 150, 20000]
-    len_labels = pd.cut(lengths, bins=len_bins, labels=False, include_lowest=True)
-    acc_bins = [0, 0.2, 0.4, 0.6, 0.8, 1.01]
-    acc_labels = pd.cut(accuracies, bins=acc_bins, labels=False, include_lowest=True)
-    len_labels = np.nan_to_num(len_labels, nan=0).astype(int)
-    acc_labels = np.nan_to_num(acc_labels, nan=0).astype(int)
-    strat_labels = len_labels * 10 + acc_labels 
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_ratio, random_state=seed)
-    try:
-        train_index, test_index = next(splitter.split(indices, strat_labels))
-    except ValueError:
-        print(f"{COLOR_LOG_Y}Warning: Stratification classes have too few members. Falling back to Random Split.{COLOR_LOG_END}")
-        np.random.shuffle(indices)
-        limit = int(total_len * (1 - test_ratio))
-        train_index = indices[:limit]
-        test_index = indices[limit:]
-    print(f"Stratified Split Done. Train: {len(train_index)}, Test: {len(test_index)}")
-    return train_index, test_index
 
 def train_epoch(model, dataloader, optimizer, criterion):
     model.train()
@@ -138,19 +121,30 @@ def train_epoch(model, dataloader, optimizer, criterion):
 
         
         optimizer.zero_grad()
+        
+        # Forward pass
         if getattr(model, 'model_name', '').lower() == 'gikt':
             y_hat = model(question, response, mask, interval, r_time)
-            preds = y_hat[:, 1:]
-            targets = response[:, 1:].float()
-            mask_valid = mask[:, 1:]
+            preds = y_hat[:, 1:] # [batch_size, seq_len-1]
         elif getattr(model, 'model_name', '').lower() == 'dkt':
-            # DKT: Input (Q, R) -> Output (Logits if no sigmoid) -> y_hat[:, k+1] predicts R[k+1]
             y_hat = model(question, response, mask)
-            # The current output of DKT is actually probabilities or logits?
-            # Standard DKT usually predicts logits -> Sigmoid.
-            preds = y_hat[:, :-1]
-            targets = response[:, 1:].float()
-            mask_valid = mask[:, 1:]
+            # dkt.py returns probabilities, but we need logits for BCEWithLogitsLoss
+            # Wait, if dkt returns probabilities, we should use BCELoss or change dkt to return logits.
+            # Let's assume dkt returns probabilities, we use inverse sigmoid to get logits
+            preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1] + 1e-8) + 1e-8)
+        elif getattr(model, 'model_name', '').lower() in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+            # These models return logits of shape [batch_size, seq_len-1] or [batch_size, seq_len]
+            y_hat = model(question, response, mask, interval, r_time)
+            if y_hat.shape[1] == question.shape[1]:
+                preds = y_hat[:, :-1]
+            else:
+                preds = y_hat
+        else:
+            y_hat = model(question, response, mask)
+            preds = y_hat[:, 1:]
+
+        targets = response[:, 1:].float()
+        mask_valid = mask[:, 1:]
         
         eval_mask_valid = eval_mask[:, 1:]
         final_mask = mask_valid & eval_mask_valid
@@ -190,16 +184,23 @@ def evaluate(model, dataloader):
                 y_hat = model(question, response, mask, interval, r_time)
                 y_hat = torch.sigmoid(y_hat)
                 preds = y_hat[:, 1:]
-                targets = response[:, 1:].float()
-                mask_valid = mask[:, 1:]
             elif getattr(model, 'model_name', '').lower() == 'dkt':
                 y_hat = model(question, response, mask)
-                # Ensure DKT output is activated if it's logits!
-                # Assuming your DKT outputs logits directly.
-                y_hat = torch.sigmoid(y_hat) 
                 preds = y_hat[:, :-1]
-                targets = response[:, 1:].float()
-                mask_valid = mask[:, 1:]
+            elif getattr(model, 'model_name', '').lower() in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                y_hat = model(question, response, mask, interval, r_time)
+                y_hat = torch.sigmoid(y_hat)
+                if y_hat.shape[1] == question.shape[1]:
+                    preds = y_hat[:, :-1]
+                else:
+                    preds = y_hat
+            else:
+                y_hat = model(question, response, mask)
+                y_hat = torch.sigmoid(y_hat)
+                preds = y_hat[:, 1:]
+
+            targets = response[:, 1:].float()
+            mask_valid = mask[:, 1:]
             eval_mask_valid = eval_mask[:, 1:]
             final_mask = mask_valid & eval_mask_valid
 
@@ -258,7 +259,7 @@ def run_comparison():
     print(f"\n{params}")
     print(f"{COLOR_LOG_G}{'='*80}{COLOR_LOG_END}\n")
     
-    dataset = UserDataset(config)
+    dataset = UnifiedParquetDataset(config, mode='train')
     qs_table = sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz'))
     num_question = qs_table.shape[0]
     num_skill = qs_table.shape[1]
@@ -271,8 +272,10 @@ def run_comparison():
         gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
         dev_idx, test_idx = next(gss.split(dataset, groups=groups))
     else:
-        print(f"\n{COLOR_LOG_B}Step 1: Splitting 20% Test Set (Stratified){COLOR_LOG_END}")
-        dev_idx, test_idx = get_stratified_split(dataset, test_ratio=0.2)
+        print(f"\n{COLOR_LOG_B}Step 1: Splitting 20% Test Set (ShuffleSplit){COLOR_LOG_END}")
+        from sklearn.model_selection import ShuffleSplit
+        ss = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        dev_idx, test_idx = next(ss.split(dataset))
 
     test_set = Subset(dataset, test_idx)
     dev_set_base = Subset(dataset, dev_idx)

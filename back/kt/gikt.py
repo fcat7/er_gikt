@@ -199,10 +199,21 @@ class GIKT(Module):
         # @add_fzq: GAT 相关初始化
         if self.agg_method == 'gat':
             if q_features_path is None and data_dir is not None:
-                q_features_path = os.path.join(data_dir, 'q_features.npy')
-                
+                # 尝试从 metadata.json 中获取特征文件路径
+                metadata_path = os.path.join(data_dir, 'metadata.json')
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                            # 从 features.q_features.file 获取文件名
+                            q_feat_file = metadata.get('features', {}).get('q_features', {}).get('file')
+                            if q_feat_file:
+                                q_features_path = os.path.join(data_dir, q_feat_file)
+                    except Exception as e:
+                        print(f"Warning: Failed to read q_features path from metadata: {e}")
+
             if q_features_path is None or not os.path.exists(q_features_path):
-                print(f"Warning: GAT select but q_features not found at {q_features_path}. Fallback to GCN.")
+                print(f"Warning: GAT selected but q_features not found at {q_features_path}. Fallback to GCN.")
                 self.agg_method = 'gcn'
             else:
                 import numpy as np
@@ -312,17 +323,37 @@ class GIKT(Module):
                     config = get_config(dataset_name)
                     data_dir = config.PROCESSED_DATA_DIR
                 
-                skill_map_path = os.path.join(data_dir, 'skill_domain_map.npy')
-                if os.path.exists(skill_map_path):
-                    import numpy as np
-                    print(f"Loading Skill-Domain Map for PID from: {skill_map_path}")
-                    # skill_domain_map: [num_skill] -> domain_id (0..N-1)
-                    skill_domain_map = np.load(skill_map_path)
-                    self.pid_num_domains = int(np.max(skill_domain_map) + 1)
-                    print(f"Detected {self.pid_num_domains} PID domains from data.")
+                # 尝试从 metadata.json 获取领域映射信息
+                metadata_path = os.path.join(data_dir, 'metadata.json')
+                skill_domain_map = None
+                self.pid_num_domains = 1
+                
+                if os.path.exists(metadata_path):
+                    import json, numpy as np
+                    try:
+                        with open(metadata_path, 'r', encoding='utf-8') as f:
+                            metadata = json.load(f)
+                        
+                        self.pid_num_domains = metadata.get('metrics', {}).get('n_domain', 1)
+                        map_filename = metadata.get('mappings', {}).get('skill_domain_map', 'skill_domain_map.json')
+                        json_path = os.path.join(data_dir, map_filename)
+                        
+                        if os.path.exists(json_path):
+                            print(f"Loading Skill-Domain Map for PID from JSON: {json_path}")
+                            with open(json_path, 'r', encoding='utf-8') as jf:
+                                raw = json.load(jf)
+                            try:
+                                keys = sorted(raw.keys(), key=lambda x: int(x))
+                            except Exception:
+                                keys = list(raw.keys())
+                            skill_domain_map = np.array([int(raw[k]) for k in keys], dtype=int)
+                            print(f"Detected {self.pid_num_domains} PID domains from metadata.")
+                        else:
+                            print(f"Error: skill_domain_map file {json_path} not found. Fallback to 1 domain.")
+                    except Exception as e:
+                        print(f"Error reading metadata for PID domains: {e}. Fallback to 1 domain.")
                 else:
-                    print(f"Error: skill_domain_map.npy not found in {data_dir}. Fallback to 1 domain if needed.")
-                    self.pid_num_domains = 1
+                    print(f"Error: metadata.json not found in {data_dir}. Fallback to 1 domain.")
             else:
                 self.pid_num_domains = 1
 
@@ -348,7 +379,7 @@ class GIKT(Module):
                 self.w_pid_d = torch.nn.Parameter(torch.tensor(pid_init_d))
 
             # @add_fzq: Domain-Level PID Initialization (Pre-compute mask)
-            if self.pid_mode == 'domain' and 'skill_domain_map' in locals():
+            if self.pid_mode == 'domain' and 'skill_domain_map' in locals() and skill_domain_map is not None:
                 # 1. Create mapping tensor
                 s2d_tensor = torch.tensor(skill_domain_map, device=DEVICE, dtype=torch.long) # [S]
                 
@@ -369,7 +400,7 @@ class GIKT(Module):
                 self.register_buffer('q_domain_mask_buffer', self.q_domain_mask)
                 print(f"Question-Domain Mask Built. Shape: {self.q_domain_mask.shape}")
             elif self.pid_mode == 'domain':
-                print(f"Error: skill_domain_map.npy not found or loaded. Falling back to Global PID.")
+                print(f"Error: skill_domain_map not found or loaded. Falling back to Global PID.")
                 self.pid_num_domains = 1
                 self.pid_mode = 'global'
                 self.w_pid_i = torch.nn.Parameter(torch.tensor(pid_init_i))

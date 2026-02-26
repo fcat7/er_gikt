@@ -1,104 +1,97 @@
-"""
-数据集加载策略
-"""
 import os
-import numpy as np
+import json
 import torch
+import numpy as np
+import pandas as pd
 from torch.utils.data import Dataset
-from scipy import sparse
 
-class UserDataset(Dataset):
-
+class UnifiedParquetDataset(Dataset):
+    """
+    统一的 Parquet 数据集加载器 V2
+    支持动态 Padding 和数据增强
+    """
     def __init__(self, config, augment=False, prob_mask=0.1, mode='train'):
-        """
-        Args:
-            mode: 'train' or 'test'. Loads {mode}_seq.npy etc.
-        """
-        processed_dir = config.PROCESSED_DATA_DIR
+        self.config = config
         self.augment = augment
-        self.prob_mask = prob_mask # 随机掩码概率
+        self.prob_mask = prob_mask
+        self.mode = mode
         
-        prefix = f"{mode}_"
+        data_dir = config.PROCESSED_DATA_DIR
+        file_path = os.path.join(data_dir, f"{mode}.parquet")
         
-        # 输入数据
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Parquet file not found: {file_path}. Please run data_process.py first.")
+            
+        # 加载元数据
         try:
-            self.user_seq = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'seq.npy')), dtype=torch.int64)
-            # [num_user, max_seq_len] 输入数据
-            self.user_res = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'res.npy')), dtype=torch.int64)
-            # [num_user, max_seq_len] 输入标签
-            self.user_mask = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'mask.npy')), dtype=torch.bool)
-            # [num_user, max_seq_len] 有值效记录
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Could not find dataset files with prefix '{prefix}' in {processed_dir}. Did you run data_process.py?")
-        
-        # 新增时间特征
-        # 检查文件是否存在，如果不存在则使用全0初始化 (兼容旧代码)
-        try:
-            self.user_interval_time = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'interval_time.npy')), dtype=torch.float32)
-            self.user_response_time = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'response_time.npy')), dtype=torch.float32)
-        except FileNotFoundError:
-            print(f"Warning: Time feature files for '{mode}' not found. Using zeros.")
-            self.user_interval_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
-            self.user_response_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
+            with open(os.path.join(data_dir, "metadata.json"), 'r') as f:
+                self.meta = json.load(f)
+        except:
+            self.meta = {}
 
-        # @fix_fzq: 加载 Eval Mask (用于区分评估区间，避免冷启动与泄露)
-        try:
-            self.user_eval_mask = torch.tensor(np.load(os.path.join(processed_dir, prefix + 'eval_mask.npy')), dtype=torch.bool)
-        except FileNotFoundError:
-            # 兼容旧数据：若不存在 eval_mask，则默认与 user_mask 一致
-            self.user_eval_mask = self.user_mask.clone()
+        self.max_seq_len = self.meta.get('config_at_processing', {}).get('max_seq_len', 200)
 
-        # @fix_fzq: 加载 Group 信息 (用于 GroupKFold 防泄露)
-        try:
-            self.groups = np.load(os.path.join(processed_dir, prefix + 'window_groups.npy'))
-            # print("Loaded user groups for leakage-free splitting.")
-        except FileNotFoundError:
+        # 加载主数据
+        self.df = pd.read_parquet(file_path)
+        
+        # 提取 groups 用于 GroupKFold
+        if 'group_id' in self.df.columns:
+            self.groups = self.df['group_id'].values
+        else:
             self.groups = None
+        
+    def __len__(self):
+        return len(self.df)
+    
+    def _pad_sequence(self, seq, dtype=np.int64, pad_val=0):
+        """动态 Padding 到 max_seq_len"""
+        arr = np.array(seq, dtype=dtype)
+        if len(arr) >= self.max_seq_len:
+            return arr[:self.max_seq_len]
+        padded = np.full(self.max_seq_len, pad_val, dtype=dtype)
+        padded[:len(arr)] = arr
+        return padded
 
-    # # 假设原始数据：
-    # user_seq = [1, 2, 3, …]      # 问题ID序列
-    # user_res = [1, 0, 1, …]      # 答题结果序列
-    # user_mask = [1, 1, 1, …]     # 掩码序列
-    # user_interval = [0.1, 0.5, ...] # 间隔时间序列
-    # user_response = [1.2, 0.8, ...] # 作答时间序列
-    # # 堆叠后：
-    # stacked = [
-    #     [1, 1, 1, 0.1, 1.2],  # 第一个时间步：[问题ID, 答题结果, 掩码, 间隔, 作答时间]
-    #     ...
-    # ]
-    def __getitem__(self, index): # index: 用户索引，指定要获取哪个用户的数据
-        seq = self.user_seq[index]
-        res = self.user_res[index]
-        mask = self.user_mask[index]
-        interval = self.user_interval_time[index]
-        response_time = self.user_response_time[index]
-        eval_mask = self.user_eval_mask[index]
+    def __getitem__(self, index):
+        row = self.df.iloc[index]
+        
+        # 动态 Padding 并转换为 Tensor
+        seq = torch.from_numpy(self._pad_sequence(row['q_seq'], dtype=np.int64))
+        res = torch.from_numpy(self._pad_sequence(row['r_seq'], dtype=np.int64))
+        mask = torch.from_numpy(self._pad_sequence(row['mask'], dtype=bool, pad_val=False))
+        
+        # 可选列
+        if 't_interval' in row and row['t_interval'] is not None:
+            interval = torch.from_numpy(self._pad_sequence(row['t_interval'], dtype=np.float32))
+        else:
+            interval = torch.zeros_like(seq, dtype=torch.float32)
+            
+        if 't_response' in row and row['t_response'] is not None:
+            response_time = torch.from_numpy(self._pad_sequence(row['t_response'], dtype=np.float32))
+        else:
+            response_time = torch.zeros_like(seq, dtype=torch.float32)
+            
+        if 'eval_mask' in row and row['eval_mask'] is not None:
+            eval_mask = torch.from_numpy(self._pad_sequence(row['eval_mask'], dtype=bool, pad_val=False))
+        else:
+            eval_mask = mask.clone()
 
-        if self.augment:
-            # 随机掩码 (Random Masking)
-            if self.prob_mask > 0:
-                # 创建一个随机概率掩码 (prob < prob_mask)
-                prob_random = torch.rand(seq.shape) < self.prob_mask
-                
-                # 不能掩盖所有数据，至少保留一个
-                # 只有原来是 True 的地方才允许被 mask 掉
-                mask_to_drop = prob_random & mask
-                
-                # 如果全部被 drop 了，强行保留至少一个（防止报错）
-                if mask_to_drop.sum() == mask.sum() and mask.sum() > 0:
-                    # 随机选一个不 drop
-                    valid_indices = torch.nonzero(mask, as_tuple=True)[0]
-                    keep_idx = valid_indices[torch.randint(0, len(valid_indices), (1,))]
-                    mask_to_drop[keep_idx] = False
-                    
-                # 应用由于数据增强导致的 mask 变更 (设置为 0)
-                # 克隆 mask 以避免修改原始数据 (Tensor切片可能是视图)
-                mask = mask.clone() 
-                mask[mask_to_drop] = False
-                # eval_mask 同步更新，避免对被丢弃位置进行评估
-                eval_mask = eval_mask.clone()
-                eval_mask[mask_to_drop] = False
-
+        # 数据增强 (逻辑完全复用)
+        if self.augment and self.prob_mask > 0:
+            prob_random = torch.rand(seq.shape) < self.prob_mask
+            mask_to_drop = prob_random & mask
+            
+            if mask_to_drop.sum() == mask.sum() and mask.sum() > 0:
+                valid_indices = torch.nonzero(mask, as_tuple=True)[0]
+                keep_idx = valid_indices[torch.randint(0, len(valid_indices), (1,))]
+                mask_to_drop[keep_idx] = False
+            
+            mask = mask.clone()
+            mask[mask_to_drop] = False
+            eval_mask = eval_mask.clone()
+            eval_mask[mask_to_drop] = False
+            
+        # 返回兼容旧有 dataset.py 的格式 [max_seq_len, 6]
         return torch.stack([
             seq, 
             res, 
@@ -107,37 +100,3 @@ class UserDataset(Dataset):
             response_time,
             eval_mask
         ], dim=-1)
-        # 将6个一维张量沿着最后一个维度（dim=-1）堆叠，结果是一个二维张量，形状为 [max_seq_len, 6]
-
-    def __len__(self):
-        return self.user_seq.shape[0]
-
-# # 示例说明 [num_user=3, max_seq_len=5, 3]
-# [
-#     # 用户1的答题序列
-#     [
-#         [1, 1, 1],  # 第1题：问题ID=1, 答对(1), 有效数据(1)
-#         [2, 0, 1],  # 第2题：问题ID=2, 答错(0), 有效数据(1)
-#         [3, 1, 1],  # 第3题：问题ID=3, 答对(1), 有效数据(1)
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0]   # 填充：无效数据
-#     ],
-    
-#     # 用户2的答题序列
-#     [
-#         [1, 1, 1],  # 第1题：问题ID=1, 答对(1), 有效数据(1)
-#         [4, 1, 1],  # 第2题：问题ID=4, 答对(1), 有效数据(1)
-#         [2, 0, 1],  # 第3题：问题ID=2, 答错(0), 有效数据(1)
-#         [5, 1, 1],  # 第4题：问题ID=5, 答对(1), 有效数据(1)
-#         [0, 0, 0]   # 填充：无效数据
-#     ],
-    
-#     # 用户3的答题序列
-#     [
-#         [3, 0, 1],  # 第1题：问题ID=3, 答错(0), 有效数据(1)
-#         [1, 1, 1],  # 第2题：问题ID=1, 答对(1), 有效数据(1)
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0]   # 填充：无效数据
-#     ]
-# ]

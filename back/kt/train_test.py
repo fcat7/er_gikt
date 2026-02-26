@@ -10,12 +10,16 @@ from scipy import sparse
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold, ShuffleSplit
 from torch.utils.data import DataLoader, Subset
-from dataset import UserDataset
 from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
 from params import HyperParameters
 from util.utils import gen_gikt_graph, build_adj_list
 import argparse
 from gikt import GIKT
+
+try:
+    from dataset import UnifiedParquetDataset
+except ImportError:
+    raise ImportError("Failed to import UnifiedParquetDataset from dataset.py. Please ensure V2 dataset is ready.")
 
 # @add_fzq: AMP Support
 import torch
@@ -102,18 +106,19 @@ if __name__ == '__main__':
     s_neighbors = torch.tensor(s_neighbors, dtype=torch.int64, device=DEVICE)
 
     # 实例化数据集
-    # @update_fzq: 使用细粒度的数据增强配置
-    dataset_full_augment = UserDataset(
+    # @update_fzq: 使用 V2 数据集 (Parquet)
+    print("Using UnifiedParquetDataset (Parquet + Metadata)")
+    dataset_full_augment = UnifiedParquetDataset(
         config, 
         augment=params.train.enable_data_augmentation,
         prob_mask=params.train.aug_mask_prob,
         mode='train' 
     )
-    dataset_full_clean = UserDataset(config, augment=False, mode='train')
+    dataset_full_clean = UnifiedParquetDataset(config, augment=False, mode='train')
 
     # 加载独立的 Holdout 测试集 (不重叠的用户)
     try:
-        dataset_holdout = UserDataset(config, augment=False, mode='test')
+        dataset_holdout = UnifiedParquetDataset(config, augment=False, mode='test')
         print(f"📚 Loaded Holdout Test Set: {len(dataset_holdout)} samples.")
         dataset_holdout_loader = DataLoader(
             dataset_holdout, 
