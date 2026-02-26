@@ -1,6 +1,6 @@
 **ER_KT**
 
-[TOC]
+[toc]
 
 基于改进的 GIKT 深度知识追踪模型的习题推荐系统.
 
@@ -20,21 +20,14 @@ _^tab^_
 >
 > ```shell
 > ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/data ./data
-> ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/model ./model
 > ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/output ./output
 > ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/config ./config
 > ```
->
-> 
 
 > **mac**
 >
 > ```shell
 > mklink /D data "I:\我的云端硬盘\kt_fzq_assets\data"
-> mklink /D model "I:\我的云端硬盘\kt_fzq_assets\model"
 > mklink /D output "I:\我的云端硬盘\kt_fzq_assets\output"
 > mklink /D config "I:\我的云端硬盘\kt_fzq_assets\config"
 > ```
->
-> 
-

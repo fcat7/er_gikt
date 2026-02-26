@@ -50,8 +50,8 @@ class Config:
         self.config_data = {
             'paths': {
                 'processed_data_root': 'data',
-                'model_dir': 'model',
                 'output_dir': 'output',
+                'model_dir': 'output/model',
                 'log_dir': 'output/logs',
                 'chart_dir': 'output/chart_data',
                 'report_dir': 'output/data_analysis_reports'
