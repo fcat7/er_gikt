@@ -108,30 +108,30 @@ if __name__ == '__main__':
     # 实例化数据集
     # @update_fzq: 使用 V2 数据集 (Parquet)
     print("Using UnifiedParquetDataset (Parquet + Metadata)")
-    dataset_full_augment = UnifiedParquetDataset(
+    dataset_train_augment = UnifiedParquetDataset(
         config, 
         augment=params.train.enable_data_augmentation,
         prob_mask=params.train.aug_mask_prob,
         mode='train' 
     )
-    dataset_full_clean = UnifiedParquetDataset(config, augment=False, mode='train')
+    dataset_train_clean = UnifiedParquetDataset(config, augment=False, mode='train')
 
-    # 加载独立的 Holdout 测试集 (不重叠的用户)
+    # 加载独立的测试集（不重叠的用户，正式评估用）
     try:
-        dataset_holdout = UnifiedParquetDataset(config, augment=False, mode='test')
-        print(f"📚 Loaded Holdout Test Set: {len(dataset_holdout)} samples.")
-        dataset_holdout_loader = DataLoader(
-            dataset_holdout, 
+        dataset_test = UnifiedParquetDataset(config, augment=False, mode='test')
+        print(f"📚 Loaded Test Set: {len(dataset_test)} samples.")
+        dataset_test_loader = DataLoader(
+            dataset_test, 
             batch_size=batch_size, 
             num_workers=params.common.num_workers,
             pin_memory=True
         )
     except Exception as e:
-        dataset_holdout = None
-        dataset_holdout_loader = None
-        print(f"⚠️ Warning: Holdout Test Set load failed ({e}). Skipping independent testing.")
+        dataset_test = None
+        dataset_test_loader = None
+        print(f"⚠️ Warning: Test Set load failed ({e}). Skipping independent testing.")
     
-    data_len = len(dataset_full_clean)
+    data_len = len(dataset_train_clean)
     output_file.write(f'Train/Val Pool size: {data_len}\n')
     
     # 记录总开始时间
@@ -143,7 +143,7 @@ if __name__ == '__main__':
     # ==========================================================================================
     # K-Fold Strategy Logic
     # ==========================================================================================
-    groups = dataset_full_clean.groups
+    groups = dataset_train_clean.groups
     if groups is not None:
         print(f"🔒 Detecting Windowed Dataset with {len(np.unique(groups))} unique users. Using Group-based splitting to prevent leakage.")
         from sklearn.model_selection import GroupKFold, GroupShuffleSplit
@@ -151,14 +151,14 @@ if __name__ == '__main__':
             k_fold = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
         else:
             k_fold = GroupKFold(n_splits=params.train.k_fold)
-        splits = list(k_fold.split(dataset_full_clean, groups=groups))
+        splits = list(k_fold.split(dataset_train_clean, groups=groups))
     else:
         print("🔓 Using Standard Shuffled splitting.")
         if params.train.k_fold == 1:
             k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
         else:
             k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
-        splits = list(k_fold.split(dataset_full_clean))
+        splits = list(k_fold.split(dataset_train_clean))
 
     fold_results_test_auc = []
     
@@ -208,8 +208,8 @@ if __name__ == '__main__':
         patience_counter = 0
 
         # Data Loaders
-        train_set = Subset(dataset_full_augment, train_indices)
-        test_set = Subset(dataset_full_clean, test_indices)
+        train_set = Subset(dataset_train_augment, train_indices)
+        val_set = Subset(dataset_train_clean, test_indices)
         
         loader_kwargs = {
             'batch_size': batch_size,
@@ -220,9 +220,9 @@ if __name__ == '__main__':
             loader_kwargs['prefetch_factor'] = params.train.prefetch_factor
             
         train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
-        test_loader = DataLoader(test_set, shuffle=False, **loader_kwargs)
+        val_loader = DataLoader(val_set, shuffle=False, **loader_kwargs)
         
-        print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(test_set)}")
+        print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(val_set)}")
         print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         # @add_fzq: 样本量告警 - eval_mask 会显著减少有效样本
@@ -346,8 +346,7 @@ if __name__ == '__main__':
             
             train_time = time.time() - train_start_time
             
-            # Validation
-            # ---------------------
+            # 验证集评估
             print('-------------------validate------------------')
             model.eval()
             val_loss = val_total = val_right = val_auc = val_step = 0
@@ -356,10 +355,9 @@ if __name__ == '__main__':
             all_targets_no_mask = []
             all_probs_no_mask = []
             val_start_time = time.time()
-            
             torch.set_grad_enabled(False)
-            total_val_batches = len(test_loader)
-            for val_batch_idx, data in enumerate(test_loader, 1):
+            total_val_batches = len(val_loader)
+            for val_batch_idx, data in enumerate(val_loader, 1):
                 data_gpu = data.to(DEVICE)
                 x = data_gpu[:, :, 0].to(torch.long)
                 y_target = data_gpu[:, :, 1].to(torch.long)
@@ -370,8 +368,7 @@ if __name__ == '__main__':
 
                 with autocast(enabled=use_amp):
                     y_hat = model(x, y_target, mask, interval_time, response_time)
-                
-                # @fix_fzq: Skip first timestep (no history for prediction)
+
                 y_hat = y_hat[:, 1:]
                 y_target_shift = y_target[:, 1:].float()
                 mask_valid = mask[:, 1:]
@@ -381,16 +378,16 @@ if __name__ == '__main__':
                 y_target_flat = torch.masked_select(y_target_shift, final_mask)
                 loss = loss_fun(y_hat_flat, y_target_flat)
                 y_prob = torch.sigmoid(y_hat_flat)
-                
+
                 val_loss += loss.item()
                 y_pred = torch.ge(y_prob, 0.5)
                 val_right += torch.sum(torch.eq(y_target_flat, y_pred))
                 val_total += torch.sum(final_mask)
                 val_step += 1
-                
+
                 all_targets.extend(y_target_flat.cpu().detach().numpy())
                 all_probs.extend(y_prob.cpu().detach().numpy())
-                
+
                 # For diagnostic: collect without eval_mask filter
                 y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
                 y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
@@ -398,7 +395,7 @@ if __name__ == '__main__':
                     y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
                     all_targets_no_mask.extend(y_target_flat_no_mask.cpu().detach().numpy())
                     all_probs_no_mask.extend(y_prob_no_mask.cpu().detach().numpy())
-                
+
                 if params.train.verbose:
                     batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
                     batch_auc = 0.5  # Default value
@@ -493,54 +490,49 @@ if __name__ == '__main__':
                     break
         
         # Fold Summary (after all epochs)
-        # 计算 fold 的平均指标（使用 holdout 测试集）
-        best_fold_train_loss = 0
-        best_fold_train_acc = 0
-        best_fold_train_auc = 0
-        best_fold_val_loss = 0
-        best_fold_val_acc = 0
+        # 计算 fold 的平均指标（使用独立测试集）
         best_fold_test_auc = 0.0
-        
+        best_fold_test_loss = 0.0
+        best_fold_test_acc = 0.0
         # 使用最佳模型状态（已在早期停止逻辑中预先加载）对测试集进行重新评估
         model.eval()
         test_targets = []
         test_probs = []
         test_loss = 0
         test_step = 0
-        with torch.no_grad():
-            for data in test_loader:
-                data_gpu = data.to(DEVICE)
-                x = data_gpu[:, :, 0].to(torch.long)
-                y_target = data_gpu[:, :, 1].to(torch.long)
-                mask = data_gpu[:, :, 2].to(torch.bool)
-                interval_time = data_gpu[:, :, 3].to(torch.float32)
-                response_time = data_gpu[:, :, 4].to(torch.float32)
-                eval_mask = data_gpu[:, :, 5].to(torch.bool)
+        if dataset_test_loader is not None:
+            with torch.no_grad():
+                for data in dataset_test_loader:
+                    data_gpu = data.to(DEVICE)
+                    x = data_gpu[:, :, 0].to(torch.long)
+                    y_target = data_gpu[:, :, 1].to(torch.long)
+                    mask = data_gpu[:, :, 2].to(torch.bool)
+                    interval_time = data_gpu[:, :, 3].to(torch.float32)
+                    response_time = data_gpu[:, :, 4].to(torch.float32)
+                    eval_mask = data_gpu[:, :, 5].to(torch.bool)
 
-                with autocast(enabled=use_amp):
-                    y_hat = model(x, y_target, mask, interval_time, response_time)
-                
-                y_hat = y_hat[:, 1:]
-                y_target_shift = y_target[:, 1:].float()
-                mask_valid = mask[:, 1:]
-                eval_mask_valid = eval_mask[:, 1:]
-                final_mask = mask_valid & eval_mask_valid
-                y_hat_flat = torch.masked_select(y_hat, final_mask)
-                y_target_flat = torch.masked_select(y_target_shift, final_mask)
-                loss = loss_fun(y_hat_flat, y_target_flat)
-                y_prob = torch.sigmoid(y_hat_flat)
-                
-                test_loss += loss.item()
-                test_step += 1
-                test_targets.extend(y_target_flat.cpu().detach().numpy())
-                test_probs.extend(y_prob.cpu().detach().numpy())
-        
-        if len(test_targets) > 0:
-            best_fold_test_auc = roc_auc_score(test_targets, test_probs)
-        best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
-        best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= 0.5))
-        
-        
+                    with autocast(enabled=use_amp):
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
+
+                    y_hat = y_hat[:, 1:]
+                    y_target_shift = y_target[:, 1:].float()
+                    mask_valid = mask[:, 1:]
+                    eval_mask_valid = eval_mask[:, 1:]
+                    final_mask = mask_valid & eval_mask_valid
+                    y_hat_flat = torch.masked_select(y_hat, final_mask)
+                    y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                    loss = loss_fun(y_hat_flat, y_target_flat)
+                    y_prob = torch.sigmoid(y_hat_flat)
+
+                    test_loss += loss.item()
+                    test_step += 1
+                    test_targets.extend(y_target_flat.cpu().detach().numpy())
+                    test_probs.extend(y_prob.cpu().detach().numpy())
+            if len(test_targets) > 0:
+                best_fold_test_auc = roc_auc_score(test_targets, test_probs)
+            best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
+            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= 0.5))
+
         print('\n' + '='*70)
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
         print('='*70 + '\n')

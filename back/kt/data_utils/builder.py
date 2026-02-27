@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 from config import MAX_SEQ_LEN, Config
+from .standard_columns import StandardColumns
 try:
     from icecream import ic
 except ImportError:
@@ -14,6 +15,8 @@ class KTDataBuilder:
     数据构建器 V2
     负责将 DataFrame 转换为模型所需的 List of Dicts 格式 (用于 Parquet)
     包括：ID映射、序列生成、邻接矩阵构建
+    
+    支持标准列名: uid, qid, sid, label, timestamp, rt
     """
     def __init__(self, config: Config):
         self.config = config
@@ -21,25 +24,33 @@ class KTDataBuilder:
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
             
+        # 使用标准列名
+        self.user_col = StandardColumns.USER_ID
+        self.question_col = StandardColumns.QUESTION_ID
+        self.skill_col = StandardColumns.SKILL_IDS
+        self.label_col = StandardColumns.LABEL
+        self.timestamp_col = StandardColumns.TIMESTAMP
+        self.rt_col = StandardColumns.RESPONSE_TIME
+        
         self.user2idx = {}
-        self.problem2idx = {}
+        self.question2idx = {}
         self.skill2idx = {}
         self.idx2user = {}
-        self.idx2problem = {}
+        self.idx2question = {}
         self.idx2skill = {}
         self.skill_domain_map = {}
 
     def _parse_skills(self, raw_skill):
-        """解析技能ID，支持 int, float, str (逗号或下划线分隔)"""
+        """解析技能ID，支持 int, float, str (标准分隔符分割)"""
         if pd.isna(raw_skill):
             return []
         if isinstance(raw_skill, (int, float)):
             return [int(raw_skill)]
-        
-        # 字符串处理
-        s = str(raw_skill).replace(';', '_').replace(',', '_')
-        parts = s.split('_')
-        
+
+        # 字符串处理，已由 adapter.py 标准化为统一分隔符
+        s = str(raw_skill)
+        parts = s.split(StandardColumns.SKILL_IDS_STD_SEP)
+
         skills = []
         for p in parts:
             try:
@@ -71,27 +82,27 @@ class KTDataBuilder:
 
     def _build_id_maps(self, df):
         # User ID
-        users = df['user_id'].unique()
+        users = df[self.user_col].unique()
         self.user2idx = {u: i for i, u in enumerate(users)}
         self.idx2user = {i: u for u, i in self.user2idx.items()}
         
-        # Problem ID (0 is reserved for padding/unknown)
-        problems = df['problem_id'].unique()
-        self.problem2idx = {p: i+1 for i, p in enumerate(problems)}
-        self.problem2idx[0] = 0 # Padding
-        self.idx2problem = {i: p for p, i in self.problem2idx.items()}
+        # Question ID (0 is reserved for padding/unknown)
+        question = df[self.question_col].unique()
+        self.question2idx = {p: i+1 for i, p in enumerate(question)}
+        self.question2idx[0] = 0 # Padding
+        self.idx2question = {i: p for p, i in self.question2idx.items()}
         
         # Skill ID (0 is reserved for padding/unknown)
         skills = set()
-        if 'skill_id' in df.columns:
-            for s_str in df['skill_id'].dropna().unique():
+        if self.skill_col in df.columns:
+            for s_str in df[self.skill_col].dropna().unique():
                 skills.update(self._parse_skills(s_str))
         self.skill2idx = {s: i+1 for i, s in enumerate(sorted(list(skills)))}
         self.skill2idx[0] = 0 # Padding
         self.idx2skill = {i: s for s, i in self.skill2idx.items()}
         
         ic(f"  - Users: {len(self.user2idx)}")
-        ic(f"  - Problems: {len(self.problem2idx)}")
+        ic(f"  - Questions: {len(self.question2idx)}")
         ic(f"  - Skills: {len(self.skill2idx)}")
 
         # Save JSON maps
@@ -101,10 +112,10 @@ class KTDataBuilder:
             str_skill2idx = {str(k): int(v) for k, v in self.skill2idx.items()}
             json.dump(str_skill2idx, f, indent=4)
             
-        # Problem-ID Map (question2idx.json)
+        # Question-ID Map (question2idx.json)
         with open(os.path.join(self.output_dir, 'question2idx.json'), 'w', encoding='utf-8') as f:
-            str_problem2idx = {str(k): int(v) for k, v in self.problem2idx.items()}
-            json.dump(str_problem2idx, f, indent=4)
+            str_question2idx = {str(k): int(v) for k, v in self.question2idx.items()}
+            json.dump(str_question2idx, f, indent=4)
         
         # User-ID Map
         with open(os.path.join(self.output_dir, 'user2idx.json'), 'w', encoding='utf-8') as f:
@@ -115,20 +126,20 @@ class KTDataBuilder:
 
     def _build_adjacency_matrices(self, df):
         """构建 Q-S, Q-Q, S-S 邻接矩阵"""
-        num_q = len(self.problem2idx) # 包含 0
+        num_q = len(self.question2idx) # 包含 0
         num_s = len(self.skill2idx) # 包含 0
         
         qs_table = np.zeros([num_q, num_s], dtype=int)
         
         # 遍历每个题目，填充 Q-S 表
         # 为了效率，我们先去重
-        problem_skill_df = df[['problem_id', 'skill_id']].drop_duplicates()
+        question_skill_df = df[[self.question_col, self.skill_col]].drop_duplicates()
         
-        for row in problem_skill_df.itertuples(index=False):
-            q_idx = self.problem2idx.get(row.problem_id)
+        for row in question_skill_df.itertuples(index=False):
+            q_idx = self.question2idx.get(getattr(row, self.question_col))
             if q_idx is None or q_idx == 0: continue
             
-            current_skills = self._parse_skills(row.skill_id)
+            current_skills = self._parse_skills(getattr(row, self.skill_col))
             
             for s in current_skills:
                 if s in self.skill2idx:
@@ -317,16 +328,16 @@ class KTDataBuilder:
         max_len = MAX_SEQ_LEN
         min_len = 5
         
-        has_time = 'response_time' in df.columns and 'timestamp' in df.columns
-        problem_avg_time = {}
+        has_time = self.rt_col in df.columns and self.timestamp_col in df.columns
+        question_avg_time = {}
         if has_time:
-            df['response_time'] = pd.to_numeric(df['response_time'], errors='coerce')
-            valid_rt = df[(df['response_time'] > 0) & (df['response_time'] < 3600000)]
+            df[self.rt_col] = pd.to_numeric(df[self.rt_col], errors='coerce')
+            valid_rt = df[(df[self.rt_col] > 0) & (df[self.rt_col] < 3600000)]
             if not valid_rt.empty:
-                problem_avg_time = valid_rt.groupby('problem_id')['response_time'].median().to_dict()
+                question_avg_time = valid_rt.groupby(self.question_col)[self.rt_col].median().to_dict()
 
         records = []
-        grouped = df.groupby('user_id')
+        grouped = df.groupby(self.user_col)
         
         for user_id, group in grouped:
             u_idx = self.user2idx.get(user_id)
@@ -341,13 +352,13 @@ class KTDataBuilder:
             user_last_skill_time = {} 
             
             for row in group.itertuples(index=False):
-                q_idx = self.problem2idx.get(row.problem_id, 0)
+                q_idx = self.question2idx.get(getattr(row, self.question_col), 0)
                 full_seq.append(q_idx)
-                full_res.append(int(row.correct))
+                full_res.append(int(getattr(row, self.label_col)))
                 
                 curr_skills = []
-                if hasattr(row, 'skill_id') and pd.notna(row.skill_id):
-                    s_raw_list = self._parse_skills(row.skill_id)
+                if hasattr(row, self.skill_col) and pd.notna(getattr(row, self.skill_col)):
+                    s_raw_list = self._parse_skills(getattr(row, self.skill_col))
                     for s_raw in s_raw_list:
                         s_id = self.skill2idx.get(s_raw)
                         if s_id is not None: curr_skills.append(s_id)
@@ -357,7 +368,7 @@ class KTDataBuilder:
                 
                 if has_time:
                     try:
-                        ts = float(row.timestamp) if pd.notna(row.timestamp) else 0.0
+                        ts = float(getattr(row, self.timestamp_col)) if pd.notna(getattr(row, self.timestamp_col)) else 0.0
                     except: ts = 0.0
                     if ts < 0: ts = 0.0
                     
@@ -370,8 +381,8 @@ class KTDataBuilder:
                     avg_int = sum(intervals)/len(intervals) if intervals else 0.0
                     full_interval.append(float(np.tanh(np.log(avg_int + 1))))
                     
-                    avg_t = problem_avg_time.get(row.problem_id, 1.0)
-                    raw_rt = row.response_time if (hasattr(row, 'response_time') and pd.notna(row.response_time) and row.response_time >=0) else 0.0
+                    avg_t = question_avg_time.get(getattr(row, self.question_col), 1.0)
+                    raw_rt = getattr(row, self.rt_col) if (hasattr(row, self.rt_col) and pd.notna(getattr(row, self.rt_col)) and getattr(row, self.rt_col) >=0) else 0.0
                     full_response.append(float(np.tanh(min(raw_rt / max(avg_t, 1e-6), 10.0))))
 
             total_interactions = len(full_seq)

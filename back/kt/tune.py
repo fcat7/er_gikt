@@ -64,6 +64,11 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
     # 1. 采样超参数
     sampled_params = sample_hyperparameters(trial, tune_config['search_space'])
     
+    # 新增：检查是否已有相同参数组合，如果有则跳过
+    for past_trial in trial.study.trials:
+        if past_trial.params == sampled_params and past_trial.state == optuna.trial.TrialState.COMPLETE:
+            raise optuna.exceptions.TrialPruned()
+    
     # 2. 合并基础配置和采样参数
     kwargs = {
         'epochs': tune_config.get('epochs', 50),

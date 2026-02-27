@@ -14,8 +14,8 @@ class AutonomousCognitiveCell(Module):
     设计哲学 (Design Philosophy):
     1. 接纳不完美 (Accept Imperfection): 承认模型会有预测误差。
     2. 转化矛盾 (Convert Contradiction): 将 "预测误差 (Surprise)" 转化为 "主要学习动力 (Plasticity Control)"。
-       - 如果我预判我会做对，且真的做对了 -> 矛盾小 -> 巩固模式 (Consolidation Mode)。
-       - 如果我预判我会做对，结果做错了 -> 矛盾大 -> 重组模式 (Adaptation Mode)。
+        - 如果我预判我会做对，且真的做对了 -> 矛盾小 -> 巩固模式 (Consolidation Mode)。
+        - 如果我预判我会做对，结果做错了 -> 矛盾大 -> 重组模式 (Adaptation Mode)。
     3. 追求自治 (Pursue Autonomy): 整个调节过程在 Cell 内部闭环完成，无需外部手动调整超参。
     """
     def __init__(self, input_size, hidden_size):
@@ -63,9 +63,9 @@ class AutonomousCognitiveCell(Module):
         # 计算 Surprise
         # response_val 必须是 float 类型
         with torch.no_grad(): # Surprise 是信号，不是 Loss 来源 (或者我们可以让它传导梯度以优化 predictor，但在 KT 中通常 predictor 是隐式的)
-             # 为保持 predictor 与主任务一致，我们允许梯度回传，让 predictor 学会准确预测
-             pass
-             
+            # 为保持 predictor 与主任务一致，我们允许梯度回传，让 predictor 学会准确预测
+            pass
+            
         surprise = torch.abs(response_val - pred_prob)
         surprise_vec = F.relu(self.surprise_encoder(surprise))
         
