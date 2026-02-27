@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
+from dataset import SeqFeatureKey
 import sys
 import time
-
 
 # python evaluate_mc.py --model_path model/20260201_1304.pt --num_samples 5 --dataset assist09-sample_10%
 
@@ -55,19 +55,19 @@ def mc_evaluate(model, data_loader, num_samples=30, device=None):
     with torch.no_grad():
         for batch_idx, data in enumerate(data_loader):
             batch_start_time = time.time()  # 记录 Batch 开始时间
-            # 数据准备
+            # 数据准备：batch 为特征字典
             if device:
-                data_gpu = data.to(device)
+                features = {k: v.to(device) for k, v in data.items()}
             else:
-                data_gpu = data
-                
-            x = data_gpu[:, :, 0].to(torch.long)
-            y_target = data_gpu[:, :, 1].to(torch.long)
-            mask = data_gpu[:, :, 2].to(torch.bool)
-            
+                features = data
+
+            x = features[SeqFeatureKey.Q].to(torch.long)
+            y_target = features[SeqFeatureKey.R].to(torch.long)
+            mask = features[SeqFeatureKey.MASK].to(torch.bool)
+
             # 处理时间特征 (包含 NaN 清洗逻辑)
-            interval_time = data_gpu[:, :, 3].to(torch.float32)
-            response_time = data_gpu[:, :, 4].to(torch.float32)
+            interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+            response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
             if torch.isnan(interval_time).any(): interval_time = torch.nan_to_num(interval_time, nan=0.0)
             if torch.isnan(response_time).any(): response_time = torch.nan_to_num(response_time, nan=0.0)
 

@@ -38,15 +38,27 @@ train_test.py
   - 加载 `metadata.json`，读取 `config_at_processing.max_seq_len` 作为统一的序列上限
   - 若存在 `group_id` 列，则暴露为 `self.groups`，供 `GroupKFold` 使用（避免窗口化数据泄露）
 
-- **`__getitem__` 输出格式**：单个样本被整理为形状为 `[max_seq_len, 6]` 的 `Tensor`，六个通道依次为：
+- **`__getitem__` 输出格式**：单个样本被整理为**字段字典**，键名集中由 `SeqFeatureKey` 管理，例如：
 
   ```text
-  [:, 0] → q_seq         题目 ID 序列（已通过 question2idx 映射）
-  [:, 1] → r_seq         答题结果（0/1）
-  [:, 2] → mask          有效位置标记（True 表示该时间步存在真实交互）
-  [:, 3] → t_interval    时间间隔特征（log → tanh 后的归一化结果）
-  [:, 4] → t_response    作答时长特征（相对中位数 RT → tanh）
-  [:, 5] → eval_mask     评估掩码（区分“历史预热”与“评估位置”）
+  {
+    "q_seq":       Tensor[max_seq_len],  # 题目 ID 序列（已通过 question2idx 映射）
+    "r_seq":       Tensor[max_seq_len],  # 答题结果（0/1）
+    "mask":        Tensor[max_seq_len],  # 有效位置标记（True 表示该时间步存在真实交互）
+    "t_interval":  Tensor[max_seq_len],  # 时间间隔特征（log → tanh 后的归一化结果）
+    "t_response":  Tensor[max_seq_len],  # 作答时长特征（相对中位数 RT → tanh）
+    "eval_mask":   Tensor[max_seq_len],  # 评估掩码（区分“历史预热”与“评估位置”）
+  }
+  ```
+
+  DataLoader 默认 collate 后，batch 变为“字典 → batched tensor”的形式，例如：
+
+  ```python
+  for batch in loader:
+      q = batch["q_seq"]        # 形状 [batch_size, max_seq_len]
+      y = batch["r_seq"]
+      mask = batch["mask"]
+      ...
   ```
 
 - **核心能力**：
@@ -56,7 +68,7 @@ train_test.py
     - 保证至少保留一个有效位置（防止整个序列被 Mask 掉）。
     - 同步更新 `mask` 与 `eval_mask`，保持训练/评估语义一致。
 
-> 直观理解：`UnifiedParquetDataset` 是 V2 数据流的“入口适配层”，把 Parquet 里的变长 List 列转换成模型可消费的 `[max_seq_len, 6]` 张量格式。
+> 直观理解：`UnifiedParquetDataset` 是 V2 数据流的“入口适配层”，把 Parquet 里的变长 List 列转换成**具名字段的序列字典**，模型可以按需取用不同特征，而不是绑定死板的 `[*, 6]` 通道顺序。
 
 ### 三、训练脚本层：`train_test.py`
 

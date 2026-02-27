@@ -5,8 +5,8 @@ from torch.utils.data import DataLoader, Subset
 from sklearn import metrics
 from sklearn.model_selection import KFold, GroupKFold, ShuffleSplit, GroupShuffleSplit
 import numpy as np
-import time
-import copy
+
+from dataset import SeqFeatureKey
 
 class BaseTrainer:
     """
@@ -34,12 +34,13 @@ class BaseTrainer:
         total_samples = 0
         
         for batch in dataloader:
-            question = batch[:, :, 0].to(torch.long).to(self.device)
-            response = batch[:, :, 1].to(torch.long).to(self.device)
-            mask = batch[:, :, 2].to(torch.bool).to(self.device)
-            interval = batch[:, :, 3].to(torch.float32).to(self.device)
-            r_time = batch[:, :, 4].to(torch.float32).to(self.device)
-            eval_mask = batch[:, :, 5].to(torch.bool).to(self.device)
+            features = {k: v.to(self.device) for k, v in batch.items()}
+            question = features[SeqFeatureKey.Q].to(torch.long)
+            response = features[SeqFeatureKey.R].to(torch.long)
+            mask = features[SeqFeatureKey.MASK].to(torch.bool)
+            eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+            interval = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+            r_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
             
             interval = torch.nan_to_num(interval, nan=0.0)
             r_time = torch.nan_to_num(r_time, nan=0.0)
@@ -91,12 +92,13 @@ class BaseTrainer:
         
         with torch.no_grad():
             for batch in dataloader:
-                question = batch[:, :, 0].to(torch.long).to(self.device)
-                response = batch[:, :, 1].to(torch.long).to(self.device)
-                mask = batch[:, :, 2].to(torch.bool).to(self.device)
-                interval = batch[:, :, 3].to(torch.float32).to(self.device)
-                r_time = batch[:, :, 4].to(torch.float32).to(self.device)
-                eval_mask = batch[:, :, 5].to(torch.bool).to(self.device)
+                features = {k: v.to(self.device) for k, v in batch.items()}
+                question = features[SeqFeatureKey.Q].to(torch.long)
+                response = features[SeqFeatureKey.R].to(torch.long)
+                mask = features[SeqFeatureKey.MASK].to(torch.bool)
+                eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+                interval = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                r_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
                 
                 interval = torch.nan_to_num(interval, nan=0.0)
                 r_time = torch.nan_to_num(r_time, nan=0.0)

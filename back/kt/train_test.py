@@ -17,7 +17,7 @@ import argparse
 from models.gikt import GIKT
 
 try:
-    from dataset import UnifiedParquetDataset
+    from dataset import UnifiedParquetDataset, SeqFeatureKey
 except ImportError:
     raise ImportError("Failed to import UnifiedParquetDataset from dataset.py. Please ensure V2 dataset is ready.")
 
@@ -253,20 +253,17 @@ if __name__ == '__main__':
 
             for batch_idx, data in enumerate(train_loader, 1):
                 optimizer.zero_grad()
-                data_gpu = data.to(DEVICE)
-                
-                # @update_fzq: Extract columns based on DataLoader shape
-                x = data_gpu[:, :, 0].to(torch.long)
-                y_target = data_gpu[:, :, 1].to(torch.long)
-                mask = data_gpu[:, :, 2].to(torch.bool) # Mask should be int for logic operations
-                interval_time = data_gpu[:, :, 3].to(torch.float32)
-                response_time = data_gpu[:, :, 4].to(torch.float32)
-                
-                # Check for eval_mask (compat for datasets without it)
-                if data_gpu.shape[2] > 5:
-                    eval_mask = data_gpu[:, :, 5].to(torch.bool)
-                else:
-                    eval_mask = mask.bool()
+                # 统一将 batch dict 移动到 DEVICE
+                features = {k: v.to(DEVICE) for k, v in data.items()}
+
+                x = features[SeqFeatureKey.Q].to(torch.long)
+                y_target = features[SeqFeatureKey.R].to(torch.long)
+                mask = features[SeqFeatureKey.MASK].to(torch.bool)
+
+                # 兼容可能不存在 eval_mask 的情况
+                eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
+                interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
 
                 with autocast(enabled=use_amp):
                     # @fix_fzq: Pass mask as tensor for GIKT internal logic
@@ -358,13 +355,13 @@ if __name__ == '__main__':
             torch.set_grad_enabled(False)
             total_val_batches = len(val_loader)
             for val_batch_idx, data in enumerate(val_loader, 1):
-                data_gpu = data.to(DEVICE)
-                x = data_gpu[:, :, 0].to(torch.long)
-                y_target = data_gpu[:, :, 1].to(torch.long)
-                mask = data_gpu[:, :, 2].to(torch.bool)
-                interval_time = data_gpu[:, :, 3].to(torch.float32)
-                response_time = data_gpu[:, :, 4].to(torch.float32)
-                eval_mask = data_gpu[:, :, 5].to(torch.bool)
+                features = {k: v.to(DEVICE) for k, v in data.items()}
+                x = features[SeqFeatureKey.Q].to(torch.long)
+                y_target = features[SeqFeatureKey.R].to(torch.long)
+                mask = features[SeqFeatureKey.MASK].to(torch.bool)
+                interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
+                eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
 
                 with autocast(enabled=use_amp):
                     y_hat = model(x, y_target, mask, interval_time, response_time)
@@ -503,13 +500,13 @@ if __name__ == '__main__':
         if dataset_test_loader is not None:
             with torch.no_grad():
                 for data in dataset_test_loader:
-                    data_gpu = data.to(DEVICE)
-                    x = data_gpu[:, :, 0].to(torch.long)
-                    y_target = data_gpu[:, :, 1].to(torch.long)
-                    mask = data_gpu[:, :, 2].to(torch.bool)
-                    interval_time = data_gpu[:, :, 3].to(torch.float32)
-                    response_time = data_gpu[:, :, 4].to(torch.float32)
-                    eval_mask = data_gpu[:, :, 5].to(torch.bool)
+                    features = {k: v.to(DEVICE) for k, v in data.items()}
+                    x = features[SeqFeatureKey.Q].to(torch.long)
+                    y_target = features[SeqFeatureKey.R].to(torch.long)
+                    mask = features[SeqFeatureKey.MASK].to(torch.bool)
+                    interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                    response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
+                    eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
 
                     with autocast(enabled=use_amp):
                         y_hat = model(x, y_target, mask, interval_time, response_time)
