@@ -198,5 +198,6 @@ def main():
         json.dump(trial.params, f, indent=4)
     print(f"Saved best params to: {best_params_file}")
 
+# python tune.py --config config/tune/dkt.yaml
 if __name__ == '__main__':
     main()

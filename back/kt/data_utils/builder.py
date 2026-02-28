@@ -392,16 +392,19 @@ class KTDataBuilder:
             
             history_len = 0
             
+            # 如果 stride=None 或者 stride >= max_len，则使用非重叠模式；否则使用指定的 stride 进行切分
             if stride is None or stride >= total_interactions:
-                # 非重叠模式：区分训练和测试
+                # 测试集且序列过长：使用重叠窗口，保留历史预热
                 if not is_train_mode and total_interactions > max_len:
                     # 测试集超长序列：使用50%重叠，保留历史预热（避免冷启动）
+                    # 窗口1: [0-200]，全部评估
+                    # 窗口2: [100-300]，前100是历史，后100是新评估数据
                     current_stride = max_len // 2
                     history_len = max_len // 2
-                else:
+                else: # 训练集或短序列：直接使用非重叠窗口，全部评估
                     current_stride = max_len
                     history_len = 0
-            else:
+            else: # 否则使用指定的 stride 进行切分，训练集允许更密集的切分，测试集则保持较大的重叠以保留历史预热
                 current_stride = stride
                 history_len = max_len // 2 if total_interactions > max_len else 0
             

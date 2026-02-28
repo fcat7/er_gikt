@@ -166,6 +166,9 @@ def main():
     parser.add_argument('--stride', type=int, default=0, help=f'Sliding window stride for TRAIN set. 0 = disable, range: [0, {MAX_SEQ_LEN}]')
     
     args = parser.parse_args()
+    # 检查 min_seq_len 合法性
+    if args.min_seq_len < 0 or args.min_seq_len >= 200:
+        raise ValueError(f"min_seq_len 必须在 [0, 200) 范围内，当前为 {args.min_seq_len}")
     
     # ========== 配置加载 ==========
     base_name = args.dataset
