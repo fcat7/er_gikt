@@ -5,10 +5,7 @@ import toml
 
 @dataclass
 class CommonParams:
-    min_seq_len: int = 20
-    max_seq_len: int = 200
     num_workers: int = 0  # Windows下建议设为0，避免多进程启动开销(spawn overhead)；Mac/Linux可设为2或4
-    test_ratio: float = 0.2
     random_seed: int = 42
 
 @dataclass
@@ -56,8 +53,6 @@ class TrainParams:
     patience: int = 0 # 早停机制 (0 表示禁用)
     prefetch_factor: int = 4
     k_fold: int = 1
-    use_bce_loss: bool = False
-    use_global_auc: bool = False # 是否使用全局 AUC (收集所有预测值计算) 替代 Batch 加权平均 AUC
     verbose: bool = True
 
 @dataclass
