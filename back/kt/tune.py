@@ -95,9 +95,16 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
         kwargs=kwargs
     )
     
-    # 5. 执行交叉验证
-    fold_aucs = trainer.cross_validate(dataset)
-    
+    # 5. 执行交叉验证（显存溢出自动跳过）
+    try:
+        fold_aucs = trainer.cross_validate(dataset)
+    except RuntimeError as e:
+        msg = str(e)
+        if 'out of memory' in msg or 'cudaErrorMemoryAllocation' in msg:
+            print(f"Trial {trial.number} 显存溢出，自动跳过该参数组合。")
+            raise optuna.exceptions.TrialPruned()
+        else:
+            raise
     # 6. 计算平均 AUC 作为优化目标
     mean_auc = np.mean(fold_aucs)
     print(f"Trial {trial.number} Finished | Mean CV AUC: {mean_auc:.4f}")
@@ -173,11 +180,20 @@ def main():
         )
         n_trials = tune_config.get('n_trials', 50)
 
-    # 开始优化
-    study.optimize(
-        lambda trial: objective(trial, tune_config, dataset, num_question, num_skill, device, data_config),
-        n_trials=n_trials
-    )
+    # 开始优化（捕获参数空间变动相关错误并友好提示）
+    try:
+        study.optimize(
+            lambda trial: objective(trial, tune_config, dataset, num_question, num_skill, device, data_config),
+            n_trials=n_trials
+        )
+    except ValueError as e:
+        msg = str(e)
+        if 'CategoricalDistribution does not support dynamic value space' in msg:
+            print("Optuna参数空间错误：不支持“动态变更参数空间”。\n参数 choices 一旦在某个 study（实验）里确定下来，后续 trial 必须保持一致，不能在 yaml 或代码里修改参数选项，否则会报错。\n解决方法：请更换 study_name 或清理旧数据库后重试。")
+        else:
+            print(f"Optuna参数空间错误：{e}")
+            print("请检查 search_space 是否有变动，或更换 study_name 后重试。")
+        return
     
     print("\n==================================================")
     print("Tuning Finished!")
@@ -199,5 +215,6 @@ def main():
     print(f"Saved best params to: {best_params_file}")
 
 # python tune.py --config config/tune/dkt.yaml
+# optuna-dashboard sqlite:///kt_tuning.db
 if __name__ == '__main__':
     main()

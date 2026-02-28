@@ -25,12 +25,21 @@ class ModelFactory:
                 # 如果没有直接传，尝试从磁盘加载 (兼容自动化脚本)
                 if config is None:
                     raise ValueError("GIKT requires neighbors and qs_table or a valid config to load them.")
-                from util.utils import gen_gikt_graph
-                q_neighbors, s_neighbors, qs_table = gen_gikt_graph(
-                    os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz'),
+                from util.utils import build_adj_list, gen_gikt_graph
+                # 先加载邻居列表
+                q_neighbors_list, s_neighbors_list = build_adj_list(config.PROCESSED_DATA_DIR)
+                # 再采样邻居
+                q_neighbors, s_neighbors = gen_gikt_graph(
+                    q_neighbors_list,
+                    s_neighbors_list,
                     kwargs.get('size_q_neighbors', 4),
                     kwargs.get('size_s_neighbors', 10)
                 )
+                # 加载 qs_table
+                qs_table = torch.tensor(
+                    sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(),
+                    dtype=torch.int64
+                ).to(device)
 
             model = GIKT(
                 num_question=num_question, 

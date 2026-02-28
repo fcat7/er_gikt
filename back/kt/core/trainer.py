@@ -48,6 +48,7 @@ class BaseTrainer:
             optimizer.zero_grad()
             
             model_name = getattr(model, 'model_name', '').lower()
+            cognitive_mode = getattr(model, 'cognitive_mode', None)
             
             if model_name == 'dkt':
                 y_hat = model(question, response, mask)
@@ -60,6 +61,9 @@ class BaseTrainer:
                     preds = y_hat[:, :-1]
                 else:
                     preds = y_hat
+            elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                y_hat = model(question, response, mask, interval, r_time)
+                preds = y_hat[:, 1:]
             else:
                 y_hat = model(question, response, mask)
                 preds = y_hat[:, 1:]
@@ -104,6 +108,7 @@ class BaseTrainer:
                 r_time = torch.nan_to_num(r_time, nan=0.0)
 
                 model_name = getattr(model, 'model_name', '').lower()
+                cognitive_mode = getattr(model, 'cognitive_mode', None)
                 
                 if model_name == 'dkt':
                     y_hat = model(question, response, mask)
@@ -116,6 +121,10 @@ class BaseTrainer:
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
+                elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                    y_hat = model(question, response, mask, interval, r_time)
+                    y_hat = torch.sigmoid(y_hat)
+                    preds = y_hat[:, 1:]
                 else:
                     y_hat = model(question, response, mask)
                     y_hat = torch.sigmoid(y_hat)
