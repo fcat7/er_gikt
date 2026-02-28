@@ -313,12 +313,16 @@ if __name__ == '__main__':
                 
                 # Verbose: Per-batch logging (Optional, disabled by default to reduce noise)
                 if params.train.verbose:
-                    batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
-                    batch_auc = 0.5  # Default value
-                    try:
-                        batch_auc = roc_auc_score(y_target_flat.detach().cpu().numpy(), y_prob.detach().cpu().numpy())
-                    except ValueError:
-                        pass  # Only one class present in batch
+                    if len(y_target_flat) > 0:
+                        batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
+                        batch_auc = 0.5
+                        try:
+                            batch_auc = roc_auc_score(y_target_flat.detach().cpu().numpy(), y_prob.detach().cpu().numpy())
+                        except ValueError:
+                            batch_auc = 0.5
+                    else:
+                        batch_acc = 0.0
+                        batch_auc = 0.5
                     print(f'step: {batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             train_loss /= train_step if train_step > 0 else 1
@@ -394,12 +398,16 @@ if __name__ == '__main__':
                     all_probs_no_mask.extend(y_prob_no_mask.cpu().detach().numpy())
 
                 if params.train.verbose:
-                    batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
-                    batch_auc = 0.5  # Default value
-                    try:
-                        batch_auc = roc_auc_score(y_target_flat.cpu().detach().numpy(), y_prob.cpu().detach().numpy())
-                    except ValueError:
-                        pass  # Only one class present in batch
+                    if len(y_target_flat) > 0:
+                        batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
+                        batch_auc = 0.5
+                        try:
+                            batch_auc = roc_auc_score(y_target_flat.cpu().detach().numpy(), y_prob.cpu().detach().numpy())
+                        except ValueError:
+                            batch_auc = 0.5
+                    else:
+                        batch_acc = 0.0
+                        batch_auc = 0.5
                     print(f'step: {val_batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             if len(all_targets) > 0:
