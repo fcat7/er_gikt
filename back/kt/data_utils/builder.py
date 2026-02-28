@@ -201,7 +201,6 @@ class KTDataBuilder:
         if use_manual and config_path and os.path.exists(config_path):
             ic(f"加载手动 Domain 配置: {config_path}")
             try:
-                import json
                 with open(config_path, 'r', encoding='utf-8') as f:
                     manual_config = json.load(f)
                 
