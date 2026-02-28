@@ -17,3 +17,4 @@ node_modules/
 
 # 临时
 temp/
+*.db
