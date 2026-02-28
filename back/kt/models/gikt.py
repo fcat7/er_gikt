@@ -1,4 +1,6 @@
 import os
+import json
+import numpy as np
 import torch
 import math
 import torch.nn.functional as F
@@ -137,7 +139,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', q_features_path=None, use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -196,46 +198,29 @@ class GIKT(Module):
         self.q_neighbor_size = self.q_neighbors_t.shape[1]
         self.s_neighbor_size = self.s_neighbors_t.shape[1]
 
-        # @add_fzq: GAT 相关初始化
-        if self.agg_method == 'gat':
-            if q_features_path is None and data_dir is not None:
-                # 尝试从 metadata.json 中获取特征文件路径
-                metadata_path = os.path.join(data_dir, 'metadata.json')
-                if os.path.exists(metadata_path):
-                    try:
-                        with open(metadata_path, 'r', encoding='utf-8') as f:
-                            metadata = json.load(f)
-                            # 从 features.q_features.file 获取文件名
-                            q_feat_file = metadata.get('features', {}).get('q_features', {}).get('file')
-                            if q_feat_file:
-                                q_features_path = os.path.join(data_dir, q_feat_file)
-                    except Exception as e:
-                        print(f"Warning: Failed to read q_features path from metadata: {e}")
-
-            if q_features_path is None or not os.path.exists(q_features_path):
-                print(f"Warning: GAT selected but q_features not found at {q_features_path}. Fallback to GCN.")
-                self.agg_method = 'gcn'
-            else:
+        # 简化 GAT 相关初始化
+        if self.agg_method == 'gat' and data_dir is not None:
+            metadata_path = os.path.join(data_dir, 'metadata.json')
+            q_features_path = None
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                    q_feat_file = metadata.get('features', {}).get('q_features', {}).get('file')
+                    if q_feat_file:
+                        q_features_path = os.path.join(data_dir, q_feat_file)
+            if q_features_path and os.path.exists(q_features_path):
                 import numpy as np
-                print(f"Loading Q-Features for GAT from: {q_features_path}")
-                try:
-                    q_feats = np.load(q_features_path).astype(np.float32)
-                    # q_feats shape: [num_q, 3] (Difficulty, Disc, RT)
-                    self.q_feature_embedding = Embedding.from_pretrained(torch.from_numpy(q_feats), freeze=True)
-                    self.q_feat_dim = q_feats.shape[1]
-                    
-                    # 定义 Attention 计算层
-                    # 输入: [Self_Emb, Neighbor_Emb, Edge_Attributes]
-                    # Dim: emb_dim + emb_dim + q_feat_dim
-                    self.gat_attn_layers = ModuleList([
-                        Linear(emb_dim * 2 + self.q_feat_dim, 1) for _ in range(agg_hops)
-                    ])
-                    # Init weights
-                    for layer in self.gat_attn_layers:
-                        torch.nn.init.xavier_uniform_(layer.weight)
-                except Exception as e:
-                    print(f"Error loading GAT features: {e}. Fallback to GCN.")
-                    self.agg_method = 'gcn'
+                q_feats = np.load(q_features_path).astype(np.float32)
+                self.q_feature_embedding = Embedding.from_pretrained(torch.from_numpy(q_feats), freeze=True)
+                self.q_feat_dim = q_feats.shape[1]
+                self.gat_attn_layers = ModuleList([
+                    Linear(emb_dim * 2 + self.q_feat_dim, 1) for _ in range(agg_hops)
+                ])
+                for layer in self.gat_attn_layers:
+                    torch.nn.init.xavier_uniform_(layer.weight)
+            else:
+                print(f"Warning: GAT selected but q_features not found. Fallback to GCN.")
+                self.agg_method = 'gcn'
 
         if pre_train:
             # 使用预训练之后的向量
@@ -329,7 +314,6 @@ class GIKT(Module):
                 self.pid_num_domains = 1
                 
                 if os.path.exists(metadata_path):
-                    import json, numpy as np
                     try:
                         with open(metadata_path, 'r', encoding='utf-8') as f:
                             metadata = json.load(f)
@@ -679,7 +663,7 @@ class GIKT(Module):
                     
                     # h2_pre 作为上一个时刻的 hidden state
                     # Cognitive Model 使用包含非线性变换特征的 lstm_input (宽输入)
-                     # Arguments: (input_data_fused, h_prev, interval, response_time)
+                    # Arguments: (input_data_fused, h_prev, interval, response_time)
                     h_new, _ = self.cognitive_cell(lstm_cell_input, h2_pre, curr_interval, curr_response)
                 
                 # Common Output handling for Cognitive Models
@@ -879,6 +863,8 @@ class GIKT(Module):
 
                     curr_key = torch.tanh(self.MLP_query(curr_state_expanded))
                     cached_keys_tensor = torch.cat((curr_key, selected_keys), dim=1)
+                    # 修复：硬回顾分支补充 neighbor_source 赋值，保持与软回顾一致
+                    neighbor_source = recap_feature
                     
             else: # 软选择
                 # 确定 "neighbor" 来源 (retrieved items)
@@ -928,6 +914,9 @@ class GIKT(Module):
             
             pid_data = (pid_ema, pid_diff) if self.use_pid else None
             
+            # 兜底赋值，防止未赋值异常
+            if 'cached_keys_tensor' not in locals():
+                cached_keys_tensor = torch.zeros(batch_size, 1, self.emb_dim, device=DEVICE)
             # Pass cached_keys to predict
             y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next, pid_data=pid_data, cached_keys=cached_keys_tensor)
             
@@ -1076,7 +1065,8 @@ class GIKT(Module):
             # DropEdge: set scores to -inf for dropped edges before softmax
             edge_keep_prob = 1.0 - self.drop_edge_rate
             edge_mask = torch.bernoulli(torch.full_like(scores, edge_keep_prob))
-            scores = scores.masked_fill(edge_mask == 0, -1e9)
+            # 模型启用了 AMP（自动混合精度），将 DropEdge 屏蔽值改为 -1e4，确保 float16 不会溢出
+            scores = scores.masked_fill(edge_mask == 0, -1e4)
         
         # Softmax over neighbors
         alpha = torch.softmax(scores, dim=-2) # [Batch, ..., K, 1]
