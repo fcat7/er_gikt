@@ -2,6 +2,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 from config import Config
+from .standard_columns import StandardColumns
+
 try:
     from icecream import ic
 except ImportError:
@@ -24,12 +26,12 @@ class KTDataInspector:
         获取基础统计信息
         """
         stats = {
-            'n_users': self.df['user_id'].nunique(),
-            'n_items': self.df['problem_id'].nunique(),
-            'n_skills': self.df['skill_id'].nunique() if 'skill_id' in self.df.columns else 0,
+            'n_users': self.df[StandardColumns.USER_ID].nunique(),
+            'n_items': self.df[StandardColumns.QUESTION_ID].nunique(),
+            'n_skills': self.df[StandardColumns.SKILL_ID].nunique() if StandardColumns.SKILL_ID in self.df.columns else 0,
             'n_interactions': len(self.df),
-            'avg_seq_len': self.df.groupby('user_id').size().mean(),
-            'sparsity': 1 - len(self.df) / (self.df['user_id'].nunique() * self.df['problem_id'].nunique())
+            'avg_seq_len': self.df.groupby(StandardColumns.USER_ID).size().mean(),
+            'sparsity': 1 - len(self.df) / (self.df[StandardColumns.USER_ID].nunique() * self.df[StandardColumns.QUESTION_ID].nunique())
         }
         
         ic("数据集统计信息:")
@@ -43,7 +45,7 @@ class KTDataInspector:
         分析数据分布并绘图
         """
         # 1. 用户交互长度分布
-        user_counts = self.df['user_id'].value_counts()
+        user_counts = self.df[StandardColumns.USER_ID].value_counts()
         plt.figure(figsize=(10, 6))
         sns.histplot(user_counts, bins=50, kde=True)
         plt.title('User Interaction Count Distribution')
@@ -53,13 +55,13 @@ class KTDataInspector:
         plt.close()
         
         # 2. 题目被做次数分布
-        item_counts = self.df['problem_id'].value_counts()
+        item_counts = self.df[StandardColumns.QUESTION_ID].value_counts()
         plt.figure(figsize=(10, 6))
         sns.histplot(item_counts, bins=50, kde=True)
-        plt.title('Problem Frequency Distribution')
+        plt.title('Question Frequency Distribution')
         plt.xlabel('Frequency')
         plt.ylabel('Count')
-        plt.savefig(os.path.join(self.report_dir, 'problem_frequency_dist.png'))
+        plt.savefig(os.path.join(self.report_dir, 'question_frequency_dist.png'))
         plt.close()
         
         ic(f"分布图已保存至: {self.report_dir}")

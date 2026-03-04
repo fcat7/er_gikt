@@ -14,3 +14,7 @@ venv/
 
 # 版本管理规范相关
 node_modules/
+
+# 临时
+temp/
+*.db

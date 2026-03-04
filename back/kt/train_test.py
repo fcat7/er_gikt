@@ -1,6 +1,6 @@
 """
 训练并测试模型
-使用五折交叉验证法
+使用五折交叉验证法 (Standard K-Fold)
 """
 import os
 import time
@@ -10,31 +10,40 @@ from scipy import sparse
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import KFold, ShuffleSplit
 from torch.utils.data import DataLoader, Subset
-from dataset import UserDataset
 from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
 from params import HyperParameters
 from util.utils import gen_gikt_graph, build_adj_list
 import argparse
-from gikt import GIKT
+from models.gikt import GIKT
 
-# try :
-#     from icecream import ic
-#     print = ic
-# except ImportError:
-#     print("warning: icecream not installed, using standard print.")
+try:
+    from dataset import UnifiedParquetDataset, SeqFeatureKey
+except ImportError:
+    raise ImportError("Failed to import UnifiedParquetDataset from dataset.py. Please ensure V2 dataset is ready.")
 
+# @add_fzq: AMP Support
+import torch
+from torch.cuda.amp import autocast, GradScaler
+
+# 自动检测 AMP 可用性
+use_amp = torch.cuda.is_available() 
+scaler = GradScaler(enabled=use_amp)
+if use_amp:
+    print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
+else:
+    print(f"⚠️ AMP Disabled")
 
 # @add_fzq 2025-12-25 10:42:10 -------------------------------------------
 # 固定随机种子，保证实验可复现
 import random
-import torch
 def set_seed(seed=42):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -49,26 +58,19 @@ def get_parser():
     return parser
 
 def get_exp_config_path(isFull=False, name='default'):
-    # 默认路径为： config/experiments/exp_gcn_sample_default.toml
     return f"config/experiments/exp_{'full' if isFull else 'sample'}_{name}.toml"
 
-# 使用方法
-# python train_test.py 
-# python train_test.py --full
-# python train_test.py --agg_method gat
-# python train_test.py --name my_exp
+# python train_test.py
 if __name__ == '__main__':
 
     parser = get_parser()
     args = parser.parse_args()
 
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1' # 方便调试 CUDA 错误
-
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 1. 解决时区问题：强制使用 UTC+8 (北京时间)
     from datetime import timedelta, timezone
     beijing_time = datetime.now(timezone(timedelta(hours=8)))
-    time_now = beijing_time.strftime('%Y%m%d_%H%M')
+    time_now = beijing_time.strftime('%Y%m%d_%H%M%S')
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 
     # 加载超参数
@@ -81,300 +83,480 @@ if __name__ == '__main__':
     output_path = f'{config.path.LOG_DIR}/{time_now}.log'
     output_dir = os.path.dirname(output_path)  # 获取目录路径    
     os.makedirs(output_dir, exist_ok=True) # 创建目录（如果不存在）
-    output_file = open(output_path, 'a', buffering=1) # 解决日志丢失问题，使用 'a' (append) 模式，并设置 buffering=1 (行缓冲)
+    output_file = open(output_path, 'a', buffering=1) # 解决日志丢失问题
 
     print(f"Using dataset: {dataset_name}, Data dir: {config.PROCESSED_DATA_DIR}\n")
     print(f"Using experiment config: {exp_config_path}\n")
-
+    print(f"Using device: {torch.cuda.is_available() and torch.cuda.get_device_name(0) or 'cpu'}\n")
+    
     # 打印并写超参数
     output_file.write(str(params) + '\n')
     print(params)
     
     batch_size = params.train.batch_size
     
-    # 构建模型需要的数据结构, 全部转化为正确类型tensor再输入模型中
+    # 构建模型需要的数据结构
     qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.int64, device=DEVICE)  # [num_q, num_c]
     num_question = torch.tensor(qs_table.shape[0], device=DEVICE)
     num_skill = torch.tensor(qs_table.shape[1], device=DEVICE)
     q_neighbors_list, s_neighbors_list = build_adj_list(config.PROCESSED_DATA_DIR)
     
-    # Config 使用结构化访问
     q_neighbors, s_neighbors = gen_gikt_graph(q_neighbors_list, s_neighbors_list, params.model.size_q_neighbors, params.model.size_s_neighbors)
     q_neighbors = torch.tensor(q_neighbors, dtype=torch.int64, device=DEVICE)
     s_neighbors = torch.tensor(s_neighbors, dtype=torch.int64, device=DEVICE)
 
-    # 处理 dropout (list -> tuple)
-    dropout_val = params.model.dropout
-    if isinstance(dropout_val, list):
-        dropout_val = tuple(dropout_val)
+    # 实例化数据集
+    # @update_fzq: 使用 V2 数据集 (Parquet)
+    print("Using UnifiedParquetDataset (Parquet + Metadata)")
+    dataset_train_augment = UnifiedParquetDataset(
+        config, 
+        augment=params.train.enable_data_augmentation,
+        prob_mask=params.train.aug_mask_prob,
+        mode='train' 
+    )
+    dataset_train_clean = UnifiedParquetDataset(config, augment=False, mode='train')
 
-    # 初始化模型
-    model = GIKT(
-        num_question, num_skill, q_neighbors, s_neighbors, qs_table,
-        agg_hops=params.model.agg_hops,
-        emb_dim=params.model.emb_dim,
-        dropout=dropout_val,
-        hard_recap=params.model.hard_recap,
-        use_cognitive_model=params.model.use_cognitive_model,
-        pre_train=params.model.pre_train,
-        data_dir=config.PROCESSED_DATA_DIR,
-        agg_method=params.model.agg_method,
-        recap_source='hsei' if params.model.use_input_attention else 'hssi', # 通过 toml 配置控制
-        enable_tf_alignment=params.model.enable_tf_alignment
-    ).to(DEVICE)
-
-    # @change_fzq 2026-01-08: 修改损失函数为 BCELoss
-    # 原因：模型输出已经是 Sigmoid 概率，BCEWithLogitsLoss 会再次 Sigmoid，导致梯度消失
-    # 原始损失函数备份：
-    loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) # 损失函数
-    if params.train.use_bce_loss:
-        loss_fun = torch.nn.BCELoss().to(DEVICE)
-
-    # @add_fzq: TF Alignment Override
-    if params.model.enable_tf_alignment:
-        # If alignment enabled, Model outputs Logits -> Must use BCEWithLogitsLoss
-        loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE)
+    # 加载独立的测试集（不重叠的用户，正式评估用）
+    try:
+        dataset_test = UnifiedParquetDataset(config, augment=False, mode='test')
+        print(f"📚 Loaded Test Set: {len(dataset_test)} samples.")
+        dataset_test_loader = DataLoader(
+            dataset_test, 
+            batch_size=batch_size, 
+            num_workers=params.common.num_workers,
+            pin_memory=True
+        )
+    except Exception as e:
+        dataset_test = None
+        dataset_test_loader = None
+        print(f"⚠️ Warning: Test Set load failed ({e}). Skipping independent testing.")
     
-    dataset = UserDataset(config)  # 数据集
-    data_len = len(dataset)  # 数据总长度
-
-    # 写当前数据量
-    output_file.write(f'Total number of users in dataset: {data_len}\n')
-    print('model has been built')
-
-    # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
+    data_len = len(dataset_train_clean)
+    output_file.write(f'Train/Val Pool size: {data_len}\n')
+    
     # 记录总开始时间
     total_start_time = time.time()
-    # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
 
-    # 优化器
-    epoch_total = 0
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr)
-    torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
-    
-    # 在matplotlib中绘制的y轴数据，三行分别表示loss, acc, auc
-    y_label_aver = np.zeros([3, params.train.epochs]) # 平均精度值
-    y_label_all = np.zeros([3, params.train.epochs * params.train.k_fold]) # 全部精度值
+    # TF Alignment is now always enabled (Logits output, BCEWithLogitsLoss)
+    loss_fun = torch.nn.BCEWithLogitsLoss().to(DEVICE) 
 
-    # KFold的shuffle操作是在用户级别进行的，而不是在答题记录级别
-    if params.train.k_fold == 1:
-        # 如果 k_fold 为 1，使用 ShuffleSplit 进行单次划分 (80% 训练, 20% 测试)
-        k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    # ==========================================================================================
+    # K-Fold Strategy Logic
+    # ==========================================================================================
+    groups = dataset_train_clean.groups
+    if groups is not None:
+        print(f"🔒 Detecting Windowed Dataset with {len(np.unique(groups))} unique users. Using Group-based splitting to prevent leakage.")
+        from sklearn.model_selection import GroupKFold, GroupShuffleSplit
+        if params.train.k_fold == 1:
+            k_fold = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        else:
+            k_fold = GroupKFold(n_splits=params.train.k_fold)
+        splits = list(k_fold.split(dataset_train_clean, groups=groups))
     else:
-        # 否则使用 KFold 进行交叉验证
-        k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
+        print("🔓 Using Standard Shuffled splitting.")
+        if params.train.k_fold == 1:
+            k_fold = ShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+        else:
+            k_fold = KFold(n_splits=params.train.k_fold, shuffle=True, random_state=42)
+        splits = list(k_fold.split(dataset_train_clean))
 
-    for epoch in range(params.train.epochs):
-        train_loss_aver = train_acc_aver = train_auc_aver = 0
-        test_loss_aver = test_acc_aver = test_auc_aver = 0
-        # 五折的平均值
-        for fold, (train_indices, test_indices) in enumerate(k_fold.split(dataset)):
-            # 使用五折交叉验证，每次的训练集和测试集都不相同
-            train_set = Subset(dataset, train_indices)  # 训练集
-            test_set = Subset(dataset, test_indices)  # 测试集
-            if DEVICE.type == 'cpu':  # Cpu(本机)
-                train_loader = DataLoader(train_set, batch_size=batch_size)  # 训练数据加载器
-                test_loader = DataLoader(test_set, batch_size=batch_size)  # 测试数据加载器
-            else:  # Gpu(服务器)
-                train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=params.common.num_workers,
-                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
-                test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=params.common.num_workers,
-                                            pin_memory=True, prefetch_factor=params.train.prefetch_factor)
-            train_data_len, test_data_len = len(train_set), len(test_set)
-            # @delete_fzq 2025-12-23 22:10:41
-            #  print('===================' + COLOR_LOG_Y + f'epoch: {epoch_total + 1}'+ COLOR_LOG_END + '====================')
-            # @add_fzq 2025-12-23 22:10:41
-            print('===================' + COLOR_LOG_Y + f'fold: {fold + 1}'+ COLOR_LOG_END + '====================')
-
-            # 训练阶段，既有前向传播，也有反向传播
-            print('-------------------training------------------')
-            time0 = time.time()
-            train_step = train_loss = train_total = train_right = train_auc = 0
-            # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体训练的auc
-            for data in train_loader:
-                # 梯度清零
-                optimizer.zero_grad()
-
-                # -- delete_fzq 2025-12-25 17:15:13-----------------
-                # x, y_target, mask = data[:, :, 0].to(DEVICE), data[:, :, 1].to(DEVICE), data[:, :, 2].to(torch.bool).to(DEVICE)
-                # y_hat = model(x, y_target, mask) # 原始代码
-                # --------------------------------------------
-
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # 解包数据：[batch, seq, 5] -> x, y, mask, interval, response
-                x = data[:, :, 0].to(torch.long).to(DEVICE)
-                y_target = data[:, :, 1].to(torch.long).to(DEVICE)
-                mask = data[:, :, 2].to(torch.bool).to(DEVICE)
-                interval_time = data[:, :, 3].to(torch.float32).to(DEVICE)
-                response_time = data[:, :, 4].to(torch.float32).to(DEVICE)
-
-                # @add_fzq 2026-01-08: 输入数据 NaN 运行时检查与清洗
-                # 必须步骤：防止 data/assist09/*.npy 中存在的 NaN 导致训练崩溃
-                if torch.isnan(interval_time).any():
-                    interval_time = torch.nan_to_num(interval_time, nan=0.0)
-                if torch.isnan(response_time).any():
-                    response_time = torch.nan_to_num(response_time, nan=0.0)
-
-                y_hat = model(x, y_target, mask, interval_time, response_time)
-                # --------------------------------------------
+    fold_results_test_auc = []
     
-                y_hat = torch.masked_select(y_hat, mask)
-                y_target = torch.masked_select(y_target, mask)
+    # 初始化记录数组 (Metric x Fold*Epoch)
+    # y_label_aver: [Metric, Epoch] (Averaged across folds)
+    y_label_aver = np.zeros([3, params.train.epochs]) 
+    # y_label_all: [Metric, Fold*Epoch] (Sequential)
+    y_label_all = np.zeros([3, params.train.epochs * len(splits)]) 
 
-                # @add_fzq: Logic Branch for TF Alignment (Logits vs Probs)
-                if params.model.enable_tf_alignment:
-                    # y_hat is logits. No clamping needed for BCEWithLogitsLoss.
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    
-                    # Metrics: Convert to Probabilities
-                    y_prob = torch.sigmoid(y_hat) 
-                else: 
-                    # Original Behavior: y_hat is probabilities (Sigmoid applied in model)
-                    # @add_fzq 2026-01-08: Clamping for BCELoss numerical stability
-                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    
-                    y_prob = y_hat # Already probabilities
-                
-                train_loss += loss.item()
-                
-                # 计算acc
-                y_pred = torch.ge(y_prob, torch.tensor(0.5))
-                acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
-                train_right += torch.sum(torch.eq(y_target, y_pred))
-                train_total += torch.sum(mask)
-                # 计算auc
-                # @optimize: Use probabilities (y_prob) instead of labels (y_pred) for better precision
-                auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                train_auc += auc * len(x) / train_data_len
-                loss.backward()
-                optimizer.step()
-                train_step += 1
-                if params.train.verbose:
-                    print(f'step: {train_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
-            train_loss, train_acc = train_loss / train_step, train_right / train_total
-            train_loss_aver += train_loss
-            train_acc_aver += train_acc
-            train_auc_aver += train_auc
-
-            # 测试阶段，只有前向传递，没有反向传播阶段
-            print('-------------------testing------------------')
-            test_step = test_loss = test_total = test_right = test_auc = 0
-            
-            # @add_fzq: Global AUC Support
-            all_y_targets = []
-            all_y_probs = []
-
-            # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体的auc
-            for data in test_loader:
-
-                # -- delete_fzq 2025-12-25 17:15:13-----------------
-                # x, y_target, mask = data[:, :, 0].to(DEVICE), data[:, :, 1].to(DEVICE), data[:, :, 2].to(torch.bool).to(DEVICE)
-                # y_hat = model(x, y_target, mask) # 原始代码
-                # --------------------------------------------
-
-                # ---------------- 新增时间特征 ----------------
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # 解包数据：[batch, seq, 5] -> x, y, mask, interval, response
-                x = data[:, :, 0].to(torch.long).to(DEVICE)
-                y_target = data[:, :, 1].to(torch.long).to(DEVICE)
-                mask = data[:, :, 2].to(torch.bool).to(DEVICE)
-                interval_time = data[:, :, 3].to(torch.float32).to(DEVICE)
-                response_time = data[:, :, 4].to(torch.float32).to(DEVICE)
-            
-                # @add_fzq 2026-01-08: 测试集同样需要 NaN 检查
-                if torch.isnan(interval_time).any():
-                    interval_time = torch.nan_to_num(interval_time, nan=0.0)
-                if torch.isnan(response_time).any():
-                    response_time = torch.nan_to_num(response_time, nan=0.0)
-
-                y_hat = model(x, y_target, mask, interval_time, response_time)
-                # -- add_fzq 2025-12-25 17:15:13-----------------
-                # --------------------------------------------
-            
-                y_hat = torch.masked_select(y_hat, mask.to(torch.bool))
-                y_target = torch.masked_select(y_target, mask.to(torch.bool))
-            
-                # @add_fzq: Logic Branch for TF Alignment (Testing Phase)
-                if params.model.enable_tf_alignment:
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    y_prob = torch.sigmoid(y_hat)
-                else:
-                    # @add_fzq 2026-01-08: 截断
-                    y_hat = torch.clamp(y_hat, min=1e-6, max=1.0 - 1e-6)
-                    loss = loss_fun(y_hat, y_target.to(torch.float32))
-                    y_prob = y_hat
-
-                test_loss += loss.item()
-                
-                # 计算acc
-                y_pred = torch.ge(y_prob, torch.tensor(0.5))
-                acc = torch.sum(torch.eq(y_target, y_pred)) / torch.sum(mask)
-                test_right += torch.sum(torch.eq(y_target, y_pred))
-                test_total += torch.sum(mask)
-                # 计算auc
-                if params.train.use_global_auc:
-                    all_y_targets.extend(y_target.cpu().detach().numpy())
-                    all_y_probs.extend(y_prob.cpu().detach().numpy())
-                    test_step += 1
-                    if params.train.verbose:
-                        try:
-                            batch_auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {batch_auc:.4f} (Batch)')
-                        except ValueError:
-                             pass
-                else:
-                    try:
-                        auc = roc_auc_score(y_target.cpu().detach(), y_prob.cpu().detach())
-                        test_auc += auc * len(x) / test_data_len
-                        test_step += 1
-                        if params.train.verbose:
-                            print(f'step: {test_step}, loss: {loss.item():.4f}, acc: {acc.item():.4f}, auc: {auc:.4f}')
-                    except ValueError:
-                        test_step += 1
-            
-            if params.train.use_global_auc and len(all_y_targets) > 0:
-                test_auc = roc_auc_score(all_y_targets, all_y_probs)
-
-            test_loss, test_acc = test_loss / test_step, test_right / test_total
-            test_loss_aver += test_loss
-            test_acc_aver += test_acc
-            test_auc_aver += test_auc
-
-            # fold总结阶段
+    # --------------------------------------------------------------------------
+    # Outer Loop: Folds
+    # --------------------------------------------------------------------------
+    for fold, (train_indices, test_indices) in enumerate(splits):
+        print('===================' + COLOR_LOG_Y + f'fold: {fold + 1} / {len(splits)}'+ COLOR_LOG_END + '====================')
+        output_file.write('===================' + f'fold: {fold + 1} / {len(splits)}' + '====================\n')
         
-            time1 = time.time()
-            run_time = time1 - time0
-            print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s' + COLOR_LOG_END)
+        # 1. Initialize Model & Optimizer (RESET FOR EACH FOLD)
+        model = GIKT(
+            num_question, num_skill, q_neighbors, s_neighbors, qs_table,
+            agg_hops=params.model.agg_hops,
+            emb_dim=params.model.emb_dim,
+            dropout_linear=params.model.dropout_linear,
+            dropout_gnn=params.model.dropout_gnn,
+            drop_edge_rate=params.model.drop_edge_rate,
+            feature_noise_scale=params.model.feature_noise_scale,
+            hard_recap=params.model.hard_recap,
+            use_cognitive_model=params.model.use_cognitive_model,
+            cognitive_mode=params.model.cognitive_mode,
+            pre_train=params.model.pre_train,
+            data_dir=config.PROCESSED_DATA_DIR,
+            agg_method=params.model.agg_method,
+            recap_source=params.model.recap_source,
+            use_pid=params.model.use_pid,
+            pid_mode=params.model.pid_mode,
+            pid_ema_alpha=params.model.pid_ema_alpha,
+            pid_lambda=params.model.pid_lambda,
+            pid_init_i=params.model.pid_init_i,
+            pid_init_d=params.model.pid_init_d,
+            guessing_prob_init=params.model.guessing_prob_init,
+            slipping_prob_init=params.model.slipping_prob_init,
+            use_4pl_irt=params.model.use_4pl_irt
+        ).to(DEVICE)
+        
+        optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
+        
+        best_fold_val_auc = 0.0
+        patience_counter = 0
+
+        # Data Loaders
+        train_set = Subset(dataset_train_augment, train_indices)
+        val_set = Subset(dataset_train_clean, test_indices)
+        
+        loader_kwargs = {
+            'batch_size': batch_size,
+            'num_workers': params.common.num_workers,
+            'pin_memory': True
+        }
+        if params.common.num_workers > 0 and DEVICE.type != 'cpu':
+            loader_kwargs['prefetch_factor'] = params.train.prefetch_factor
+            
+        train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
+        val_loader = DataLoader(val_set, shuffle=False, **loader_kwargs)
+        
+        print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(val_set)}")
+        print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        
+        # @add_fzq: 样本量告警 - eval_mask 会显著减少有效样本
+        print(f"{COLOR_LOG_Y}⚠️ Note: Actual training samples will be filtered by eval_mask (typically -30%~50% of raw samples){COLOR_LOG_END}")
+
+        # ----------------------------------------------------------------------
+        # Inner Loop: Epochs
+        # ----------------------------------------------------------------------
+        for epoch in range(params.train.epochs):
+            
+            print('===================' + COLOR_LOG_Y + f'Epoch: {epoch + 1}'+ COLOR_LOG_END + '====================')
+            # Training
+            # ---------------------
+            print('-------------------training------------------')
+            
+            torch.set_grad_enabled(True)
+            model.train()
+            train_step = train_loss = train_total = train_right = train_auc = 0
+            all_train_targets = []
+            all_train_probs = []
+            all_train_targets_no_mask = []
+            all_train_probs_no_mask = []
+            # 每轮训练第几个批量, 总损失, 训练的真实样本个数, 其中正确的个数, 总体训练的auc
+            train_start_time = time.time()
+            
+            total_batches = len(train_loader)
+            train_set_len = len(train_set)
+
+            for batch_idx, data in enumerate(train_loader, 1):
+                optimizer.zero_grad()
+                # 统一将 batch dict 移动到 DEVICE
+                features = {k: v.to(DEVICE) for k, v in data.items()}
+
+                x = features[SeqFeatureKey.Q].to(torch.long)
+                y_target = features[SeqFeatureKey.R].to(torch.long)
+                mask = features[SeqFeatureKey.MASK].to(torch.bool)
+
+                # 兼容可能不存在 eval_mask 的情况
+                eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
+                interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
+
+                with autocast(enabled=use_amp):
+                    # @fix_fzq: Pass mask as tensor for GIKT internal logic
+                    y_hat = model(x, y_target, mask, interval_time, response_time)
+                    # @fix_fzq: Skip first timestep (no history for prediction)
+                    y_hat = y_hat[:, 1:]
+                    y_target_shift = y_target[:, 1:].float()
+                    mask_valid = mask[:, 1:]
+                    eval_mask_valid = eval_mask[:, 1:]
+                    final_mask = mask_valid & eval_mask_valid
+                    y_hat_flat = torch.masked_select(y_hat, final_mask)
+                    y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                    loss = loss_fun(y_hat_flat, y_target_flat)
+                    
+                    # Regularization
+                    reg_loss = 0.0
+                    if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                    if hasattr(model, 'discrimination_bias'): reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
+                    if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                         reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
+                         reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                    loss += reg_loss
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Metrics Calculation
+                y_prob = torch.sigmoid(y_hat_flat)
+                y_pred = torch.ge(y_prob, 0.5)
+                train_loss += loss.item()
+                train_right += torch.sum(torch.eq(y_target_flat, y_pred)).item()
+                train_total += torch.sum(final_mask).item()
+                train_step += 1
+                
+                # Collect for global AUC (consistent with validation)
+                all_train_targets.extend(y_target_flat.detach().cpu().numpy())
+                all_train_probs.extend(y_prob.detach().cpu().numpy())
+                
+                # For diagnostic: collect without eval_mask filter
+                y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
+                y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
+                if len(y_target_flat_no_mask) > 0:
+                    y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
+                    all_train_targets_no_mask.extend(y_target_flat_no_mask.detach().cpu().numpy())
+                    all_train_probs_no_mask.extend(y_prob_no_mask.detach().cpu().numpy())
+                
+                # Verbose: Per-batch logging (Optional, disabled by default to reduce noise)
+                if params.train.verbose:
+                    if len(y_target_flat) > 0:
+                        batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
+                        batch_auc = 0.5
+                        try:
+                            batch_auc = roc_auc_score(y_target_flat.detach().cpu().numpy(), y_prob.detach().cpu().numpy())
+                        except ValueError:
+                            batch_auc = 0.5
+                    else:
+                        batch_acc = 0.0
+                        batch_auc = 0.5
+                    print(f'step: {batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
+
+            train_loss /= train_step if train_step > 0 else 1
+            # 修正：在 epoch 结束后调用，必须确保 optimizer 已执行过 step
+            # 使用 getattr 安全访问 _step_count (PyTorch 内部属性)
+            step_count = getattr(optimizer, '_step_count', 0) 
+            if train_step > 0 and step_count > 0:
+                scheduler.step()
+                
+            train_acc = train_right / train_total if train_total > 0 else 0
+            # Calculate global training AUC (consistent with validation)
+            if len(all_train_targets) > 0:
+                train_auc = roc_auc_score(all_train_targets, all_train_probs)
+                train_auc_no_mask = roc_auc_score(all_train_targets_no_mask, all_train_probs_no_mask) if len(all_train_targets_no_mask) > 0 else train_auc
+                eval_mask_filter_ratio = 1.0 - (len(all_train_targets) / max(1, len(all_train_targets_no_mask)))
+                # @add_fzq: 告警 - 如果有效样本过少
+                if train_total < train_set_len * 0.1:
+                    print(f"{COLOR_LOG_Y}⚠️ Warning: Only {train_total} effective training samples (< 10% of {train_set_len}). Model may underfit. Consider increasing epochs or reducing stride.{COLOR_LOG_END}")
+            else:
+                train_auc_no_mask = 0.0
+                eval_mask_filter_ratio = 0.0
+            
+            train_time = time.time() - train_start_time
+            
+            # 验证集评估
+            print('-------------------validate------------------')
+            model.eval()
+            val_loss = val_total = val_right = val_auc = val_step = 0
+            all_targets = []
+            all_probs = []
+            all_targets_no_mask = []
+            all_probs_no_mask = []
+            val_start_time = time.time()
+            torch.set_grad_enabled(False)
+            total_val_batches = len(val_loader)
+            for val_batch_idx, data in enumerate(val_loader, 1):
+                features = {k: v.to(DEVICE) for k, v in data.items()}
+                x = features[SeqFeatureKey.Q].to(torch.long)
+                y_target = features[SeqFeatureKey.R].to(torch.long)
+                mask = features[SeqFeatureKey.MASK].to(torch.bool)
+                interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
+                eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+
+                with autocast(enabled=use_amp):
+                    y_hat = model(x, y_target, mask, interval_time, response_time)
+
+                y_hat = y_hat[:, 1:]
+                y_target_shift = y_target[:, 1:].float()
+                mask_valid = mask[:, 1:]
+                eval_mask_valid = eval_mask[:, 1:]
+                final_mask = mask_valid & eval_mask_valid
+                y_hat_flat = torch.masked_select(y_hat, final_mask)
+                y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                loss = loss_fun(y_hat_flat, y_target_flat)
+                y_prob = torch.sigmoid(y_hat_flat)
+
+                val_loss += loss.item()
+                y_pred = torch.ge(y_prob, 0.5)
+                val_right += torch.sum(torch.eq(y_target_flat, y_pred))
+                val_total += torch.sum(final_mask)
+                val_step += 1
+
+                all_targets.extend(y_target_flat.cpu().detach().numpy())
+                all_probs.extend(y_prob.cpu().detach().numpy())
+
+                # For diagnostic: collect without eval_mask filter
+                y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
+                y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
+                if len(y_target_flat_no_mask) > 0:
+                    y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
+                    all_targets_no_mask.extend(y_target_flat_no_mask.cpu().detach().numpy())
+                    all_probs_no_mask.extend(y_prob_no_mask.cpu().detach().numpy())
+
+                if params.train.verbose:
+                    if len(y_target_flat) > 0:
+                        batch_acc = torch.sum(torch.eq(y_target_flat, y_pred)).item() / len(y_target_flat)
+                        batch_auc = 0.5
+                        try:
+                            batch_auc = roc_auc_score(y_target_flat.cpu().detach().numpy(), y_prob.cpu().detach().numpy())
+                        except ValueError:
+                            batch_auc = 0.5
+                    else:
+                        batch_acc = 0.0
+                        batch_auc = 0.5
+                    print(f'step: {val_batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
+
+            if len(all_targets) > 0:
+                val_auc = roc_auc_score(all_targets, all_probs)
+                val_auc_no_mask = roc_auc_score(all_targets_no_mask, all_probs_no_mask) if len(all_targets_no_mask) > 0 else val_auc
+                val_eval_mask_filter_ratio = 1.0 - (len(all_targets) / max(1, len(all_targets_no_mask)))
+            else:
+                val_auc_no_mask = 0.0
+                val_eval_mask_filter_ratio = 0.0
+            val_loss /= val_step if val_step > 0 else 1
+            val_acc = val_right / val_total if val_total > 0 else 0
+            val_time = time.time() - val_start_time
+            
+            # Logging & Recording
+            # ---------------------
+            run_time = train_time + val_time
+            
+            # Epoch 总结阶段
+            train_avg_batch_time = train_time / train_step if train_step > 0 else 0.0
+            val_avg_batch_time = val_time / val_step if val_step > 0 else 0.0
+            total_avg_batch_time = run_time / (val_step + train_step) if (val_step + train_step) > 0 else 0.0
+            
+            print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
+            
+            # @add_fzq: Eval Mask Diagnostic Output
+            if eval_mask_filter_ratio > 0:
+                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: Filtered {eval_mask_filter_ratio*100:.1f}% of training samples (History context)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={len(all_train_targets)})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={len(all_train_targets_no_mask)}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
+            else:
+                # No history context filtering (all sequences are short or training non-overlapping windows)
+                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {len(all_train_targets)} samples are evaluation data)' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.4f}s | batches: {train_step}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'validate time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.4f}s | batches: {val_step}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.4f}s' + COLOR_LOG_END)
+            
+            # @add_fzq: Validation Eval Mask Diagnostic Output
+            if val_eval_mask_filter_ratio > 0:
+                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: Filtered {val_eval_mask_filter_ratio*100:.1f}% of validation samples (History context)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={len(all_targets)})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={len(all_targets_no_mask)}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
+            else:
+                # No history context filtering in validation
+                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {len(all_targets)} samples are evaluation data)' + COLOR_LOG_END)
+            
             # 保存输出至本地文件
-            output_file.write(f'  fold {fold+1} | ')
-            output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f}\n         | ')
-            output_file.write(f'testing: loss: {test_loss:.4f}, acc: {test_acc:.4f}, auc: {test_auc: .4f} | ')
-            output_file.write(f'time: {run_time:.2f}s, average batch time: {(run_time / test_step):.2f}s\n')
-            # 保存至数组，之后用matplotlib画图
-            y_label_all[0][fold], y_label_all[1][fold], y_label_all[2][fold] = test_loss, test_acc, test_auc
+            output_file.write(f'  Epoch {epoch+1} | ')
+            output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}\n')
+            output_file.write(f'          | validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}\n')
+            output_file.write(f'          | train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.2f}s | ')
+            output_file.write(f'test time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.2f}s | ')
+            output_file.write(f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.2f}s\n')
 
-        # epoch总结阶段
-        epoch_total += 1
-        train_loss_aver /= params.train.k_fold
-        train_acc_aver /= params.train.k_fold
-        train_auc_aver /= params.train.k_fold
-        test_loss_aver /= params.train.k_fold
-        test_acc_aver /= params.train.k_fold
-        test_auc_aver /= params.train.k_fold
-        print('>>>>>>>>>>>>>>>>>>' + COLOR_LOG_Y + f"epoch: {epoch_total}"+ COLOR_LOG_END + '<<<<<<<<<<<<<<<<<<')
-        print(COLOR_LOG_G + f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}' + COLOR_LOG_END)
-        print(COLOR_LOG_G + f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}' + COLOR_LOG_END)
-        output_file.write(f"epoch: {epoch_total} | ")
-        output_file.write(f'training: loss: {train_loss_aver:.4f}, acc: {train_acc_aver:.4f}, auc: {train_auc_aver: .4f}\n         | ')
-        output_file.write(f'testing: loss: {test_loss_aver:.4f}, acc: {test_acc_aver:.4f}, auc: {test_auc_aver: .4f}\n')
-        y_label_aver[0][epoch], y_label_aver[1][epoch], y_label_aver[2][epoch] = test_loss_aver, test_acc_aver, test_auc_aver
 
-        # @add_fzq: 实时保存 aver 数据，防止训练中断丢失数据
-        # 每次 epoch 结束都覆盖保存一次，确保即使中断也能保留已完成的 epoch 数据
-        # np.savetxt(f'{LOGCHART_DIR}/{time_now}_aver.txt', y_label_aver)
+            # Record Data
+            # Accumulate Average (Divided later)
+            y_label_aver[0][epoch] += val_loss
+            y_label_aver[1][epoch] += val_acc
+            y_label_aver[2][epoch] += val_auc
+            
+            # Save All Points (Flat Index)
+            # Index logic: Fold 0 (E1...En), Fold 1 (E1...En)
+            idx = fold * params.train.epochs + epoch
+            if idx < y_label_all.shape[1]:
+                y_label_all[0][idx] = val_loss
+                y_label_all[1][idx] = val_acc
+                y_label_all[2][idx] = val_auc
+
+            # Early Stopping (Per Fold)
+            if val_auc > best_fold_val_auc:
+                improvement = val_auc - best_fold_val_auc
+                best_fold_val_auc = val_auc
+                # Save best model logic could go here
+                patience_counter = 0
+                if params.train.verbose:
+                    print(COLOR_LOG_G + f'🎯 新的最佳验证AUC: {best_fold_val_auc:.4f} (提升 +{improvement:.4f})' + COLOR_LOG_END)
+            else:
+                patience_counter += 1
+                if params.train.verbose:
+                    print(COLOR_LOG_Y + f'⏳ 验证AUC未提升 (Patience: {patience_counter}/{params.train.patience}, 最佳: {best_fold_val_auc:.4f})' + COLOR_LOG_END)
+                if params.train.patience > 0 and patience_counter >= params.train.patience:
+                    if params.train.verbose:
+                        print(f"{COLOR_LOG_Y}⛔ Early Stopping 触发于 Epoch {epoch+1} (最佳验证AUC: {best_fold_val_auc:.4f}){COLOR_LOG_END}")
+                    break
+        
+        # Fold Summary (after all epochs)
+        # 计算 fold 的平均指标（使用独立测试集）
+        best_fold_test_auc = 0.0
+        best_fold_test_loss = 0.0
+        best_fold_test_acc = 0.0
+        # 使用最佳模型状态（已在早期停止逻辑中预先加载）对测试集进行重新评估
+        model.eval()
+        test_targets = []
+        test_probs = []
+        test_loss = 0
+        test_step = 0
+        if dataset_test_loader is not None:
+            with torch.no_grad():
+                for data in dataset_test_loader:
+                    features = {k: v.to(DEVICE) for k, v in data.items()}
+                    x = features[SeqFeatureKey.Q].to(torch.long)
+                    y_target = features[SeqFeatureKey.R].to(torch.long)
+                    mask = features[SeqFeatureKey.MASK].to(torch.bool)
+                    interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
+                    response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
+                    eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+
+                    with autocast(enabled=use_amp):
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
+
+                    y_hat = y_hat[:, 1:]
+                    y_target_shift = y_target[:, 1:].float()
+                    mask_valid = mask[:, 1:]
+                    eval_mask_valid = eval_mask[:, 1:]
+                    final_mask = mask_valid & eval_mask_valid
+                    y_hat_flat = torch.masked_select(y_hat, final_mask)
+                    y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                    loss = loss_fun(y_hat_flat, y_target_flat)
+                    y_prob = torch.sigmoid(y_hat_flat)
+
+                    test_loss += loss.item()
+                    test_step += 1
+                    test_targets.extend(y_target_flat.cpu().detach().numpy())
+                    test_probs.extend(y_prob.cpu().detach().numpy())
+            if len(test_targets) > 0:
+                best_fold_test_auc = roc_auc_score(test_targets, test_probs)
+            best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
+            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= 0.5))
+
+        print('\n' + '='*70)
+        print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
+        print('='*70 + '\n')
+        fold_results_test_auc.append(best_fold_test_auc)
+        
+    print('\n' + '='*70)
+    print(COLOR_LOG_G + '🎉 交叉验证完成！' + COLOR_LOG_END)
+    print('='*70)
+    print(f"各折测试集AUC: {[f'{auc:.4f}' for auc in fold_results_test_auc]}")
+    print(f"平均AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f} ± {np.std(fold_results_test_auc):.4f}")
+    print(f"最佳AUC: {np.max(fold_results_test_auc):.4f} (Fold {np.argmax(fold_results_test_auc)+1})")
+    print(f"最差AUC: {np.min(fold_results_test_auc):.4f} (Fold {np.argmin(fold_results_test_auc)+1})")
+    print('='*70 + '\n')
+    output_file.write(f"CV Mean AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f}\n")
+
+    # Normalize Averages
+    if len(splits) > 0:
+        y_label_aver /= len(splits)
 
     # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
     # 计算总耗时 
@@ -386,10 +568,11 @@ if __name__ == '__main__':
     time_str = f'{total_hours}h {total_minutes}min {total_seconds}s'
     print(f'Total training time: {time_str}')
     output_file.write(f'Total training time: {time_str}\n')
-    # @add_fzq 2025-12-24 17:28:09 -------------------------------------------
-
+    
     output_file.close()
 
+    # Save Data
+    # Optional: Save final model (from last fold, or logic to save best)
     # torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)

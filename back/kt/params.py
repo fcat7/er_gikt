@@ -5,10 +5,7 @@ import toml
 
 @dataclass
 class CommonParams:
-    min_seq_len: int = 20
-    max_seq_len: int = 200
-    num_workers: int = 2
-    test_ratio: float = 0.2
+    num_workers: int = 0  # Windows下建议设为0，避免多进程启动开销(spawn overhead)；Mac/Linux可设为2或4
     random_seed: int = 42
 
 @dataclass
@@ -17,19 +14,31 @@ class ModelParams:
     size_q_neighbors: int = 4
     size_s_neighbors: int = 10
     agg_hops: int = 3
-    dropout: Tuple[float, float] = (0.2, 0.4)
+    # 拆分原 dropoput = [0.2, 0.4] 为具名参数
+    dropout_linear: float = 0.2 # 针对 LSTM/Linear 层的 Dropout
+    dropout_gnn: float = 0.4    # 针对 GNN 聚合后的 Dropout
+    drop_edge_rate: float = 0.0 # [New] 图结构增强：随机丢边率 (建议 0.1~0.2)
+    
+    # @add_fzq: Feature Perturbation (特征扰动)
+    feature_noise_scale: float = 0.0  # 噪声强度 σ ~ N(0, σ²)，0.0 表示关闭。推荐 [0.005, 0.01, 0.02]
+
     rank_k: int = 10
     use_cognitive_model: bool = True
+    cognitive_mode: str = 'autonomous' # 认知模型模式: 'classic' 或 'autonomous' (推荐)
     pre_train: bool = False
     hard_recap: bool = True
     agg_method: str = 'gcn'
-    use_input_attention: bool = False
-    enable_tf_alignment: bool = False # TF Alignment (Logits Output, Xavier Init)
+    recap_source: str = 'hssi'  # 回顾特征来源: 'hsei' 或 'hssi'
+    use_pid: bool = False # 是否使用 PID-GIKT 控制器架构
+    pid_mode: str = 'global' # PID 模式: 'global' (标量) 或 'domain' (向量)
+    pid_ema_alpha: float = 0.1 # PID 积分项衰减率
+    pid_lambda: float = 1.0 # PID 微分项缩放系数
+    pid_init_i: float = 0.5 # PID 积分项权重初始化 (W_i)
+    pid_init_d: float = 0.1 # PID 微分项权重初始化 (W_d)
+    guessing_prob_init: float = 0.05 # 4PL 猜测率初始概率 (0.05 = 5%)
+    slipping_prob_init: float = 0.02 # 4PL 失误率初始概率 (0.02 = 2%)
+    use_4pl_irt: bool = True # 是否启用 4PL-IRT (Path 2 特性)
 
-    def __post_init__(self):
-        # 自动转换 list 为 tuple (适应 toml 加载后的数据类型)
-        if isinstance(self.dropout, list):
-            self.dropout = tuple(self.dropout)
 
 @dataclass
 class TrainParams:
@@ -38,10 +47,13 @@ class TrainParams:
     lr: float = 0.001
     lr_gamma: float = 0.95
     epochs: int = 100
+    weight_decay: float = 0.0 # 权重衰减 (L2 正则化)
+    enable_data_augmentation: bool = False # 是否启用数据增强 (总开关)
+    aug_mask_prob: float = 0.1 # 随机Mask概率 (默认 10%)
+    reg_4pl: float = 1e-5 # 4PL/IRT 正则化系数 (针对区分度/猜测率/失误率)
+    patience: int = 0 # 早停机制 (0 表示禁用)
     prefetch_factor: int = 4
     k_fold: int = 1
-    use_bce_loss: bool = False
-    use_global_auc: bool = False # 是否使用全局 AUC (收集所有预测值计算) 替代 Batch 加权平均 AUC
     verbose: bool = True
 
 @dataclass

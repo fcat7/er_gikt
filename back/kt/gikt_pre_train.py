@@ -9,14 +9,14 @@ from scipy import sparse
 from torch.utils.tensorboard import SummaryWriter
 
 from config import Config, DEVICE
-from pebg import PEBG
+from gikt_pebg import PEBG
 
 # 获取配置
-dataset_name = os.environ.get('DATASET', 'assist09-sample_10%')
+dataset_name = os.environ.get('DATASET', 'assist09-sample_20%')
 # Config 仅负责路径
 config = Config(dataset_name)
 
-batch_size = 32
+batch_size = 64
 epoch_num = 100
 emb_dim = 100
 print(f"Pre-training on dataset: {dataset_name}, Data dir: {config.PROCESSED_DATA_DIR}")

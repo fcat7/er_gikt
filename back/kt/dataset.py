@@ -1,84 +1,127 @@
-"""
-数据集加载策略
-"""
 import os
-import numpy as np
+import json
 import torch
+import numpy as np
+import pandas as pd
 from torch.utils.data import Dataset
 
-class UserDataset(Dataset):
 
-    def __init__(self, config):
-        processed_dir = config.PROCESSED_DATA_DIR
-        
-        # 输入数据
-        self.user_seq = torch.tensor(np.load(os.path.join(processed_dir, 'user_seq.npy')), dtype=torch.int64)
-        # [num_user, max_seq_len] 输入数据
-        self.user_res = torch.tensor(np.load(os.path.join(processed_dir, 'user_res.npy')), dtype=torch.int64)
-        # [num_user, max_seq_len] 输入标签
-        self.user_mask = torch.tensor(np.load(os.path.join(processed_dir, 'user_mask.npy')), dtype=torch.bool)
-        # [num_user, max_seq_len] 有值效记录
-        
-        # 新增时间特征
-        # 检查文件是否存在，如果不存在则使用全0初始化 (兼容旧代码)
+class SeqFeatureKey:
+    """
+    统一管理序列特征键名，避免魔法字符串 / 魔法下标。
+    """
+    Q = "q_seq"
+    R = "r_seq"
+    MASK = "mask"
+    EVAL_MASK = "eval_mask"
+    T_INTERVAL = "t_interval"
+    T_RESPONSE = "t_response"
+
+
+class UnifiedParquetDataset(Dataset):
+    """
+    统一的 Parquet 数据集加载器
+    支持动态 Padding 和数据增强
+
+    __getitem__ 返回字典视图：
+        {
+            SeqFeatureKey.Q:         Tensor[max_seq_len],
+            SeqFeatureKey.R:         Tensor[max_seq_len],
+            SeqFeatureKey.MASK:      Tensor[max_seq_len] (bool),
+            SeqFeatureKey.EVAL_MASK: Tensor[max_seq_len] (bool),
+            SeqFeatureKey.T_INTERVAL:Tensor[max_seq_len],
+            SeqFeatureKey.T_RESPONSE:Tensor[max_seq_len],
+        }
+    DataLoader 默认 collate 后，batch 形状为 [batch_size, max_seq_len]。
+    """
+
+    def __init__(self, config, augment: bool = False, prob_mask: float = 0.1, mode: str = 'train'):
+        self.config = config
+        self.augment = augment
+        self.prob_mask = prob_mask
+        self.mode = mode
+
+        data_dir = config.PROCESSED_DATA_DIR
+        file_path = os.path.join(data_dir, f"{mode}.parquet")
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Parquet file not found: {file_path}. Please run data_process.py first.")
+
+        # 加载元数据
         try:
-            self.user_interval_time = torch.tensor(np.load(os.path.join(processed_dir, 'user_interval_time.npy')), dtype=torch.float32)
-            self.user_response_time = torch.tensor(np.load(os.path.join(processed_dir, 'user_response_time.npy')), dtype=torch.float32)
-        except FileNotFoundError:
-            print("Warning: Time feature files not found. Using zeros.")
-            self.user_interval_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
-            self.user_response_time = torch.zeros_like(self.user_seq, dtype=torch.float32)
+            with open(os.path.join(data_dir, "metadata.json"), 'r') as f:
+                self.meta = json.load(f)
+        except Exception:
+            self.meta = {}
 
-    # # 假设原始数据：
-    # user_seq = [1, 2, 3, …]      # 问题ID序列
-    # user_res = [1, 0, 1, …]      # 答题结果序列
-    # user_mask = [1, 1, 1, …]     # 掩码序列
-    # user_interval = [0.1, 0.5, ...] # 间隔时间序列
-    # user_response = [1.2, 0.8, ...] # 作答时间序列
-    # # 堆叠后：
-    # stacked = [
-    #     [1, 1, 1, 0.1, 1.2],  # 第一个时间步：[问题ID, 答题结果, 掩码, 间隔, 作答时间]
-    #     ...
-    # ]
-    def __getitem__(self, index): # index: 用户索引，指定要获取哪个用户的数据
-        return torch.stack([
-            self.user_seq[index], 
-            self.user_res[index], 
-            self.user_mask[index],
-            self.user_interval_time[index],
-            self.user_response_time[index]
-        ], dim=-1)
-        # 将5个一维张量沿着最后一个维度（dim=-1）堆叠，结果是一个二维张量，形状为 [max_seq_len, 5]
+        self.max_seq_len = self.meta.get('config_at_processing', {}).get('max_seq_len', 200)
+
+        # 加载主数据
+        self.df = pd.read_parquet(file_path)
+
+        # 提取 groups 用于 GroupKFold
+        if 'group_id' in self.df.columns:
+            self.groups = self.df['group_id'].values
+        else:
+            self.groups = None
 
     def __len__(self):
-        return self.user_seq.shape[0]
+        return len(self.df)
 
-# # 示例说明 [num_user=3, max_seq_len=5, 3]
-# [
-#     # 用户1的答题序列
-#     [
-#         [1, 1, 1],  # 第1题：问题ID=1, 答对(1), 有效数据(1)
-#         [2, 0, 1],  # 第2题：问题ID=2, 答错(0), 有效数据(1)
-#         [3, 1, 1],  # 第3题：问题ID=3, 答对(1), 有效数据(1)
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0]   # 填充：无效数据
-#     ],
-    
-#     # 用户2的答题序列
-#     [
-#         [1, 1, 1],  # 第1题：问题ID=1, 答对(1), 有效数据(1)
-#         [4, 1, 1],  # 第2题：问题ID=4, 答对(1), 有效数据(1)
-#         [2, 0, 1],  # 第3题：问题ID=2, 答错(0), 有效数据(1)
-#         [5, 1, 1],  # 第4题：问题ID=5, 答对(1), 有效数据(1)
-#         [0, 0, 0]   # 填充：无效数据
-#     ],
-    
-#     # 用户3的答题序列
-#     [
-#         [3, 0, 1],  # 第1题：问题ID=3, 答错(0), 有效数据(1)
-#         [1, 1, 1],  # 第2题：问题ID=1, 答对(1), 有效数据(1)
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0],  # 填充：无效数据
-#         [0, 0, 0]   # 填充：无效数据
-#     ]
-# ]
+    def _pad_sequence(self, seq, dtype=np.int64, pad_val=0):
+        """动态 Padding 到 max_seq_len"""
+        arr = np.array(seq, dtype=dtype)
+        if len(arr) >= self.max_seq_len:
+            return arr[:self.max_seq_len]
+        padded = np.full(self.max_seq_len, pad_val, dtype=dtype)
+        padded[:len(arr)] = arr
+        return padded
+
+    def __getitem__(self, index):
+        row = self.df.iloc[index]
+
+        # 动态 Padding 并转换为 Tensor
+        q_seq = torch.from_numpy(self._pad_sequence(row['q_seq'], dtype=np.int64))
+        r_seq = torch.from_numpy(self._pad_sequence(row['r_seq'], dtype=np.int64))
+        mask = torch.from_numpy(self._pad_sequence(row['mask'], dtype=bool, pad_val=False))
+        # 评估掩码
+        if 'eval_mask' in row and row['eval_mask'] is not None:
+            eval_mask = torch.from_numpy(self._pad_sequence(row['eval_mask'], dtype=bool, pad_val=False))
+        else:
+            eval_mask = mask.clone()
+        # 可选时间特征
+        if 't_interval' in row and row['t_interval'] is not None:
+            t_interval = torch.from_numpy(self._pad_sequence(row['t_interval'], dtype=np.float32))
+        else:
+            t_interval = torch.zeros_like(q_seq, dtype=torch.float32)
+
+        if 't_response' in row and row['t_response'] is not None:
+            t_response = torch.from_numpy(self._pad_sequence(row['t_response'], dtype=np.float32))
+        else:
+            t_response = torch.zeros_like(q_seq, dtype=torch.float32)
+
+        # 数据增强 (逻辑完全复用，作用在 mask / eval_mask 上)
+        # 随机丢弃一部分交互，模拟缺失数据或子采样
+        if self.augment and self.prob_mask > 0:
+            prob_random = torch.rand(q_seq.shape) < self.prob_mask
+            mask_to_drop = prob_random & mask
+
+            if mask_to_drop.sum() == mask.sum() and mask.sum() > 0:
+                valid_indices = torch.nonzero(mask, as_tuple=True)[0]
+                keep_idx = valid_indices[torch.randint(0, len(valid_indices), (1,))]
+                mask_to_drop[keep_idx] = False
+
+            mask = mask.clone()
+            mask[mask_to_drop] = False
+            eval_mask = eval_mask.clone()
+            eval_mask[mask_to_drop] = False
+
+        # 返回“具名字段”的字典视图，便于不同模型按需取用
+        return {
+            SeqFeatureKey.Q: q_seq,
+            SeqFeatureKey.R: r_seq,
+            SeqFeatureKey.MASK: mask,
+            SeqFeatureKey.EVAL_MASK: eval_mask,
+            SeqFeatureKey.T_INTERVAL: t_interval,
+            SeqFeatureKey.T_RESPONSE: t_response,
+        }
