@@ -12,7 +12,7 @@ from config import Config, DEVICE
 from gikt_pebg import PEBG
 
 # 获取配置
-dataset_name = os.environ.get('DATASET', 'assist09-sample_10%')
+dataset_name = os.environ.get('DATASET', 'assist09-sample_20%')
 # Config 仅负责路径
 config = Config(dataset_name)
 

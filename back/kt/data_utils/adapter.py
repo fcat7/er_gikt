@@ -165,16 +165,15 @@ class KTDataAdapter:
 
         # 2. skill_ids 特殊清洗
         if StandardColumns.SKILL_IDS in df.columns:
-            # 统计并去除 -1
+            # 统计并去除 -1，空值
             # 转换为字符串进行匹配，兼容数值型和字符型
-            # 注意：不处理 NaN (空值保留)
             
             # 创建掩码：值为 -1 或 "-1" 或 "-1.0"
             # astype(str) 会将 NaN 转换为 'nan'，不用担心报错
-            is_invalid_skill = df[StandardColumns.SKILL_IDS].astype(str).isin(['-1', '-1.0', '-1.00'])
+            is_invalid_skill = df[StandardColumns.SKILL_IDS].astype(str).isin(['-1', '-1.0', '-1.00', 'nan'])
             removed_count = is_invalid_skill.sum()
             if removed_count > 0:
-                ic(f"检测到并移除 {StandardColumns.SKILL_IDS} 为 -1 的数据: {removed_count} 条")
+                ic(f"检测到并移除 {StandardColumns.SKILL_IDS} 为 -1 或 空 的数据: {removed_count} 条")
                 df = df[~is_invalid_skill]
 
         # 2. 标签列(correct)验证(允许 >= 0 的数值，支持分数)
@@ -184,13 +183,26 @@ class KTDataAdapter:
             df = df[df[StandardColumns.LABEL] >= 0] # 过滤掉负分 (通常是异常值),允许分数 (>=0)，不强制 0/1
             if (df[StandardColumns.LABEL] > 1).any():
                 ic(f"Warning: 检测到 {StandardColumns.LABEL} 值大于 1，将被保留作为原始分数。")
+        ic(f"清洗可选列后，形状: {df.shape}")
 
         # 3. 可选列清洗 (timestamp, response_time)
         # 3.A. Timestamp (如果存在，必须有效，否则无法排序)
         if StandardColumns.TIMESTAMP in df.columns:
-            df[StandardColumns.TIMESTAMP] = pd.to_numeric(df[StandardColumns.TIMESTAMP], errors='coerce')
-            df = df.dropna(subset=[StandardColumns.TIMESTAMP]) # 时间戳缺失则丢弃
-
+            # 先尝试作为数值型（已经是时间戳的情况）
+            numeric_ts = pd.to_numeric(df[StandardColumns.TIMESTAMP], errors='coerce')
+            
+            # 如果大部分都是 NaN，说明可能是日期字符串格式
+            if numeric_ts.isna().sum() > len(df) * 0.5:
+                ic("检测到日期字符串格式，尝试解析为 datetime 后转为时间戳")
+                df[StandardColumns.TIMESTAMP] = pd.to_datetime(df[StandardColumns.TIMESTAMP], errors='coerce')
+                df = df.dropna(subset=[StandardColumns.TIMESTAMP])
+                # 转换为 Unix 时间戳（秒级）- 使用 view 避免 FutureWarning
+                df[StandardColumns.TIMESTAMP] = df[StandardColumns.TIMESTAMP].view('int64') // 10**9
+            else:
+                df[StandardColumns.TIMESTAMP] = numeric_ts
+                df = df.dropna(subset=[StandardColumns.TIMESTAMP])
+            
+            ic(f"清洗 Timestamp 后，形状: {df.shape}")
         # 3.B. Response Time (存在脏数据的重灾区)
         if StandardColumns.RESPONSE_TIME in df.columns:
             df[StandardColumns.RESPONSE_TIME] = pd.to_numeric(df[StandardColumns.RESPONSE_TIME], errors='coerce') # 转数值
@@ -206,7 +218,7 @@ class KTDataAdapter:
             if afk_count > 0:
                 ic(f"检测到 {afk_count} 条 {StandardColumns.RESPONSE_TIME} > 1h (挂机数据), 执行截断处理")
                 df.loc[df[StandardColumns.RESPONSE_TIME] > THRESHOLD_AFK, StandardColumns.RESPONSE_TIME] = THRESHOLD_AFK
-
+            ic(f"清洗 Response Time 后，形状: {df.shape}")
         # 4. 排序
         sort_cols = []
         if StandardColumns.USER_ID in df.columns:

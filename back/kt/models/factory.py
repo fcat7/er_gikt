@@ -52,7 +52,8 @@ class ModelFactory:
                 dropout_linear=kwargs.get('dropout_linear', 0.2),
                 dropout_gnn=kwargs.get('dropout_gnn', 0.4),
                 use_cognitive_model=kwargs.get('use_cognitive_model', True),
-                cognitive_mode=kwargs.get('cognitive_mode', 'autonomous')
+                cognitive_mode=kwargs.get('cognitive_mode', 'autonomous'),
+                use_4pl_irt=kwargs.get('use_4pl_irt', True)
             ).to(device)
 
         elif name_key == 'dkt':

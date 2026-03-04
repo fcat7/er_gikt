@@ -37,6 +37,7 @@ class ModelParams:
     pid_init_d: float = 0.1 # PID 微分项权重初始化 (W_d)
     guessing_prob_init: float = 0.05 # 4PL 猜测率初始概率 (0.05 = 5%)
     slipping_prob_init: float = 0.02 # 4PL 失误率初始概率 (0.02 = 2%)
+    use_4pl_irt: bool = True # 是否启用 4PL-IRT (Path 2 特性)
 
 
 @dataclass

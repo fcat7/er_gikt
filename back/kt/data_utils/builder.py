@@ -48,15 +48,24 @@ class KTDataBuilder:
             return [int(raw_skill)]
 
         # 字符串处理，已由 adapter.py 标准化为统一分隔符
-        s = str(raw_skill)
+        s = str(raw_skill).strip()
         parts = s.split(StandardColumns.SKILL_IDS_STD_SEP)
 
         skills = []
         for p in parts:
+            p_clean = p.strip()
+            if not p_clean:
+                continue
             try:
-                skills.append(int(p))
+                skills.append(int(p_clean))
             except ValueError:
-                pass
+                # 尝试提取数字部分（如 "skill_123" -> 123）
+                import re
+                match = re.search(r'\d+', p_clean)
+                if match:
+                    skills.append(int(match.group()))
+                else:
+                    ic(f"Warning: 无法解析技能 ID: '{p_clean}'")
         return skills
 
     def build_maps(self, df):

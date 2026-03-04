@@ -198,7 +198,8 @@ if __name__ == '__main__':
             pid_init_i=params.model.pid_init_i,
             pid_init_d=params.model.pid_init_d,
             guessing_prob_init=params.model.guessing_prob_init,
-            slipping_prob_init=params.model.slipping_prob_init
+            slipping_prob_init=params.model.slipping_prob_init,
+            use_4pl_irt=params.model.use_4pl_irt
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)

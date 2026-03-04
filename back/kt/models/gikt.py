@@ -139,7 +139,7 @@ class CognitiveRNNCell(Module):
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02, use_4pl_irt=True):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 
@@ -165,6 +165,7 @@ class GIKT(Module):
             recap_source: 回顾特征来源，默认为'hssi'
             use_pid: 是否使用PID控制器架构
             pid_mode: PID 模式 ('global' 或 'domain') 
+            use_4pl_irt: 是否使用 4PL IRT 差异化建模特性
         '''
         super(GIKT, self).__init__()  # 调用父类的初始化方法
         self.model_name = "gikt" #  模型名称设置
@@ -183,8 +184,19 @@ class GIKT(Module):
 
         self.hard_recap = hard_recap #  困难回顾设置
         self.rank_k = rank_k #  排名参数k设置
-        self.use_cognitive_model = use_cognitive_model # 是否使用认知模型
+        
+        # @add_fzq: Ablation Support for Cognitive Model
+        # 如果 cognitive_mode == 'none', 强制关闭 use_cognitive_model
+        # 否则尊重 use_cognitive_model 传入的值
+        # 如果调用方已经通过 cognitive_mode='none' 期望关闭，就应该覆盖旧参数
+        if cognitive_mode == 'none':
+            self.use_cognitive_model = False
+        else:
+            self.use_cognitive_model = use_cognitive_model
+            
         self.cognitive_mode = cognitive_mode # 认知模型模式
+        self.use_4pl_irt = use_4pl_irt # 是否使用 4PL IRT 特性
+        
         self.agg_method = agg_method # 聚合方法
         self.recap_source = recap_source # 硬回顾特征来源
         self.use_pid = use_pid # 是否使用PID控制器架构
@@ -281,21 +293,22 @@ class GIKT(Module):
 
         # @add_fzq: Differential GIKT Architecture (Path 2)
         # 1. 静态难度基准 (Common Mode): 层次化难度建模
-        # (1) 题目级难度偏置: 捕捉题目特有的细微难度差异
-        self.difficulty_bias = Embedding(num_question, 1)
-        
-        # (2) 知识点级难度偏置 (Hierarchical Step 2): 
-        # 用于抑制题目稀疏性带来的噪声，为关联同一知识点的题目提供稳健的共模难度基准
-        self.skill_difficulty_bias = Embedding(num_skill, 1)
-        
-        # 2. 区分度 (Discrimination): a_q (Step 3: 4PL 升级为题目级参数)
-        # 初始化为 0，后期配合 softplus(x) + 1.0 得到约为 1.69 的初始区分度
-        self.discrimination_bias = Embedding(num_question, 1)
-        
-        # 3. 猜测率 (Guessing) c_q 与 失误率 (Slipping) d_q: 噪声吸收器
-        # 使用较大的负数初始化，使得初始状态下 c_q 约为 0.05, d_q 约为 0.02
-        self.guessing_bias = Embedding(num_question, 1)
-        self.slipping_bias = Embedding(num_question, 1)
+        if self.use_4pl_irt:
+            # (1) 题目级难度偏置: 捕捉题目特有的细微难度差异
+            self.difficulty_bias = Embedding(num_question, 1)
+            
+            # (2) 知识点级难度偏置 (Hierarchical Step 2): 
+            # 用于抑制题目稀疏性带来的噪声，为关联同一知识点的题目提供稳健的共模难度基准
+            self.skill_difficulty_bias = Embedding(num_skill, 1)
+            
+            # 2. 区分度 (Discrimination): a_q (Step 3: 4PL 升级为题目级参数)
+            # 初始化为 0，后期配合 softplus(x) + 1.0 得到约为 1.69 的初始区分度
+            self.discrimination_bias = Embedding(num_question, 1)
+            
+            # 3. 猜测率 (Guessing) c_q 与 失误率 (Slipping) d_q: 噪声吸收器
+            # 使用较大的负数初始化，使得初始状态下 c_q 约为 0.05, d_q 约为 0.02
+            self.guessing_bias = Embedding(num_question, 1)
+            self.slipping_bias = Embedding(num_question, 1)
 
         # @add_fzq: PID-GIKT Controller Parameters
         if self.use_pid:
@@ -531,7 +544,7 @@ class GIKT(Module):
             question_t = question[:, t] #  取出所有学生在第 t 个时间步所做的题目ID
             response_t = response[:, t] #  取出所有学生在第 t 个时间步所做的题目ID的回答结果
             
-            mask_t = torch.eq(mask[:, t], torch.tensor(1)) #  创建一个布尔掩码
+            mask_t = torch.eq(mask[:, t], 1) #  创建一个布尔掩码
             emb_response_t = self.emb_table_response(response_t) 
             
             # [Level 2 变更] 检索预计算的 GNN 特征
@@ -720,8 +733,9 @@ class GIKT(Module):
                     emb_q_next = self.emb_table_question(q_next) 
                     dtype = emb_q_next.dtype
                 
-                # @opt_fzq 2026-02-04: 批量化 qs_concat 填充 - 优化循环结构
-                qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim, device=DEVICE, dtype=dtype)
+                # @opt_fzq 2026-02-04: 批量化 qs_concat 填充 - 优化循环结
+                # 使用 q_next 的 device 避免 CPU/GPU 不一致
+                qs_concat = torch.zeros(batch_size, max_num_skill + 1, self.emb_dim, device=q_next.device, dtype=dtype)
                 # 第一列始终是问题嵌入 [batch_size, emb_dim]
                 qs_concat[:, 0, :] = emb_q_next
                 
@@ -778,7 +792,8 @@ class GIKT(Module):
 
             # 第一个问题, 无需寻找历史问题, 直接预测
             if t == 0:
-                y_hat[:, 0] = 0.5 # 第一个问题默认0.5的正确率
+                # @fix_fzq: 由于现在网络统一返回 Logits，预测概率 0.5 对应的 Logit 是 0.0
+                y_hat[:, 0] = 0.0 # 概率0.5对应的Logit为0
                 pid_data = (pid_ema, pid_diff) if self.use_pid else None
                 y_hat[:, 1] = self.predict(qs_concat, torch.unsqueeze(lstm_output, dim=1), q_target=q_next, pid_data=pid_data)
                 
@@ -786,7 +801,7 @@ class GIKT(Module):
                 # 为 t=0 附加零状态，以保持与 state_history 原始逻辑一致（index 0 为空）
                 # 注意：如果我们不想让模型注意 t=0 (因为它是空的)，Key 应该是某种不会触发注意力的值。
                 # 使用 Zero State 生成 Key (Tanh(MLP(0))) 通常会产生较小的分数，这与 Value=0 配合较好。
-                zero_state = torch.zeros(batch_size, self.emb_dim, device=DEVICE)
+                zero_state = torch.zeros(batch_size, self.emb_dim, device=q_next.device)
                 projected_keys_list.append(torch.tanh(self.MLP_query(zero_state)))
                 state_history_list.append(zero_state)
                 
@@ -817,6 +832,9 @@ class GIKT(Module):
 
                 if k_active == 0:
                     current_history_state = curr_state_expanded
+                    # @fix_fzq: 必须在此分支为缓存分配正确形状的张量，避免 Locals() 遗留导致形状错误
+                    cached_keys_tensor = torch.tanh(self.MLP_query(curr_state_expanded))
+                    neighbor_source = recap_feature
                 else:
                     # 4. 聚集历史记录
                     # 裁剪到 k_active 以减少计算
@@ -914,9 +932,6 @@ class GIKT(Module):
             
             pid_data = (pid_ema, pid_diff) if self.use_pid else None
             
-            # 兜底赋值，防止未赋值异常
-            if 'cached_keys_tensor' not in locals():
-                cached_keys_tensor = torch.zeros(batch_size, 1, self.emb_dim, device=DEVICE)
             # Pass cached_keys to predict
             y_hat[:, t + 1] = self.predict(qs_concat, current_history_state, q_target=q_next, pid_data=pid_data, cached_keys=cached_keys_tensor)
             
@@ -1195,10 +1210,7 @@ class GIKT(Module):
             # if not self.training and torch.rand(1).item() < 0.001:  # Low probability print during testing
             #     print(f"[Diff-GIKT Debug] Mode: {self.pid_mode}, PID Bias Mean: {pid_bias.mean().item():.4f}, Max Bias: {pid_bias.max().item():.4f}")
 
-        # @add_fzq: P
-        # @add_fzq: Path 2 Differential Logic
-        is_4pl = False
-        if q_target is not None:
+        if q_target is not None and self.use_4pl_irt:
             # [Backward Compatibility Check]
             if hasattr(self, 'difficulty_bias'):
                 # 1. 获取题目级基础难度 (Question-specific Difficulty)
@@ -1215,8 +1227,7 @@ class GIKT(Module):
                     difficulty = q_diff
                 
                 # 3. 引入判别度、猜测率与失误率 (Step 3: 4PL Model)
-                if hasattr(self, 'discrimination_bias') and hasattr(self, 'guessing_bias'):
-                    is_4pl = True
+                if self.use_4pl_irt:
                     # a_q (Discrimination): 区分度，必须为正。使用 softplus 确保平滑且 > 0
                     a_q = 1.0 + F.softplus(torch.squeeze(self.discrimination_bias(q_target), dim=-1))
                     
@@ -1235,15 +1246,9 @@ class GIKT(Module):
                     # TF Alignment: 为了兼容 BCEWithLogitsLoss，将概率反向映射回 logit：L = log(p/(1-p))
                     p_final = torch.clamp(p_final, 1e-7, 1.0 - 1e-7)
                     p = torch.log(p_final / (1.0 - p_final))
-                else:
-                    # Fallback to Step 1/2: 使用全局判别增益 (Discrimination Gain)
-                    gain = getattr(self, 'discrimination_gain', torch.tensor(1.0))
-                    gain_clamped = torch.clamp(gain, 0.1, 3.0)
-                    p = gain_clamped * (p - difficulty)
-        
         # @add_fzq: TF Alignment - Always return Logits for BCEWithLogitsLoss
-        # 4PL 预测的预处理结果已经是 Logits 形式，直接返回
-        result = p if is_4pl else torch.sigmoid(p) 
+        # 因为主训练循环使用了 BCEWithLogitsLoss，所以这里必须严格返回 Logits
+        result = p 
         
         return result
 

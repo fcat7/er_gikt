@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -204,10 +205,12 @@ class BaseTrainer:
             patience_counter = 0
             
             for epoch in range(self.epochs):
+                start_time = time.time()
                 train_loss = self._train_epoch(model, train_loader, optimizer)
                 val_auc, val_acc = self._evaluate(model, val_loader)
+                end_time = time.time()
                 
-                print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val AUC: {val_auc:.4f} | Val ACC: {val_acc:.4f}")
+                print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
                 
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
