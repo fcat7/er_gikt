@@ -1,0 +1,281 @@
+
+论  文  题  目 基于图交互知识追踪与群体智能算法的习题推荐研究 
+
+
+注：本表可复印，可另加附页
+
+一、立论依据
+1.1 研究背景
+（一）教育数字化背景下个性化习题推荐的现实需求
+人工智能、大数据与云计算的发展推动了在线教育平台的普及，教育数字化已成为国家教育战略的重要方向。《教育强国建设规划纲要（2024—2035 年）》明确要求推动人工智能与教育深度融合，提升教学体系智能化水平。在此背景下，学习方式正从“标准化传授”转向“以学生为中心”的个性化模式。在线教育虽打破了时空限制，丰富了学习资源，但也带来了信息过载和认知负担问题。面对海量学习路径与资源，学习者往往难以匹配自身需求和认知水平，这使得“因材施教”的技术化落地成为教育数字化发展的关键挑战。
+在个性化学习体系中，习题推荐作为连接知识传授与能力巩固的关键手段，发挥着桥梁作用。习题不仅是巩固知识、检验成效的工具，也是教学反馈和智能诊断的重要数据来源。然而，当前多数在线教育平台的题库筛选方式仍显单一，缺乏对学生认知能力、知识结构、学习偏好等个体差异的精准识别与匹配。千篇一律的题目推送不仅影响学习动机，也制约了个性化学习的深入发展。高效可靠的习题推荐算法，能基于学生知识薄弱点精准推送，提升学习积极性和自我效能感。如何将学科知识结构、认知诊断结果与历史答题数据等多源信息融入推荐模型，实现对学习者的精准匹配与动态调整，从而提升推荐的准确性和个性化程度，仍需深入研究。实现精准推荐的核心前提，在于对学生动态认知状态的准确刻画。
+（二）图知识追踪赋能认知状态精准刻画
+为解决习题推荐中对学生认知状态刻画不足的问题，图知识追踪（Graph Knowledge Tracing, GKT）应运而生。它将知识点抽象为图中节点，以先修依赖、语义相似等多元关系构建边，利用图神经网络的消息传递机制在节点间聚合学习者的答题信息，从而生成细粒度的知识掌握分布。相较于传统序列模型，GKT 能同时捕捉单个知识点的演化轨迹与知识结构的全局拓扑，为个性化推荐提供了更加丰富且稳定的认知特征。
+图知识追踪不仅能实时反映学生在各知识域的强弱差异，还可揭示知识点间的交互影响，为候选题目的精准筛选和组合优化打下基础。通过将节点级掌握概率与题库中题目难度、题型属性、知识覆盖度等信息融合，推荐系统能够在保证知识覆盖的前提下，动态调整题目序列，以满足学习者不同阶段的认知需求。
+（三）图知识追踪下的个性化习题推荐挑战
+尽管图知识追踪（GKT）为认知状态建模提供了新范式，其在个性化习题推荐中的深度应用仍面临关键技术瓶颈。在认知状态建模层面，现有方法动态适应性不足：一方面依赖静态预设的知识图谱结构（如先修关系），未能融合题目难度、题型等属性特征，导致节点间信息传递权重产生偏差；另一方面忽视知识遗忘规律，无法刻画“学习-遗忘-再学习”的动态认知演化过程。在推荐策略优化层面，传统方法存在全局性失衡问题。基于贪婪策略的局部筛选（如按掌握概率排序）易引发知识点覆盖窄化与难度断层；同时，在海量题库环境下需协调满足薄弱点覆盖、难度适配、题型多样及认知负荷控制等多目标约束时，现有算法因计算复杂度过高且缺乏高效全局寻优能力，难以实现实时均衡的优化决策。
+为此，本研究提出基于图交互知识追踪与群体智能算法的习题推荐框架。在认知建模层，引入题目属性动态感知机制与时间衰减效应量化方法，构建增强的图交互知识追踪模型，实现认知状态的自适应演化建模。在推荐决策层，设计基于群体智能的全局优化框架，通过并行搜索策略高效协调多目标约束（薄弱点覆盖、难度适配、题型多样、认知负荷），突破局部最优困境，实现知识强化与认知发展规律的动态平衡推荐。
+1.2 研究意义
+为了有效解决现有个性化习题推荐方法中存在的问题，例如知识表示不准确、无法实时反馈学习状态、推荐结果同质化等，本文提出了将知识追踪和群体智能算法引入个性化习题推荐方法中的思路。在学生学习过程中，遗忘是准确估计学生知识状况的一个重要方面。为了准确建模学生学习过程中学习与遗忘行为，本文提出一种融合遗忘行为和题目属性的图交互知识追踪模型（Forgetting‐and‐Attribute‐aware Graph-based Interaction Knowledge Tracing, FA-GIKT）。本研究的研究意义如下：
+提出一种基于图知识追踪与群体智能算法的个性化习题推荐模型。该模型通过动态追踪学生知识状态，精确评估其学习薄弱点，实现更具适应性的习题推荐。系统在推荐过程中综合考虑知识结构、学生掌握情况与题目特征，不仅可提升习题匹配的准确性，还能增强学生的学习主动性和学习成效。
+优化教育资源分配与提升教学效率。本研究通过将学科知识结构与学生知识水平有效融合，为学生推荐符合其学习进度和需求的教学资源，从而实现教育资源的优化配置与高效利用；同时，基于学生的学习进度和知识掌握程度提供定制化练习，提升教学服务的精准度，进而提高整体教学效率与质量。
+1.3 国内外研究现状分析
+（一）深度知识追踪
+知识追踪（Knowledge Tracing, KT）作为智能教育技术的核心问题，旨在通过分析学生与教学材料的交互过程，动态刻画其知识状态变化并预测其对特定知识点的掌握程度[1]。早期研究多采用概率模型、因子模型等方法；Shen 等（2024）[2]则从技术角度将现有知识追踪模型归为概率类、因子类与深度学习类三大类别。本研究聚焦深度学习方法，后者凭借自动特征提取与非线性映射能力，能够在大规模、高维教育数据中识别隐藏模式与微妙关联，实现对学习者知识状态的精细建模。当前的深度知识追踪模型又可依据其骨干网络类型分为基于循环神经网络、基于记忆网络、基于注意力机制以及基于图神经网络的多种流派。
+1. 基于循环神经网络的知识追踪
+深度知识追踪（Deep Knowledge tracing, DKT[3]）是首个将深度学习引入 KT 领域的尝试，它通过 RNN/LSTM 对学习者的答题序列进行高维非线性建模，并将隐藏状态随每次交互动态更新，以反映知识状态的演变。后续工作（如 DKT+、DKT-DSC、DHKT）在网络结构和正则化策略上进行了优化，进一步提升了预测稳定性与鲁棒性。尽管 RNN 系列在序列学习上表现优异，Yeung 等（2018）[4]研究发现其存在无法重建输入与随时间波动过大的不合理现象，并且隐藏向量难以直接解释各知识点的掌握程度。为此，Lu 等（2020）[5]学者提出了一种事后可解释性方法，用以增强对 DKT 模型的解释能力。具体而言，研究采用了分层相关传播技术，通过度量模型输入与输出之间的相关性，对 DKT 的预测结果进行解释。初步实验结果显示，该方法在一定程度上提升了模型的可解释性。在此基础上，他们进一步[6]引入可解释人工智能（xAI）技术，探索其在 DKT 模型解释中的应用。
+2. 基于记忆网络的知识追踪
+为增强可解释性，动态键值记忆网络（DKVMN）[7] 首次引入了“键-值”记忆矩阵：静态的键矩阵存储各知识组件表征，动态的值矩阵则随着答题交互被“擦除—添加”地更新，以精细追踪学习者对每个知识点的掌握状态。其“擦除-添加”机制不仅模拟了知识增长，也引入了遗忘效应。鉴于 DKVMN 在建模长期依赖方面的不足，SKVMN[8] 在 Hop-LSTM 中穿梭神经单元以跨步捕捉远距离交互；HMN[9] 则进一步在层次化框架下模拟工作记忆与长期记忆，分别进行短期信息聚合与长期知识积累，实现了更丰富的记忆结构建模。
+3. 基于注意力机制的知识追踪
+自注意力机制使模型能在全局范围内衡量历史交互对当前预测的贡献。SAKT[10] 利用 Transformer 架构直接对习题–答题序列施加自注意力，显著改善了长距离依赖捕捉和可解释性。在此基础上，SANT/SANT+[11], [12] 通过分离编码器–解码器设计和引入时间间隔与答题时长特征，进一步提升了对复杂交互的建模能力；AKT[13] 则融合了 Rasch 模型先验与单调衰减注意力，既考虑心理测量学特征，又引入指数衰减机制以反映遗忘规律，取得了卓越的性能且具备较好可解释性。最近，DTransformer[14] 进一步关注知识状态演化的稳定性，而非单纯的未来答题预测。
+4. 基于图神经网络的知识追踪
+图神经网络天然适合刻画知识点之间的结构化关系。图知识追踪（Graph-based knowledge tracing, GKT）[15] 将知识点及其先修、相似等关系抽象为图结构，通过消息传递在节点间传播学习者状态，实现了对知识结构的归纳式推理。基于图交互的知识追踪（Graph-based Interaction Knowledge Tracing, GIKT）[16] 将问题（Question）与知识概念（KC）之间的多对多映射建为二部图，利用图神经网络（GNN）汇总问题和 KC 的嵌入后，再将每个问题节点的嵌入输入循环神经网络（RNN）以预测学生对下一个问题的作答情况。与 GKT 隐含假设每个问题对应单一 KC 不同，GIKT 承认一个 KC 可关联多个问题、一个问题可涉及多个 KC，从而更全面地捕捉二者的复杂关系。为更精准地反映时空依赖，基于结构的知识追踪（Structure-based Knowledge Tracing, SKT）[17] 采用同步与部分传播策略，分别处理无向与有向边对知识传播的影响，以捕捉空间结构效应和时间演化。此外，Lu 等（2022）[18]通过将图中教育关系与拓扑约束融入损失函数，以先修-后修不等式正则化预测结果，进一步增强了模型的一致性与可解释性。近期研究在此基础上做了多方面扩展。Yang 等（2024）[19]提出异构图时空演化知识追踪，在多类型节点与多关系边的异构图中，引入时空演化模块，动态更新节点状态，以捕捉学习者对不同概念在多时段下的掌握动态。Cui 等（2024）[20]将多种教学理论（如建构主义与动机理论）融入图模型，构建“可解释”图注意力层，通过对注意力权重与教学策略的关联分析，深入理解学习过程并提升了模型决策的教育合理性。Gao 等（2025）[21]针对编程知识追踪场景，提出基于代码图的去噪调优适配器，利用抽象语法树生成代码依赖图，并在此基础上设计去噪网络层，以改善程序练习预测中的噪声干扰问题。
+
+（二）个性化学习推荐
+许多个性化学习推荐方法参考了电子商务领域的商品推荐方法。这些方法把学习者看作电子商务平台的用户，把学习资源看作商品，以学习者在学习资源上的打分作为推荐模型的训练标签[22]。常用的方法包括基于内容推荐、协同过滤推荐、混合过滤推荐，此外，为了更精细地刻画学生的认知状况，研究者们相继提出了基于认知诊断和基于知识追踪的推荐方法；与此同时，随着图模型技术的发展，知识图谱驱动的推荐方式也在教育领域取得了显著进展。
+1. 基于内容的学习推荐
+基于内容的学习推荐（Content-Based Recommendation, CBR）主要依赖学习资源本身的特征信息，为每位学习者构建个性化画像，然后将与其历史偏好相似的资源推荐给学习者。早期研究普遍基于关键词、主题或标签等显式特征进行匹配，但在高维、异构的教育场景中，资源特征往往不一致且稀疏，这使得传统的CBR面临挑战。为解决这一问题，Rosewelt 等（2020）[23]则基于嵌入式特征选择和模糊时间逻辑决策树，将深度学习引入CBR框架，实现了海量内容中高质量资源的精准提取与推荐。Pujahari 等（2022）[24]提出了一种双重方法来增强基于内容的推荐性能：首先，采用矩阵分解技术对原始资源特征进行降维与补全，以缓解特征稀疏与不一致性；其次，通过迭代提升（boosting）多个弱分类器，生成更鲁棒的个体用户画像，从而减轻由评分误分类导致的偏差。
+2. 基于协同过滤学习推荐
+协同过滤推荐（Collaborative Filtering Recommendation, CFR）通过计算学习者之间或资源之间的相似性来进行推荐，分为基于用户（User-Based CF）和基于物品（Item-Based CF）两类。CFR在电子商务领域取得了成功，并逐渐被引入教育推荐系统。Linden 等（2003）[25]首先提出基于KNN的协同过滤算法，使用学习者的答题得分计算Jaccard相似度，以找到“邻近”学习者群体，从而借助其成绩预测目标学习者的表现并推荐相应练习。随后，Ni 等（2021）[26]进一步提出了将TF–IDF方法与学习者多维特征相结合的混合相似度度量，通过模糊隶属度融合多源信息，显著提高CFR在教育数据上的推荐性能。Park 等（2023）[27]指出，Jaccard相似度忽视了评分信息的权重差异，为此引入改进的相似度度量方法以克服传统CFR在相似性估计中的局限。同时，Mu 等（2023）[28]提出基于异构信息融合的图协同过滤方法，将不同来源的图数据进行联合建模，通过图信息传播与聚合，学习潜在嵌入并增强推荐效果。尽管CFR具有无需对资源内容进行深度分析的优势，但在教育场景中仍难以解决冷启动和数据稀疏性问题，需要与其他方法结合加以优化。
+3. 混合过滤推荐
+混合过滤推荐（Hybrid Recommendation, HR）旨在弥补单一推荐策略的不足，通过将CBR、CFR或其他算法有机融合来提高推荐的准确性与鲁棒性。典型方法包括加权融合、级联推荐与模型堆叠等。混合策略不仅能够结合CBR对内容特征建模的优势，还能利用CFR挖掘群体行为模式，从而在数据稀疏或新用户/新资源场景下保持较高的推荐质量。
+Ibrahim等（2018） [29]提出了一种基于内容推荐和协同过滤推荐的混合方法用于课程推荐，该方法利用本体来克服信息超载问题，即采用相似结构层次的本体来映射课程的属性结构与学习者的特征结构。李浩君等（2019）[30]提出了一种基于多目标粒子群优化算法的学习推荐方法，该方法以学习者规划的时间为约束，以同时满足学习者偏好和学习资源难度最适宜为优化目标进行学习资源推荐。Esteban等（2020）[31]提出了一种采用遗传算法整合多种推荐策略的课程推荐方法，该方法将定制的遗传算法应用于推荐的前置阶段，利用训练数据优化推荐系统的参数配置，然后用该配置构建推荐系统模型。
+4. 基于知识图谱的学习推荐
+知识图谱（Knowledge Graph）通过将学习资源、知识点、课程目标等实体及其关系构建为图结构，为推荐系统提供了丰富的语义信息以及高阶关联关系。基于知识图谱的推荐方法通常首先将用户和资源映射到图中节点，然后利用图嵌入或图神经网络（GNN）学习实体的低维表示，再结合学习者的历史行为进行推荐。
+Zhu 等（2018）[32]提出了一种基于知识图谱的多约束学习路径推荐算法，通过对图中实体和关系进行嵌入学习，能够根据学习者过往记录与当前进度，生成符合教学大纲的个性化学习路径。邢长征等（2023）[33]针对知识图谱重建中的远距离信息干扰问题，设计了基于距离策略的邻域聚合结构，以减少信息传播顺序对训练成本的影响。陈玲洪等（2023）[34]则将知识图谱与读者图像技术相结合，通过构建读者与图书之间的语义关系图，实现图书推荐系统的效果提升。基于知识图谱的推荐不仅增强了系统的可解释性，还能利用先修关系、同级关系等结构化信息，为学习者提供更具连贯性和逻辑性的资源序列。
+5. 基于认知诊断的学习推荐
+认知诊断模型（Cognitive Diagnosis Models, CDMs）通过分析学习者对练习的答题序列，评估其对不同知识点的掌握程度，并根据诊断结果为学习者提供有针对性的练习推荐。CDMs在精细化学习干预方面具有天然优势，但也依赖于丰富的题目标注和预先设定的Q矩阵。
+Rupp 等（2008）[35]最早将心理学中的认知诊断方法应用于练习推荐系统，从学习者的真实答题数据出发，诊断其知识缺漏，并推荐相应练习。De 等（2009）[36]基于DINA模型获取学生的知识掌握状态，再从题库中为其挑选“掌握较弱”和“掌握较好”的题目进行混合推荐，以保持学习挑战性同时提升自信心。Liu 等（2018）[37]针对主观题的部分正确答案引入模糊认知诊断机制，通过模糊集理论对主观与客观题答案进行综合分析，实现了部分正确答案的模糊化处理，为认知诊断模型在主观题上的应用奠定了基础。随后，该团队的Cheng 等（2019）[38]提出深度项目反应理论（DIRT），利用向量嵌入技术提升对题目与知识之间语义关系的理解，从而提高诊断与参数估计能力。在此基础上，该团队于2020年提出神经认知诊断框架[39]，将学习者和练习映射到潜在因子向量，通过多层神经网络建模其交互，兼顾可解释性与准确性；近期，Yang 等（2023）[19]基于 CDM 输出的知识掌握度，结合学习时间、题目多样性及协同需求，运用多目标进化算法自动生成个性化练习小组方案，有效平衡个体针对性与小组异质性，提升了学习效果与推荐可解释性。上述研究表明，基于认知诊断的方法在提高推荐精度和可解释性方面具有显著作用，但也面临Q矩阵构建成本高、难以捕捉动态学习行为等挑战。
+6. 基于知识追踪的学习推荐
+知识追踪（Knowledge Tracing, KT）通过动态跟踪学习者对各知识点的掌握状态，为推荐系统提供实时的认知输入。与仅考虑群体相似性的CFR相比，KT能够更准确地刻画个体知识状态演化，从而实现更具针对性的推荐。
+早期工作中，Wu 等（2020）[40]提出一种结合循环神经网络与深度KT的练习推荐方法，通过对学生答题序列进行知识概念预测，既解决了CFR在难度匹配上的不足，又充分利用历史知识状态信息。同年，Huo 等（2020）[41]将上下文表示融入 LSTM-KT 框架，利用知识建模强化个性化推荐，通过上下文感知的题目嵌入提升了预测精度与推荐准确率。随后，He 等（2022）[42]提出了一种基于概念先修关系的练习推荐方法，ER-KTCP。该方法首先利用KT模型获取学生对知识概念的实时掌握度，再结合概念先修图与题目难度信息，通过多目标评分函数对候选题目进行排序与筛选，实现了推荐结果的合理性与可解释性双提升。近期，Li 等（2024）[43]提出了 MLKT4Rec 框架，通过多任务学习同时优化知识追踪和推荐目标，将KT输出的掌握概率与练习代表性、信息量等多维特征融合，显著提高了模型的综合性能和学习路径推荐质量。
+
+
+（三）群体智能算法在推荐系统中的应用
+群体智能算法（Swarm Intelligence, SI）是一类受自然界群体行为启发的优化算法，典型代表包括粒子群优化（Particle Swarm Optimization, PSO）、蚁群算法（Ant Colony Optimization, ACO）、人工蜂群算法（Artificial Bee Colony, ABC）等。其核心思想在于通过大量个体之间的简单交互，协同探索解空间，呈现出强大的全局搜索能力与鲁棒性。在多目标约束优化问题频发的推荐系统场景中，群体智能算法凭借其高效的并行搜索机制和灵活的目标调控方式，成为近年来研究热点。
+在教育推荐系统中，推荐任务往往不仅要考虑学生知识状态与薄弱点匹配，还需同时满足题型多样性、难度梯度适配、认知负荷控制等多重约束，传统贪婪策略或启发式算法易陷入局部最优，难以实现全局协调优化。为此，研究者尝试将群体智能算法引入推荐策略的优化模块，作为推荐引擎的“后端搜索器”以提升整体性能。例如，Ibrahim 等（2018）[44]构建了基于本体的混合推荐系统，利用遗传算法进行优化，在解决课程推荐中的信息过载与特征映射困难方面表现出色； Esteban 等（2020）[45]进一步设计了基于遗传算法的策略融合机制，用于整合多个推荐子模型，显著提升了推荐的个性化与稳定性。
+不仅如此，近年来群体智能算法在教育推荐中与深度学习和图结构建模相结合，呈现出更强的多层融合趋势。Li 等（2020）[46]将多维知识图与蚁群算法结合，在学习路径推荐中通过信息素更新机制自适应辅导节点选择，有效控制认知负荷变化。Xia 等（2023）[47]提出一种结合知识图谱、深度知识追踪与改进蚁群算法的混合模型，首先通过知识图谱建构认知结构、利用深度追踪计算知识掌握度，再由蚁群算法进行路径优化，实现题序连贯性与难度梯度的平衡。此外，Liu 等（2023）[48]在其设计的学习路径推荐系统中，将基于知识图的粒子群融合模拟退火算法用于路径规划，以节点中心性和学习者掌握度为权重输入，使推荐路径更具个性化和教学反馈能力。
+
+（四）研究现状分析
+从知识追踪、个性化学习推荐到群体智能优化策略的研究现状可见，现有工作在模型创新和应用实践方面均取得了丰硕成果。知识追踪方面，深度学习方法逐渐替代传统概率模型，特别是基于记忆网络、注意力机制与图神经网络的研究大幅提升了模型对学生认知状态的刻画精度。GKT、GIKT 等模型通过引入知识结构建模与图消息传递机制，有效捕捉了学生对多知识点的复杂掌握过程。然而，多数图知识追踪方法仍依赖于静态图结构，缺乏对题目属性的动态感知与学习行为随时间演化的建模，难以全面反映学生真实的学习过程，特别是在“遗忘”与“题型差异”的影响建模上仍存短板。
+在个性化推荐研究方面，虽然内容推荐、协同过滤、混合策略等方法广泛应用于教育场景，但其本质大多沿袭电商平台用户建模的思路，缺乏对学习认知机制的深入建模。近年来，部分研究尝试将知识追踪输出作为推荐模型的输入，提升推荐的针对性与精准度，然而推荐策略多仍停留在基于局部掌握概率的简单排序或贪心筛选，难以满足题目多样性、难度递进性与认知负荷控制等多目标约束。此外，虽有部分工作引入遗传算法、蚁群优化等群体智能方法提升推荐质量，但尚未形成与图知识追踪深度耦合的优化框架，对推荐目标的全局协调能力亦有待增强。
+综上所述，当前研究在以下三个方面仍存在不足：（1）认知建模层面对题目属性与遗忘机制融合不足。现有图知识追踪（GKT）方法大多依赖静态预设的先修或相似关系，忽略了题目难度、题型多样性等属性对学习者认知状态的差异化影响；同时，也鲜有模型系统地引入遗忘效应，使得对“学习—遗忘—再学习”循环过程的动态刻画不足，难以真实反映学生在不同时间间隔内的知识衰减与重构。（2）推荐决策层面缺乏多目标全局优化机制。目前多数基于知识追踪的推荐策略仍以贪心排序或局部筛选为主，未能在题库海量、目标多样的场景下协调“薄弱点覆盖”、“难度梯度适配”、“题型多样性”及“认知负荷控制”等多重约束，导致推荐结果往往在某一维度取得短期优化，却在其他维度产生断层或偏颇。（3）缺乏图知识追踪与群体智能算法的深度耦合框架。虽然已有工作分别在知识追踪和群体智能优化领域取得进展，但两者的协同应用仍多停留在模块级别的串联——先追踪再优化，缺少统一的端到端优化流程，无法发挥图结构化信息和并行全局搜索的协同优势，从而限制了推荐系统的实时性与整体性能提升。基于此，本研究提出融合遗忘行为与题目属性的图交互知识追踪模型，并结合群体智能算法设计多目标全局优化推荐策略，旨在实现更真实的认知状态建模与更有效的个性化推荐，推动知识追踪与推荐系统的深度融合与协同进化。
+1.4 参考文献
+[1] G. Abdelrahman, Q. Wang, & B. Nunes, “Knowledge tracing: A survey,” ACM Comput. Surv., vol. 55, no. 11, pp. 1–37, 2023.
+[2] S. Shen, Q. Liu, Z. Huang, Y. Zheng, M. Yin, M. Wang, & E. Chen, “A survey of knowledge tracing: Models, variants, and applications,” IEEE Trans. Learn. Technol., 2024.
+[3] C. Piech, J. Bassen, J. Huang, S. Ganguli, M. Sahami, L. J. Guibas, & J. Sohl-Dickstein, “Deep knowledge tracing,” Adv. Neural Inf. Process. Syst., vol. 28, 2015.
+[4] C.-K. Yeung & D.-Y. Yeung, “Addressing two problems in deep knowledge tracing via prediction-consistent regularization,” in Proceedings of the fifth annual ACM conference on learning at scale, 2018, pp. 1–10.
+[5] Y. Lu, D. Wang, Q. Meng, & P. Chen, “Towards interpretable deep learning models for knowledge tracing,” in Artificial Intelligence in Education: 21st International Conference, AIED 2020, Ifrane, Morocco, July 6–10, 2020, Proceedings, Part II 21, 2020, pp. 185–190.
+[6] Y. Lu, D. Wang, P. Chen, Q. Meng, & S. Yu, “Interpreting deep learning models for knowledge tracing,” Int. J. Artif. Intell. Educ., vol. 33, no. 3, pp. 519–542, 2023.
+[7] J. Zhang, X. Shi, I. King, & D.-Y. Yeung, “Dynamic key-value memory networks for knowledge tracing,” in Proceedings of the 26th international conference on World Wide Web, 2017, pp. 765–774.
+[8] G. Abdelrahman & Q. Wang, “Knowledge tracing with sequential key-value memory networks,” in Proceedings of the 42nd international ACM SIGIR conference on research and development in information retrieval, 2019, pp. 175–184.
+[9] S. Liu, R. Zou, J. Sun, K. Zhang, L. Jiang, D. Zhou, & J. Yang, “A hierarchical memory network for knowledge tracing,” Expert Syst. Appl., vol. 177, p. 114935, 2021.
+[10] S. Pandey & G. Karypis, “A self-attentive model for knowledge tracing,” ArXiv Prepr. ArXiv190706837, 2019.
+[11] Y. Choi, Y. Lee, J. Cho, J. Baek, B. Kim, Y. Cha, D. Shin, C. Bae, & J. Heo, “Towards an appropriate query, key, and value computation for knowledge tracing,” in Proceedings of the seventh ACM conference on learning@ scale, 2020, pp. 341–344.
+[12] D. Shin, Y. Shim, H. Yu, S. Lee, B. Kim, & Y. Choi, “Saint+: Integrating temporal features for ednet correctness prediction,” in LAK21: 11th International Learning Analytics and Knowledge Conference, 2021, pp. 490–496.
+[13] A. Ghosh, N. Heffernan, & A. S. Lan, “Context-aware attentive knowledge tracing,” in Proceedings of the 26th ACM SIGKDD international conference on knowledge discovery & data mining, 2020, pp. 2330–2339.
+[14] H. Wu, R. Li, G. Sheng, & D. Wilson, “D-Transformer: A Deep Learning Model for Time Series Prediction,” in 2023 Asia-Pacific Conference on Image Processing, Electronics and Computers (IPEC), 2023, pp. 313–316.
+[15] H. Nakagawa, Y. Iwasawa, & Y. Matsuo, “Graph-based knowledge tracing: modeling student proficiency using graph neural network,” in IEEE/WIC/aCM international conference on web intelligence, 2019, pp. 156–163.
+
+[16] Y. Yang, J. Shen, Y. Qu, Y. Liu, K. Wang, Y. Zhu, W. Zhang, & Y. Yu, “GIKT: a graph-based interaction model for knowledge tracing,” in Machine learning and knowledge discovery in databases: European conference, ECML PKDD 2020, Ghent, Belgium, September 14–18, 2020, proceedings, part I, 2021, pp. 299–315.
+[17] S. Tong, Q. Liu, W. Huang, Z. Hunag, E. Chen, C. Liu, H. Ma, & S. Wang, “Structure-based knowledge tracing: An influence propagation view,” in 2020 IEEE international conference on data mining (ICDM), 2020, pp. 541–550.
+[18] Y. Lu, P. Chen, Y. Pian, & V. W. Zheng, “CMKT: Concept map driven knowledge tracing,” IEEE Trans. Learn. Technol., vol. 15, no. 4, pp. 467–480, 2022.
+[19] S. Yang, H. Wei, H. Ma, Y. Tian, X. Zhang, Y. Cao, & Y. Jin, “Cognitive diagnosis-based personalized exercise group assembly via a multi-objective evolutionary algorithm,” IEEE Trans. Emerg. Top. Comput. Intell., vol. 7, no. 3, pp. 829–844, 2023.
+[20] J. Cui, H. Qian, B. Jiang, & W. Zhang, “Leveraging pedagogical theories to understand student learning process with graph-based reasonable knowledge tracing,” in Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining, 2024, pp. 502–513.
+[21] W. Gao, Q. Liu, R. Li, Y. Zhao, H. Wang, L. Yre, F. Yao, & Z. Zhang, “Denoising programming knowledge tracing with a code graph-based tuning adaptor,” ArXiv Prepr. ArXiv250611107, 2025.
+[22] 吴正洋, 汤庸, & 刘海, “个性化学习推荐研究综述.,” J. Front. Comput. Sci. Technol., vol. 16, no. 1, 2022.
+[23] L. Antony Rosewelt & J. Arokia Renjit, “A content recommendation system for effective e-learning using embedded feature selection and fuzzy DT based CNN,” J. Intell. Fuzzy Syst., vol. 39, no. 1, pp. 795–808, 2020.
+[24] A. Pujahari & D. S. Sisodia, “Item feature refinement using matrix factorization and boosted learning based user profile generation for content-based recommender systems,” Expert Syst. Appl., vol. 206, p. 117849, 2022.
+[25] G. Linden, B. Smith, & J. York, “Amazon. com recommendations: Item-to-item collaborative filtering,” IEEE Internet Comput., vol. 7, no. 1, pp. 76–80, 2003.
+[26] J. Ni, Y. Cai, G. Tang, & Y. Xie, “Collaborative filtering recommendation algorithm based on TF-IDF and user characteristics,” Appl. Sci., vol. 11, no. 20, p. 9554, 2021.
+[27] S. H. Park & K. Kim, “Collaborative filtering recommendation system based on improved Jaccard similarity,” J. Ambient Intell. Humaniz. Comput., vol. 14, no. 8, pp. 11319–11336, 2023.
+[28] R. Mu, X. Zeng, & J. Zhang, “Heterogeneous information fusion based graph collaborative filtering recommendation,” Intell. Data Anal., vol. 27, no. 6, pp. 1595–1613, 2023.
+[29] M. E. Ibrahim, Y. Yang, D. L. Ndzi, G. Yang, & M. Al-Maliki, “Ontology-based personalized course recommendation framework,” IEEE Access, vol. 7, pp. 5180–5199, 2018.
+[30] 李浩君, 杨琳, & 张鹏威, “基于多目标优化策略的在线学习资源推荐方法,” 模式识别与人工智能, vol. 32, no. 4, pp. 306–316, 2019.
+[31] A. Esteban, A. Zafra, & C. Romero, “Helping university students to choose elective courses by using a hybrid multi-criteria recommendation system with genetic optimization,” Knowl.-Based Syst., vol. 194, p. 105385, 2020.
+
+[32] H. Zhu, F. Tian, K. Wu, N. Shah, Y. Chen, Y. Ni, X. Zhang, K.-M. Chao, & Q. Zheng, “A multi-constraint learning path recommendation algorithm based on knowledge map,” Knowl.-Based Syst., vol. 143, pp. 102–114, 2018.
+[33] 邢长征, 刘义海, 郭亚兰, & 郭家隆, “基于距离策略的知识图谱图卷积网络推荐算法.,” J. Comput. Eng. Appl., vol. 59, no. 21, 2023.
+[34] 陈玲洪 & 潘晓华, “基于知识图谱和读者画像的图书推荐研究,” 数据分析与知识发现, vol. 7, no. 12, pp. 164–171, 2023.
+[35] A. A. Rupp & J. Templin, “The effects of Q-matrix misspecification on parameter estimates and classification accuracy in the DINA model,” Educ. Psychol. Meas., vol. 68, no. 1, pp. 78–96, 2008.
+[36] J. De La Torre, “DINA model and parameter estimation: A didactic,” J. Educ. Behav. Stat., vol. 34, no. 1, pp. 115–130, 2009.
+[37] Q. Liu, R. Wu, E. Chen, G. Xu, Y. Su, Z. Chen, & G. Hu, “Fuzzy cognitive diagnosis for modelling examinee performance,” ACM Trans. Intell. Syst. Technol. TIST, vol. 9, no. 4, pp. 1–26, 2018.
+[38] S. Cheng, Q. Liu, E. Chen, Z. Huang, Z. Huang, Y. Chen, H. Ma, & G. Hu, “Dirt: Deep learning enhanced item response theory for cognitive diagnosis,” in Proceedings of the 28th ACM international conference on information and knowledge management, 2019, pp. 2397–2400.
+[39] F. Wang, Q. Liu, E. Chen, Z. Huang, Y. Chen, Y. Yin, Z. Huang, & S. Wang, “Neural cognitive diagnosis for intelligent education systems,” in Proceedings of the AAAI conference on artificial intelligence, 2020, vol. 34, no. 04, pp. 6153–6161.
+[40] Z. Wu, M. Li, Y. Tang, & Q. Liang, “Exercise recommendation based on knowledge concept prediction,” Knowl.-Based Syst., vol. 210, p. 106481, 2020.
+[41] Y. Huo, D. F. Wong, L. M. Ni, L. S. Chao, & J. Zhang, “Knowledge modeling via contextualized representations for LSTM-based personalized exercise recommendation,” Inf. Sci., vol. 523, pp. 266–278, 2020.
+[42] Y. He, H. Wang, Y. Pan, Y. Zhou, & G. Sun, “Exercise recommendation method based on knowledge tracing and concept prerequisite relations,” CCF Trans. Pervasive Comput. Interact., vol. 4, no. 4, pp. 452–464, 2022.
+[43] S. Li, X. Liu, X. Tang, X. Chen, & J. Pu, “MLKT4Rec: Enhancing Exercise Recommendation Through Multitask Learning With Knowledge Tracing,” IEEE Trans. Comput. Soc. Syst., 2024.
+[44] M. E. Ibrahim, Y. Yang, D. L. Ndzi, G. Yang, & M. Al-Maliki, “Ontology-based personalized course recommendation framework,” IEEE Access, vol. 7, pp. 5180–5199, 2018.
+[45] A. Esteban, A. Zafra, & C. Romero, “Helping university students to choose elective courses by using a hybrid multi-criteria recommendation system with genetic optimization,” Knowl.-Based Syst., vol. 194, p. 105385, 2020.
+[46] S. Li, H. Chen, X. Liu, J. Li, K. Peng, & Z. Wang, “Online personalized learning path recommendation based on saltatory evolution ant colony optimization algorithm,” Mathematics, vol. 11, no. 13, p. 2792, 2023.
+[47] L. G. XIA Ruiling, “Personalized learning path recommendation based on improved ant colony algorithm,” Journal of Shanghai University（Natural Science Edition）, vol. 29, no. 1. pp. 129–139, 2023.
+[48] C. Liu, H. Zhang, J. Zhang, Z. Zhang, & P. Yuan, “Design of a learning path recommendation system based on a knowledge graph,” Int. J. Inf. Commun. Technol. Educ. IJICTE, vol. 19, no. 1, pp. 1–18, 2023.
+
+二、研究方案
+2.1．研究目标、研究内容和拟解决的关键问题
+（一）研究目标
+1. 提出一种融合遗忘行为与题目属性的图交互知识追踪模型（FA-GIKT）
+传统图知识追踪往往依赖于预先设定的先修或相似关系，未能充分考虑习题本身的差异性和学生的遗忘行为，从而难以真实反映学习过程的动态变化。FA-GIKT模型在继承图神经网络与注意力机制优势的基础上，引入了习题的属性将其纳入节点间权重计算，使模型能够根据习题特性动态调整信息传递强度，从而更准确地捕捉“知识点–习题”之间的关联。此外，通过时间衰减因子对遗忘过程进行量化，FA-GIKT不仅能体现知识掌握在学习中的增长，还能反映知识在时隔一段时间后可能出现的减弱。与传统方法相比，这种做法显著提升了对学习者知识状态演变的预测精度与可解释性，使得个性化教学能够基于更真实的学习轨迹进行调整与决策。
+2. 构建基于FA-GIKT与群体智能算法的个性化习题推荐框架
+传统协同过滤仅依赖用户–题目交互矩阵，通过相似学生或题目进行推荐，却忽视学生实时的知识掌握情况和题目属性，易导致推荐结果同质化、难度不匹配，也无法及时响应学生的薄弱环节；而基于知识追踪的简单筛选多为贪心或局部优化，无法兼顾题库全局结构，缺乏难度梯度与多样性保证，容易使学生停留在固定题型或知识点上。为此，本研究将 FA-GIKT 生成的动态掌握概率与题目属性信息结合，通过粒子群优化或萤火虫算法等群体智能方法对题库进行全局搜索与动态加权，一方面精准匹配学生薄弱知识点，另一方面通过全局优化引入难度梯度和多样性约束，从而生成既符合学习需求又具针对性的个性化练习组合。
+（二）研究内容
+本研究旨在针对现有个性化习题推荐与知识追踪方法存在的局限，提出一种基于FA-GIKT与群体智能算法相结合的全新框架，以实现更精准的知识状态评估与更有效的习题推荐。
+1. 构建融合遗忘行为与题目属性的图交互知识追踪模型（FA-GIKT）
+为克服传统图知识追踪方法中存在的两大局限：一是过度依赖固定的知识点先修或相似关系，缺乏对题目属性的建模能力；二是忽视学生随时间变化产生的知识遗忘效应，本研究在 GIKT（Graphbased Interaction Knowledge Tracing, GIKT）框架上提出了一种融合遗忘行为与题目属性的图交互知识追踪模型——FA-GIKT（Forgetting-and-Attribute-aware Graph-based Interaction Knowledge Tracing）。模型整体架构如图1所示。
+
+图 1. FA-GIKT 模型结构图
+1）异构图构建与属性感知建模
+在初始阶段，FA-GIKT 构建了一个包含习题节点与知识点节点的异构图结构（不显式建模学生节点），图中包含以下几类边关系：
+习题—知识点：根据题目所属知识点的覆盖关系建立连接；
+知识点—知识点：依据教学大纲与语义信息构建先修与相似关系的边；
+每条边不仅体现结构连接，还引入题目属性信息计算边权重。
+在图神经网络编码过程中，FA-GIKT 使用图注意力机制（GAT）进行节点信息聚合。区别于传统 GAT 仅依赖节点表示计算注意力权重，FA-GIKT 将题目属性通过一组线性变换与非线性激活嵌入到“题目–知识点”边的注意力权重计算中，实现结构依赖与内容信息的双重融合。该机制显著提升了模型对不同题目在知识更新中差异化贡献的刻画能力。
+
+2）通用交互模块与时序建模
+如图1所示，模型在图交互知识追踪基础上，还引入了通用交互模块（General Interaction Module），通过将图嵌入、题目表征、历史交互状态共同输入到 RNN 结构中，进一步建模学生跨时间步的答题序列行为，提升对长期知识状态演化的预测能力。
+3）遗忘机制引入与知识状态动态更新
+为模拟学生在学习过程中的知识遗忘，FA-GIKT 设计了一个基于时间衰减的遗忘模块，综合考虑：
+上一次学习的时间间隔 
+重复学习该知识点的时间间隔 
+重复学习该知识点的次数 
+基于艾宾浩斯遗忘曲线思想，模型使用如下复合衰减函数对知识掌握概率进行动态更新：
+
+其中， 为当前图神经网络输出的知识掌握值， 为个性化记忆初始保留率， 为可调节的遗忘率参数。更新后的  会作为节点状态继续反馈到图卷积层，参与下一轮信息传递，从而实现“学习—遗忘—更新”的时序循环。
+2. 构建基于FA-GIKT与群体智能算法的个性化习题推荐框架
+在获得学生各知识点时序掌握概率后，本文设计了一套“精准过滤 + 全局优化”双轮驱动的个性化习题推荐框架，以充分发挥 FA‑GIKT 模型的诊断能力，并兼顾练习的针对性与多样性。框架整体流程如图2所示。
+
+图 2. 习题列表推荐
+首先，基于 FA‑GIKT 输出的知识掌握矩阵 ，系统识别出掌握水平低于阈值  的薄弱知识点集合：
+
+然后通过一系列预设规则，对题库进行精准过滤：一方面剔除仅涉及非薄弱知识点的题目，避免重复练习；另一方面根据学生整体掌握水平筛除过易或过难的题目，以确保候选集既覆盖薄弱环节，又与其认知负荷相匹配。由此生成的候选集既保持了针对性，又在规模上为后续优化提供了充足空间。
+在候选集基础上，框架引入粒子群优化（PSO）或萤火虫算法（FA）等群体智能技术，对题目组合进行全局搜索与迭代优化。具体而言，每个粒子／萤火虫个体被编码为一段固定长度的题目序列，并通过下述适应度函数进行评价：一是序列对薄弱知识点的覆盖度，二是题目难度与学生掌握水平的梯度匹配度，三是题型与知识点分布等多样性指标，四是题量与累计难度带来的认知负担上限。算法在每轮迭代中，根据个体历史最优与群体最优的反馈（PSO）或个体间吸引力（FA），动态调整题目序列，直至满足预设的迭代次数或适应度收敛条件。
+最终，系统将迭代得到的全局最优题目序列作为本轮练习的推荐结果，并将学生的答题行为反馈回 FA‑GIKT 模型，开启新一轮的知识状态更新与习题推荐闭环。该框架不仅能精准强化学生的薄弱环节，还能通过多样化的题型与合理的难度梯度，激发学习兴趣、控制认知负担，从而有效提升个性化练习的效率与效果。
+（三）拟解决的关键问题
+1. 如何将学生遗忘行为与题目属性有效融合到图交互知识追踪模型中，以提高对学习者知识状态演变的精准度与可解释性？
+2. 如何有效结合图交互知识追踪和群体智能算法，进行习题推荐算法？
+2.2．拟采取的研究方法、技术路线、实验方案及可行性分析
+（一）拟采取的研究方法
+1. 图交互知识追踪模型构建
+基于异构图神经网络，将学生、习题与知识点构建为三类节点，并引入“作答”“覆盖”“先修/相似”多种关系边。在此基础上，采用图注意力网络动态整合习题的属性（如难度、区分度、历史正确率等），使模型能够根据题目特征与知识结构自适应地更新学生的知识掌握状态。为了模拟学习中的遗忘过程，还将在节点更新中嵌入基于时间衰减的遗忘机制，以提升知识状态评估的真实性与可解释性。
+2. 群体智能优化推荐方法
+利用粒子群优化或萤火虫算法等群体智能搜索策略，对题库中的候选题目组合进行全局优化。将 FA–GIKT 模型输出的知识掌握概率作为约束条件，以覆盖薄弱知识点、匹配难度梯度、保证题型多样性及控制认知负担为目标，通过适应度函数引导算法迭代，最终生成既符合学生学习需求又具备多样性和层次性的个性化练习集。
+（二）技术路线
+本研究技术路线共分为四个相互衔接的阶段，涵盖从数据预处理到模型验证的完整闭环，如图 3 所示。
+
+图 3. 技术路线图
+1. 数据预处理与异构图构建
+本阶段首先选取具有丰富答题日志的公开教育数据集（如 EdNet、ASSISTments），对原始交互记录进行格式统一、缺失值补全与异常值剔除；随后，依据习题–知识点映射关系完成知识标签标注，并计算题目难度指数、区分度、题型类别、平均答题时长、尝试次数及历史正确率等多维属性，统一归一化处理。最后，仅在习题与知识点的子图中显式建模节点，并基于“覆盖”、“先修依赖”与“语义相似”三类关系构建边，同时将题目属性作为边特征存储，为后续图注意力网络提供结构与内容的双重输入。
+2. FA-GIKT模型实现与训练
+在 PyTorch + DGL 框架下复现 GIKT 基线，并在此基础上集成属性感知图注意力与复合遗忘模块。具体地，多头图注意力机制将题目属性通过线性映射与激活函数融合到“题目–知识点”边权重计算中，实现结构信息与特征信息的深度耦合；同时，设计包含时间间隔、重复间隔与重复次数三要素的指数衰减函数，模拟艾宾浩斯遗忘曲线下的掌握度更新。模型训练分为小规模预实验（用于调整注意力头数与遗忘率超参）和全量训练（在处理后数据集上以 Adam 优化器训练，并实时监测 AUC、RMSE 等指标），检验属性嵌入与遗忘机制对预测性能的提升效果。
+3. 习题推荐模块开发
+本阶段提出“精准过滤 + 群体智能优化”双轮驱动策略。首先，根据 FA‑GIKT 输出的知识掌握矩阵与预设阈值，剔除已掌握或难度不匹配的习题，构建针对学生薄弱知识点的候选集；接着，将候选题目映射为粒子群或萤火虫算法中的个体，并在适应度函数中融合薄弱覆盖度、难度梯度、多样性及认知负担等指标，通过迭代优化不断逼近最优题目组合。
+4. 性能评估与优化
+对所提方法开展全面评估：（1）将 FA‑GIKT 与 BKT、DKT、GIKT 等基线模型在 AUC、RMSE 上进行对比。（2）选取合适评价指标，开展 A/B 实验，评估不同推荐策略的性能。同时，利用雷达图、热力图及统计报表，对知识掌握分布演化与推荐覆盖情况进行可视化展示，为后续算法迭代提供决策依据。
+
+（三）实验方案
+实验设计包括以下三类：
+1. 知识追踪性能对比实验
+（1）横向对比：以 AUC、RMSE 等指标，与 BKT、DKT、GIKT 等基线模型进行横向对比，验证 FA-GIKT 在预测精度与可解释性方面的提升；
+（2）消融实验：分别构建去除属性模块（仅保留遗忘机制）、去除遗忘模块（仅保留属性嵌入）以及去除二者的简化 GIKT 模型，对比四种变体的 AUC、RMSE，评估属性嵌入和遗忘机制各自及联合对性能的贡献。
+2. 推荐效果评估实验
+（1）基于 Precision@K、Recall@K、ILD（多样性指数）、难度匹配度等指标，全面评估推荐结果的针对性、覆盖度与多样性。
+（2）考虑不同阈值设置（如薄弱点阈值、难度范围）的影响，对比单轮贪心策略与双轮“精准过滤 + 全局优化”策略的推荐质量差异。
+3. 参数敏感性分析
+（1）系统地调整关键参数（粒子数／萤火虫数、迭代次数、遗忘率、注意力头数），绘制性能-参数响应曲线，确定最优区间并规避过拟合风险。
+（2）在不同规模的题库上测试推荐模块的运行时长与收敛速度，评估算法的扩展性。
+
+（四）可行性分析
+1. 技术可行性
+本项目依托图神经网络与多头注意力机制，对学习行为建模已有成熟案例，且 PyTorch + DGL 等开源框架能够加速原型开发与性能调优。群体智能算法（如粒子群优化、萤火虫算法）在组合优化领域验证效果显著，可与深度模型预测结果无缝对接。团队成员具备扎实的算法实现与参数调优经验，能够保障模型在不同场景下的稳定运行。
+2. 数据资源保障
+EdNet、ASSISTments 等公开数据集提供了数百万条标准化答题日志与知识点标签，为模型训练与评估提供了丰富样本。校内合作单位可补充覆盖多门学科的真实题库元数据及学生学习行为记录，确保实验环境的真实性与多样化。前期已完成数据清洗与预处理流程验证，可快速生成高质量的训练集及验证集。
+3. 团队与管理
+本课题组由教育技术专家与算法工程师组成，成员具有跨学科研究与项目管理经验，能够实现理论与实践的高效融合。已建立月度阶段评审和每周研讨机制，及时识别风险并调整研究计划，确保各阶段目标按时完成。团队分工合理，协作流程清晰，可在既定时间内完成模型开发、实验验证及论文撰写等关键任务。
+
+
+
+三、论文大纲
+第一章 绪论
+    1.1 研究背景
+    1.2 研究意义
+    1.3 国内外研究现状
+        1.3.1 知识追踪的研究现状
+        1.3.2 推荐算法的研究现状
+    1.4 研究目的与内容
+    1.5 论文组织架构
+第二章 相关理论与技术基础
+    2.1深度知识追踪
+        2.1.1 基于循环神经网络的知识追踪
+        2.1.2 基于记忆网络的知识追踪
+        2.1.3 基于注意力机制的知识追踪
+        2.1.4 基于图神经网络的知识追踪
+    2.2 个性化学习推荐
+        2.2.1 基于内容的学习推荐
+        2.2.2 基于协同过滤的学习推荐
+        2.2.3 基于混合过滤的学习推荐
+        2.2.4 基于知识图谱的学习推荐
+        2.2.5 基于认知诊断的学习推荐
+        2.2.6 基于知识追踪的学习推荐
+    2.3 群体智能算法在推荐习题的应用
+    2.4 本章小结
+第三章 融合遗忘行为与题目属性的图交互知识追踪模型
+    3.1 问题分析
+    3.2 模型框架
+        3.2.1 嵌入层
+        3.2.2 嵌入传播
+        3.2.3 学生状态演化
+        3.2.4 遗忘模块
+        3.2.5 通用交互模块
+    3.3 实验
+        3.3.1 实验环境
+        3.3.2 数据集和预处理
+        3.3.3 训练过程
+    3.4 评价指标
+    3.5 实验结果分析
+        3.5.1 对比实验
+        3.5.2 消融实验
+        3.5.3 预测结果可视化
+    3.6 本章小结
+第四章 基于增强图交互知识追踪与群体智能算法的习题推荐模型
+    4.1 问题分析
+    4.2 模型框架
+    4.3 实验过程
+        4.3.1 数据分析
+        4.3.2 训练过程
+    4.4 评价指标
+    4.5 实验结果分析
+        4.5.1 对比实验
+        4.5.2 预测结果可视化
+    4.6 本章小结
+第五章 总结与展望
+    5.1 研究总结
+    5.2 论文贡献/主要创新点
+    5.2 不足与展望
+
+
+
+
+
+四、研究基础
+4.1．已参加过的有关研究工作和已取得的研究工作成绩
+学习了图知识追踪的相关基础知识，对学习者知识点掌握状态的聚合、更新预测过程有较清晰的认识。
+学习过算法设计与分析，对粒子群等群体智能算法的基本原理、优化策略及其在搜索空间中动态更新全局最优解的机制具有一定掌握。通过查阅相关文献，初步了解了粒子群优化算法在教育推荐系统中的应用前景，明确了其在平衡精度与多样性方面的潜力。
+[1] Yang, J., Fan, Z., Chen, S., & Wu, L. (2024). AIGC Empowered Blended Learning in University Course Design and Implementation: A Case Study. In Lecture Notes in Computer Science (pp. 188–200). Springer Nature Singapore.
+4.2．已具备的实验条件，尚缺少的实验条件和拟解决的途径
+已具备的实验条件方面，目前已完成对EdNet与ASSISTments等主流开放教育数据集的整理与初步预处理，具备稳定的数据来源与良好的数据清洗基础。同时，已搭建基于PyTorch的深度学习实验环境，掌握了图神经网络与知识追踪模型（如GIKT、DKT）的基本实现框架，为模型的复现与改进奠定了良好基础。此外，已有一定的模型训练与调参经验，可支持初步的对比实验和消融实验设计。
+尚缺少的实验条件主要体现在两个方面：一是缺乏高质量的、贴合粒子群算法优化需求的动态推荐标签设计与反馈机制，需要结合任务特性设计新的评价指标与损失函数；二是在粒子群算法与图知识追踪模型的融合实现上，仍需进一步研究其融合路径与交互结构，现阶段尚未完成完整算法框架的搭建与验证。
+针对以上问题，拟采取的解决途径包括：一方面，通过查阅已有在推荐系统中融合粒子群优化的研究方法，借鉴其适应度函数定义方式，并结合教育场景特点，自主设计匹配度、多样性、难度等复合目标的优化评价体系；另一方面，计划先以轻量化模型为基线，从模块级别逐步引入群体智能机制，并结合可视化手段分析其对推荐结果的影响，为后续的模型融合与优化迭代提供支撑。
+
+五、导师或指导小组意见
+
+1. 研究创新点需更明确
+（1）需清晰说明研究的核心创新（如动态推荐、群体智能算法的引入），并与其他同学的研究进行区分，突出差异（如模型选择、优化方法等）。
+2. 研究应用场景与实践验证不足
+（1）应进一步说明模型在实际教育场景（如在线学习平台）中的应用潜力；
+（2）建议考虑如何验证模型在实践中的效果，而不仅仅依赖理论指标。
+3. 数据来源与研究对象需明确
+（1）应明确所使用的教育数据集的学科、学段等信息；
+（2）建议聚焦某一学科或学段进行研究，避免过于泛化，增强研究的针对性和说服力。
+
+
