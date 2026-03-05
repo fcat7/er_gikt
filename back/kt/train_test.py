@@ -25,13 +25,7 @@ except ImportError:
 import torch
 from torch.cuda.amp import autocast, GradScaler
 
-# 自动检测 AMP 可用性
-use_amp = torch.cuda.is_available() 
-scaler = GradScaler(enabled=use_amp)
-if use_amp:
-    print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
-else:
-    print(f"⚠️ AMP Disabled")
+# AMP 将在加载配置后再设置
 
 # @add_fzq 2025-12-25 10:42:10 -------------------------------------------
 # 固定随机种子，保证实验可复现
@@ -79,6 +73,19 @@ if __name__ == '__main__':
     # 加载配置
     dataset_name = params.train.dataset_name
     config = Config(dataset_name=dataset_name)
+    
+    # @add_fzq 2026-03-05: 从参数配置中读取 AMP 设置
+    use_amp = params.train.amp_enabled and torch.cuda.is_available()
+    scaler = GradScaler(enabled=use_amp)
+    gradient_clip_norm = params.train.gradient_clip_norm
+    if use_amp:
+        print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
+    else:
+        print(f"⚠️ AMP Disabled (Using float32 for numerical stability)")
+    if gradient_clip_norm > 0:
+        print(f"✂️ Gradient Clipping Enabled (max_norm={gradient_clip_norm})")
+    else:
+        print(f"⚠️ Gradient Clipping Disabled")
 
     output_path = f'{config.path.LOG_DIR}/{time_now}.log'
     output_dir = os.path.dirname(output_path)  # 获取目录路径    
@@ -289,6 +296,10 @@ if __name__ == '__main__':
                     loss += reg_loss
                 
                 scaler.scale(loss).backward()
+                # @add_fzq 2026-03-05: 梯度裁剪防止数值不稳定 (特别是 AMP + GAT 场景)
+                if gradient_clip_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
                 

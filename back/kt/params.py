@@ -55,6 +55,8 @@ class TrainParams:
     prefetch_factor: int = 4
     k_fold: int = 1
     verbose: bool = True
+    amp_enabled: bool = False # 是否启用 AMP (自动混合精度)，对于复杂模型（如GAT）建议关闭
+    gradient_clip_norm: float = 1.0 # 梯度裁剪阈值，防止梯度爆炸 (0.0 表示禁用)
 
 @dataclass
 class HyperParameters:
