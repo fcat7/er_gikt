@@ -312,16 +312,16 @@ if __name__ == '__main__':
                 train_step += 1
                 
                 # Collect for global AUC (consistent with validation)
-                all_train_targets.extend(y_target_flat.detach().cpu().numpy())
-                all_train_probs.extend(y_prob.detach().cpu().numpy())
+                all_train_targets.append(y_target_flat.detach().cpu().numpy())
+                all_train_probs.append(y_prob.detach().cpu().numpy())
                 
                 # For diagnostic: collect without eval_mask filter
                 y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
                 y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
                 if len(y_target_flat_no_mask) > 0:
                     y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
-                    all_train_targets_no_mask.extend(y_target_flat_no_mask.detach().cpu().numpy())
-                    all_train_probs_no_mask.extend(y_prob_no_mask.detach().cpu().numpy())
+                    all_train_targets_no_mask.append(y_target_flat_no_mask.detach().cpu().numpy())
+                    all_train_probs_no_mask.append(y_prob_no_mask.detach().cpu().numpy())
                 
                 # Verbose: Per-batch logging (Optional, disabled by default to reduce noise)
                 if params.train.verbose:
@@ -347,9 +347,19 @@ if __name__ == '__main__':
             train_acc = train_right / train_total if train_total > 0 else 0
             # Calculate global training AUC (consistent with validation)
             if len(all_train_targets) > 0:
-                train_auc = roc_auc_score(all_train_targets, all_train_probs)
-                train_auc_no_mask = roc_auc_score(all_train_targets_no_mask, all_train_probs_no_mask) if len(all_train_targets_no_mask) > 0 else train_auc
-                eval_mask_filter_ratio = 1.0 - (len(all_train_targets) / max(1, len(all_train_targets_no_mask)))
+                arr_train_targets = np.concatenate(all_train_targets)
+                arr_train_probs = np.concatenate(all_train_probs)
+                train_auc = roc_auc_score(arr_train_targets, arr_train_probs)
+                
+                if len(all_train_targets_no_mask) > 0:
+                    arr_train_targets_no_mask = np.concatenate(all_train_targets_no_mask)
+                    arr_train_probs_no_mask = np.concatenate(all_train_probs_no_mask)
+                    train_auc_no_mask = roc_auc_score(arr_train_targets_no_mask, arr_train_probs_no_mask)
+                    eval_mask_filter_ratio = 1.0 - (len(arr_train_targets) / max(1, len(arr_train_targets_no_mask)))
+                else:
+                    train_auc_no_mask = train_auc
+                    eval_mask_filter_ratio = 0.0
+                    
                 # @add_fzq: 告警 - 如果有效样本过少
                 if train_total < train_set_len * 0.1:
                     print(f"{COLOR_LOG_Y}⚠️ Warning: Only {train_total} effective training samples (< 10% of {train_set_len}). Model may underfit. Consider increasing epochs or reducing stride.{COLOR_LOG_END}")
@@ -398,16 +408,16 @@ if __name__ == '__main__':
                 val_total += torch.sum(final_mask)
                 val_step += 1
 
-                all_targets.extend(y_target_flat.cpu().detach().numpy())
-                all_probs.extend(y_prob.cpu().detach().numpy())
+                all_targets.append(y_target_flat.cpu().detach().numpy())
+                all_probs.append(y_prob.cpu().detach().numpy())
 
                 # For diagnostic: collect without eval_mask filter
                 y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
                 y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
                 if len(y_target_flat_no_mask) > 0:
                     y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
-                    all_targets_no_mask.extend(y_target_flat_no_mask.cpu().detach().numpy())
-                    all_probs_no_mask.extend(y_prob_no_mask.cpu().detach().numpy())
+                    all_targets_no_mask.append(y_target_flat_no_mask.cpu().detach().numpy())
+                    all_probs_no_mask.append(y_prob_no_mask.cpu().detach().numpy())
 
                 if params.train.verbose:
                     if len(y_target_flat) > 0:
@@ -423,9 +433,17 @@ if __name__ == '__main__':
                     print(f'step: {val_batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             if len(all_targets) > 0:
-                val_auc = roc_auc_score(all_targets, all_probs)
-                val_auc_no_mask = roc_auc_score(all_targets_no_mask, all_probs_no_mask) if len(all_targets_no_mask) > 0 else val_auc
-                val_eval_mask_filter_ratio = 1.0 - (len(all_targets) / max(1, len(all_targets_no_mask)))
+                arr_targets = np.concatenate(all_targets)
+                arr_probs = np.concatenate(all_probs)
+                val_auc = roc_auc_score(arr_targets, arr_probs)
+                if len(all_targets_no_mask) > 0:
+                    arr_targets_no_mask = np.concatenate(all_targets_no_mask)
+                    arr_probs_no_mask = np.concatenate(all_probs_no_mask)
+                    val_auc_no_mask = roc_auc_score(arr_targets_no_mask, arr_probs_no_mask) 
+                    val_eval_mask_filter_ratio = 1.0 - (len(arr_targets) / max(1, len(arr_targets_no_mask)))
+                else:
+                    val_auc_no_mask = val_auc
+                    val_eval_mask_filter_ratio = 0.0
             else:
                 val_auc_no_mask = 0.0
                 val_eval_mask_filter_ratio = 0.0
@@ -446,25 +464,29 @@ if __name__ == '__main__':
             print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
             
             # @add_fzq: Eval Mask Diagnostic Output
+            n_train_targets = sum(len(arr) for arr in all_train_targets) if len(all_train_targets) > 0 else 0
+            n_train_targets_no_mask = sum(len(arr) for arr in all_train_targets_no_mask) if len(all_train_targets_no_mask) > 0 else 0
             if eval_mask_filter_ratio > 0:
                 print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: Filtered {eval_mask_filter_ratio*100:.1f}% of training samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={len(all_train_targets)})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={len(all_train_targets_no_mask)}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={n_train_targets})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={n_train_targets_no_mask}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering (all sequences are short or training non-overlapping windows)
-                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {len(all_train_targets)} samples are evaluation data)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {n_train_targets} samples are evaluation data)' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.4f}s | batches: {train_step}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'validate time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.4f}s | batches: {val_step}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.4f}s' + COLOR_LOG_END)
             
             # @add_fzq: Validation Eval Mask Diagnostic Output
+            n_val_targets = sum(len(arr) for arr in all_targets) if len(all_targets) > 0 else 0
+            n_val_targets_no_mask = sum(len(arr) for arr in all_targets_no_mask) if len(all_targets_no_mask) > 0 else 0
             if val_eval_mask_filter_ratio > 0:
                 print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: Filtered {val_eval_mask_filter_ratio*100:.1f}% of validation samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={len(all_targets)})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={len(all_targets_no_mask)}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={n_val_targets})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={n_val_targets_no_mask}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering in validation
-                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {len(all_targets)} samples are evaluation data)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {n_val_targets} samples are evaluation data)' + COLOR_LOG_END)
             
             # 保存输出至本地文件
             output_file.write(f'  Epoch {epoch+1} | ')
