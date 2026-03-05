@@ -214,6 +214,17 @@ def main():
 # cd h:\er_gikt\back\kt\data_utils
 
 # 运行 GAT 针对性抽样，举例抽样 50000 个人，设定复合题高比例阈值为 45%
-# python ednet_sample_gat.py --data_dir H:/dataset/EdNet/KT1 --questions_path H:/dataset/EdNet/contents/questions.csv --size 5000 --ms_threshold 0.45 
+# python ednet_sample_gat.py --data_dir H:/dataset/EdNet/KT1 --questions_path H:/dataset/EdNet/contents/questions.csv --size 5000 --ms_threshold 0.45
+# 
+# === 执行 GAT 定向采样 ===
+# 1. 序列长度校验 (基于 5 ~ 3000): 剩余 680516 人
+# 2. GAT高潜力者挖掘 (复合题比例 >= 0.45): 挖掘到核心用户 265255 人
+# 🎯 最终抽样完成！(抽取量: 5000)
+#    [目标验证] 抽取群体的平均序列长度: 162.0
+#    [目标验证] 抽取群体的综合大题占比: 66.6%
+#    (若随机抽样，此占比仅为全人群均值的 ~20-30%)
+
+# 正在将 5000 个用户的交互矩阵合体 (这并联成了您的骨架图)... 
+# ✅ GAT 优化的合并数据已生成: H:/dataset/EdNet/Ednet-KT1_GAT-Opt_size5000_msT45.csv
 if __name__ == "__main__":
     main()
