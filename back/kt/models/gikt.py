@@ -244,7 +244,9 @@ class GIKT(Module):
         if self.agg_method == 'kk_gat':
             # K-K 图的自注意力计算层
             self.kk_gat_attention = MultiheadAttention(embed_dim=emb_dim, num_heads=2, dropout=dropout_gnn, batch_first=True)
-            self.kk_q_fusion = Linear(emb_dim * 2, emb_dim)
+            # 融合层通道：支持问题嵌入 + 汇聚技能 + (可选)题目属性
+            q_feat_dim = getattr(self, 'q_feat_dim', 0)
+            self.kk_q_fusion = Linear(emb_dim * 2 + q_feat_dim, emb_dim)
 
 
         if pre_train:
@@ -555,8 +557,15 @@ class GIKT(Module):
             q_emb = self.emb_table_question(unique_q) # [Num_Unique_Q, Emb]
             if self.training and self.feature_noise_scale > 1e-6:
                 q_emb = q_emb + torch.randn_like(q_emb) * self.feature_noise_scale
+            
+            # 动态融合题目属性（如果可用）
+            if hasattr(self, 'q_feature_embedding'):
+                q_attrs = self.q_feature_embedding(unique_q) # [Num_Unique_Q, Q_Feat_Dim]
+                fusion_input = torch.cat([q_emb, pooled_skills, q_attrs], dim=-1)
+            else:
+                fusion_input = torch.cat([q_emb, pooled_skills], dim=-1)
                 
-            agg_unique_q = torch.tanh(self.kk_q_fusion(torch.cat([q_emb, pooled_skills], dim=-1)))
+            agg_unique_q = torch.tanh(self.kk_q_fusion(fusion_input))
             
             # Pack agg_list_unique to satisfy downstream needs
             agg_unique_s_neighbors = agg_s[unique_neighbors_cache[1]] 
