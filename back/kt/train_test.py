@@ -235,7 +235,6 @@ if __name__ == '__main__':
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
         
         best_fold_val_auc = 0.0
         fold_best_threshold = 0.5
@@ -253,6 +252,17 @@ if __name__ == '__main__':
         train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
         val_loader = DataLoader(val_set, shuffle=False, **loader_kwargs)
         
+        # @add_fzq: LR Scheduler Upgrade (CosineAnnealing with Warmup)
+        # Using OneCycleLR which inherently includes warmup (default pct_start=0.3) and cosine annealing
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=params.train.lr, 
+            steps_per_epoch=max(1, len(train_loader)), 
+            epochs=params.train.epochs,
+            pct_start=0.1, # 10% steps for warmup
+            anneal_strategy='cos'
+        )
+        
         print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(val_set)}")
         print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
         
@@ -267,8 +277,9 @@ if __name__ == '__main__':
             print('===================' + COLOR_LOG_Y + f'Epoch: {epoch + 1}'+ COLOR_LOG_END + '====================')
             # Training
             # ---------------------
-            print('-------------------training------------------')
-            
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f'-------------------training------------------ [LR: {current_lr:.6f}]')
+
             torch.set_grad_enabled(True)
             model.train()
             train_step = train_loss = train_total = train_right = train_auc = 0
@@ -326,6 +337,9 @@ if __name__ == '__main__':
                 scaler.step(optimizer)
                 scaler.update()
                 
+                # @add_fzq: per-batch scheduler step (OneCycleLR required)
+                scheduler.step()
+
                 # Metrics Calculation
                 y_prob = torch.sigmoid(y_hat_flat)
                 y_pred = torch.ge(y_prob, 0.5)
@@ -361,12 +375,11 @@ if __name__ == '__main__':
                     print(f'step: {batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             train_loss /= train_step if train_step > 0 else 1
-            # 修正：在 epoch 结束后调用，必须确保 optimizer 已执行过 step
-            # 使用 getattr 安全访问 _step_count (PyTorch 内部属性)
-            step_count = getattr(optimizer, '_step_count', 0) 
-            if train_step > 0 and step_count > 0:
-                scheduler.step()
-                
+            # 修正：不再按 epoch 步进，已改为按 batch 使用 OneCycleLR 步进
+            # step_count = getattr(optimizer, '_step_count', 0)
+            # if train_step > 0 and step_count > 0:
+            #     scheduler.step()
+
             train_acc = train_right / train_total if train_total > 0 else 0
             # Calculate global training AUC (consistent with validation)
             if len(all_train_targets) > 0:
