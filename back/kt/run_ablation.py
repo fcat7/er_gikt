@@ -18,19 +18,18 @@ def load_yaml_config(file_path):
 
 def get_metadata(processed_data_dir):
     meta_path = os.path.join(processed_data_dir, 'metadata.json')
-    config_path = os.path.join(processed_data_dir, 'config.json')
     
     if os.path.exists(meta_path):
-        with open(meta_path, 'r') as f:
-            data_config = json.load(f)
-    elif os.path.exists(config_path):
-        with open(config_path, 'r') as f:
+        with open(meta_path, 'r', encoding='utf-8') as f:
             data_config = json.load(f)
     else:
-        raise FileNotFoundError(f"Neither metadata.json nor config.json found in {processed_data_dir}")
+        raise FileNotFoundError(f"metadata.json not found in {processed_data_dir}")
         
-    num_question = data_config.get('num_questions') or data_config.get('n_question')
-    num_skill = data_config.get('num_skills') or data_config.get('n_skill')
+    num_question = data_config['metrics'].get('n_question')
+    num_skill = data_config['metrics'].get('n_skill')
+        
+    if num_question is None or num_skill is None:
+        raise ValueError(f"Could not parse num_question or num_skill from metadata.json in {processed_data_dir}")
         
     return num_question, num_skill
 
@@ -124,35 +123,77 @@ def main():
     print(f"Starting Ablation Study: {study_name}")
     print(f"Storage: {storage}")
 
-    # 对于消融实验，强烈建议使用 GridSampler 进行穷举，因为我们要查所有组合 (2^N)
-    grid_dict = {}
-    grid_size = 1
-    for k, v in ablation_config['search_space'].items():
-        if v.get('type') != 'categorical':
-            raise ValueError(f"Grid sampler requires all search_space entries to be categorical.")
-        choices = v.get('choices')
-        grid_dict[k] = choices
-        grid_size *= len(choices)
-
-    print(f"Total ablation combinations = {grid_size}")
+    sampler_type = ablation_config.get('sampler', 'grid')
     
-    sampler = GridSampler(search_space=grid_dict)
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        sampler=sampler,
-        direction="maximize",
-        load_if_exists=True
-    )
-
-    try:
-        study.optimize(
-            lambda trial: objective(trial, ablation_config, dataset, num_question, num_skill, device, data_config),
-            n_trials=grid_size
+    if sampler_type == 'custom':
+        custom_trials = ablation_config.get('custom_trials', [])
+        print(f"Using Custom Trials Execution: explicitly running {len(custom_trials)} predefined combinations.")
+        
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=storage,
+            direction="maximize",
+            load_if_exists=True
         )
-    except Exception as e:
-        print(f"Study Error: {e}")
-        return
+        
+        # 将自订组合塞进队列
+        existing_params = [t.params for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        
+        trials_to_run = 0
+        for ct in custom_trials:
+            # 拷贝一份字典避免直接修改原配置
+            target_params = ct.copy()
+            trial_name = target_params.pop('name', 'Unnamed Trial')
+            
+            if target_params not in existing_params:
+                print(f"Enqueueing pending trial: [{trial_name}] -> {target_params}")
+                study.enqueue_trial(target_params)
+                trials_to_run += 1
+            else:
+                print(f"Skipping trial [{trial_name}] as it is already completed in this study.")
+                
+        if trials_to_run > 0:
+            try:
+                study.optimize(
+                    lambda trial: objective(trial, ablation_config, dataset, num_question, num_skill, device, data_config),
+                    n_trials=trials_to_run
+                )
+            except Exception as e:
+                print(f"Study Error: {e}")
+                return
+        else:
+            print("All custom trials are already completed in the database!")
+            
+    else:
+        # 原本的 GridSampler 全穷举逻辑
+        grid_dict = {}
+        grid_size = 1
+        for k, v in ablation_config['search_space'].items():
+            if v.get('type') != 'categorical':
+                raise ValueError(f"Grid sampler requires all search_space entries to be categorical.")
+            choices = v.get('choices')
+            grid_dict[k] = choices
+            grid_size *= len(choices)
+
+        print(f"Total grid combinations = {grid_size}")
+        
+        sampler = GridSampler(search_space=grid_dict)
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=storage,
+            sampler=sampler,
+            direction="maximize",
+            load_if_exists=True
+        )
+
+        try:
+            study.optimize(
+                lambda trial: objective(trial, ablation_config, dataset, num_question, num_skill, device, data_config),
+                n_trials=grid_size
+            )
+        except Exception as e:
+            print(f"Study Error: {e}")
+            return
     
     print("\n================= Ablation Study Finished =================")
     

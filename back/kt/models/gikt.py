@@ -64,10 +64,7 @@ class AutonomousCognitiveCell(Module):
         # 2. 感知矛盾 (Perceive Contradiction)
         # 计算 Surprise
         # response_val 必须是 float 类型
-        with torch.no_grad(): # Surprise 是信号，不是 Loss 来源 (或者我们可以让它传导梯度以优化 predictor，但在 KT 中通常 predictor 是隐式的)
-            # 为保持 predictor 与主任务一致，我们允许梯度回传，让 predictor 学会准确预测
-            pass
-            
+        # 这里保留梯度回传，让 predictor 与主任务共同优化。
         surprise = torch.abs(response_val - pred_prob)
         surprise_vec = F.relu(self.surprise_encoder(surprise))
         
