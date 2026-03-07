@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 import numpy as np
 from scipy import sparse
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
 from sklearn.model_selection import KFold, ShuffleSplit
 from torch.utils.data import DataLoader, Subset
 from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
@@ -238,9 +238,7 @@ if __name__ == '__main__':
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
         
         best_fold_val_auc = 0.0
-        patience_counter = 0
-
-        # Data Loaders
+        fold_best_threshold = 0.5
         train_set = Subset(dataset_train_augment, train_indices)
         val_set = Subset(dataset_train_clean, test_indices)
         
@@ -469,11 +467,29 @@ if __name__ == '__main__':
                 else:
                     val_auc_no_mask = val_auc
                     val_eval_mask_filter_ratio = 0.0
+                
+                # 动态阈值搜索：分别寻找最大化 F1 和 ACC 的阈值
+                precision, recall, f1_thresholds = precision_recall_curve(arr_targets, arr_probs)
+                f1_scores = 2 * recall * precision / (recall + precision + 1e-10)
+                best_f1_idx = np.argmax(f1_scores)
+                best_val_f1 = f1_scores[best_f1_idx]
+                
+                # 为了把 ACC 压榨到极致，直接强搜最佳 ACC 的阈值
+                search_thresholds = np.linspace(0.2, 0.8, 61) # 从0.2到0.8扫描
+                acc_scores = [np.mean(arr_targets == (arr_probs >= t)) for t in search_thresholds]
+                best_acc_idx = np.argmax(acc_scores)
+                best_val_threshold = search_thresholds[best_acc_idx]
+                val_acc = acc_scores[best_acc_idx]
+
             else:
                 val_auc_no_mask = 0.0
                 val_eval_mask_filter_ratio = 0.0
+                val_acc = 0.0
+                best_val_threshold = 0.5
+                best_val_f1 = 0.0
+            
             val_loss /= val_step if val_step > 0 else 1
-            val_acc = val_right / val_total if val_total > 0 else 0
+            # val_acc = val_right / val_total if val_total > 0 else 0 (已由动态阈值替代)
             val_time = time.time() - val_start_time
             
             # Logging & Recording
@@ -486,7 +502,7 @@ if __name__ == '__main__':
             total_avg_batch_time = run_time / (val_step + train_step) if (val_step + train_step) > 0 else 0.0
             
             print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f}, f1: {best_val_f1:.4f}, thresh: {best_val_threshold:.2f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
             
             # @add_fzq: Eval Mask Diagnostic Output
             n_train_targets = sum(len(arr) for arr in all_train_targets) if len(all_train_targets) > 0 else 0
@@ -516,7 +532,7 @@ if __name__ == '__main__':
             # 保存输出至本地文件
             output_file.write(f'  Epoch {epoch+1} | ')
             output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}\n')
-            output_file.write(f'          | validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}\n')
+            output_file.write(f'          | validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f}, f1: {best_val_f1:.4f}, thresh: {best_val_threshold:.2f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}\n')
             output_file.write(f'          | train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.2f}s | ')
             output_file.write(f'test time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.2f}s | ')
             output_file.write(f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.2f}s\n')
@@ -540,6 +556,7 @@ if __name__ == '__main__':
             if val_auc > best_fold_val_auc:
                 improvement = val_auc - best_fold_val_auc
                 best_fold_val_auc = val_auc
+                fold_best_threshold = best_val_threshold
                 # Save best model logic could go here
                 patience_counter = 0
                 if params.train.verbose:
@@ -595,7 +612,7 @@ if __name__ == '__main__':
             if len(test_targets) > 0:
                 best_fold_test_auc = roc_auc_score(test_targets, test_probs)
             best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
-            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= 0.5))
+            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= fold_best_threshold))
 
         print('\n' + '='*70)
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
