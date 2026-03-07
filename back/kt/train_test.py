@@ -47,8 +47,9 @@ set_seed(42)
 def get_parser():
     parser = argparse.ArgumentParser(description="Train and Test GIKT Model")
     parser.add_argument('--full', action='store_true', help='Use full dataset (overrides --mode)')
-
     parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
+    parser.add_argument('--override', nargs='*', help='Override params, e.g. model.use_pid=False train.epochs=10')
+    parser.add_argument('--ablation_name', type=str, default='', help='If set, logs result to ablation_summary.csv')
     return parser
 
 def get_exp_config_path(isFull=False, name='default'):
@@ -70,6 +71,29 @@ if __name__ == '__main__':
     # 加载超参数
     exp_config_path = get_exp_config_path(isFull=args.full, name=args.name)
     params = HyperParameters.load(exp_config_path=exp_config_path)
+
+    # @add_fzq 2026-03-07: 动态覆写配置，支持消融实验
+    if args.override:
+        import ast
+        for override_item in args.override:
+            if '=' not in override_item: continue
+            key_path, value_str = override_item.split('=', 1)
+            try:
+                parsed_value = ast.literal_eval(value_str)
+            except (ValueError, SyntaxError):
+                parsed_value = value_str
+            
+            parts = key_path.split('.')
+            if len(parts) == 2:
+                section, key = parts
+                if hasattr(params, section):
+                    sub_obj = getattr(params, section)
+                    if hasattr(sub_obj, key):
+                        setattr(sub_obj, key, parsed_value)
+                        print(COLOR_LOG_Y + f"🔧 命令行覆写: {key_path} = {parsed_value}" + COLOR_LOG_END)
+                    else:
+                        print(f"⚠️ Warning: 找不到参数 {key} 于 {section}")
+
     # 加载配置
     dataset_name = params.train.dataset_name
     config = Config(dataset_name=dataset_name)
@@ -192,6 +216,7 @@ if __name__ == '__main__':
             drop_edge_rate=params.model.drop_edge_rate,
             feature_noise_scale=params.model.feature_noise_scale,
             hard_recap=params.model.hard_recap,
+            rank_k=params.model.rank_k,
             use_cognitive_model=params.model.use_cognitive_model,
             cognitive_mode=params.model.cognitive_mode,
             pre_train=params.model.pre_train,
@@ -603,6 +628,33 @@ if __name__ == '__main__':
     output_file.write(f'Total training time: {time_str}\n')
     
     output_file.close()
+
+    # 记录消融实验结果（如果指定了消融组别名）
+    if args.ablation_name:
+        import csv
+        csv_path = f'{config.path.LOG_DIR}/ablation_summary.csv'
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['Ablation Group', 'Date', 'Dataset', 'Mean AUC', 'Std AUC', 'Max AUC (Fold)', 'Min AUC (Fold)', 'Time'])
+            
+            mean_auc = np.mean(fold_results_test_auc)
+            std_auc = np.std(fold_results_test_auc)
+            max_auc_idx = np.argmax(fold_results_test_auc)
+            min_auc_idx = np.argmin(fold_results_test_auc)
+
+            writer.writerow([
+                args.ablation_name, 
+                time_now, 
+                dataset_name, 
+                f"{mean_auc:.4f}", 
+                f"{std_auc:.4f}", 
+                f"{fold_results_test_auc[max_auc_idx]:.4f} (F{max_auc_idx+1})",
+                f"{fold_results_test_auc[min_auc_idx]:.4f} (F{min_auc_idx+1})",
+                time_str
+            ])
+        print(COLOR_LOG_Y + f"📝 消融结果已追加至 {csv_path}" + COLOR_LOG_END)
 
     # Save Data
     # Optional: Save final model (from last fold, or logic to save best)
