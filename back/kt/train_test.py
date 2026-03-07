@@ -318,8 +318,14 @@ if __name__ == '__main__':
                     final_mask = mask_valid & eval_mask_valid
                     y_hat_flat = torch.masked_select(y_hat, final_mask)
                     y_target_flat = torch.masked_select(y_target_shift, final_mask)
-                    loss = loss_fun(y_hat_flat, y_target_flat)
                     
+                    # @add_fzq: Label Smoothing
+                    if params.train.label_smoothing > 0:
+                        y_target_flat_smoothed = y_target_flat * (1.0 - params.train.label_smoothing) + 0.5 * params.train.label_smoothing
+                        loss = loss_fun(y_hat_flat, y_target_flat_smoothed)
+                    else:
+                        loss = loss_fun(y_hat_flat, y_target_flat)
+
                     # Regularization
                     reg_loss = 0.0
                     if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
