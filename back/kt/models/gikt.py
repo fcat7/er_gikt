@@ -218,7 +218,6 @@ class GIKT(Module):
                     if q_feat_file:
                         q_features_path = os.path.join(data_dir, q_feat_file)
             if q_features_path and os.path.exists(q_features_path):
-                import numpy as np
                 q_feats = np.load(q_features_path).astype(np.float32)
                 self.q_feature_embedding = Embedding.from_pretrained(torch.from_numpy(q_feats), freeze=True)
                 self.q_feat_dim = q_feats.shape[1]

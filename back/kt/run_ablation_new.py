@@ -28,14 +28,15 @@ ABLATION_TARGETS = {
     #     "model.use_4pl_irt=False"
     # ],
     
-    # "E_agg_method: gcn": [
-    #     "model.agg_method=gcn"
-    # ],
+    "E_agg_method: gcn": [
+        "model.agg_method=gcn"
+    ],
     
     "F_old_gikt": [
         "model.use_pid=False",
         "model.use_cognitive_model=False",
-        "model.use_4pl_irt=False"
+        "model.use_4pl_irt=False",
+        "model.agg_method=gcn"
     ]
 }
 
