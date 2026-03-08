@@ -1,0 +1,51 @@
+# Full Configuration for Final Report
+# 用于最终汇报的完整配置
+
+[common]
+dataset_name = "assist09"
+device = "auto"
+seed = 42
+# model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_185358-gikt-assist09-full-min_len!5.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_202947-gikt-assist09-full-min_len_20.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+# model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_185358-gikt-assist09-full-min_len_5.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+
+[recommendation]
+# 推荐题目数
+K = 5
+
+# 冷启动阈值
+min_seq_len = 10
+
+# 候选集构建参数
+gate_p_min = 0.15           # 难度下限
+gate_p_max = 0.88           # 难度上限
+gaussian_sigma = 0.15       # 高斯核宽度
+confidence_discount = 0.7   # 未见技能折扣因子
+top_k_candidates = 200      # 候选集大小
+
+# 薄弱技能阈值
+weak_skill_threshold = 0.7
+
+# ZPD 校准参数
+zpd_base = 0.55
+zpd_w_integral = 0.1
+zpd_w_differential = 0.05
+zpd_tanh_lambda = 5.0
+
+# PSO 参数 (full 版本：精确)
+n_particles = 30
+n_iterations = 80
+archive_size = 50
+inertia_weight = 0.4
+c1 = 0.5
+c2 = 0.5
+
+[evaluation]
+# 离线评估参数
+use_full_test_set = true    # 使用全量测试集
+min_seq_len_eval = 10       # 评估时的最小序列长度
+
+[output]
+save_dir = "output/recommendation_full"
+plot_convergence = true
+save_detailed_results = true

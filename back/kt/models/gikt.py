@@ -1299,6 +1299,54 @@ class GIKT(Module):
         
         return result
 
+    @torch.no_grad()
+    def get_state_for_recommendation(self, question, response, mask,
+                                      interval_time=None, response_time=None):
+        """
+        [Inference-only] 运行 forward 并捕获学生序列末尾的认知状态，
+        供习题推荐模块使用。此方法不影响模型参数与训练行为。
+
+        Args:
+            question: [1, T] 学生作答题目序列 (LongTensor)
+            response: [1, T] 学生作答结果序列 0/1 (LongTensor)
+            mask:     [1, T] 有效掩码 (LongTensor)
+            interval_time: [1, T] 时间间隔 (FloatTensor, 可选)
+            response_time: [1, T] 作答耗时 (FloatTensor, 可选)
+
+        Returns:
+            dict:
+                'current_history_state': Tensor [1, K+1, emb_dim] — 注意力 Values
+                'cached_keys':           Tensor [1, K+1, emb_dim] — 注意力 Keys (可能为 None)
+                'pid_data':              tuple(pid_ema, pid_diff) 或 None
+        """
+        captured = {}
+        _orig_predict = self.predict
+
+        def _capturing_predict(qs_concat, current_history_state,q_target=None, pid_data=None, cached_keys=None):
+            # 每次 predict() 调用都更新 captured；循环结束时保留最后一次（即序列末位）
+            captured['current_history_state'] = current_history_state
+            captured['cached_keys'] = cached_keys
+            captured['pid_data'] = pid_data
+            return _orig_predict(qs_concat, current_history_state, q_target=q_target, pid_data=pid_data, cached_keys=cached_keys)
+
+        was_training = self.training
+        self.predict = _capturing_predict
+        self.eval()
+        try:
+            _ = self.forward(question, response, mask, interval_time=interval_time, response_time=response_time)
+        finally:
+            self.predict = _orig_predict
+            if was_training:
+                self.train()
+
+        if not captured:
+            # 边缘情况：序列长度 < 2，predict() 从未被调用
+            dev = next(self.parameters()).device
+            zero = torch.zeros(1, 1, self.emb_dim, device=dev)
+            return {'current_history_state': zero, 'cached_keys': zero, 'pid_data': None}
+
+        return captured
+
     def reset_parameters(self):
         """
         Initialize parameters with Xavier Uniform to match TensorFlow implementation
