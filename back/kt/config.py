@@ -29,7 +29,7 @@ class PathConfig:
         self.REPORT_DIR = _get('report_dir')
         
         # Ensure directories exist
-        for d in [self.PROCESSED_DATA_ROOT, self.OUTPUT_DIR, self.LOG_DIR, self.CHART_DIR, self.REPORT_DIR]:
+        for d in [self.PROCESSED_DATA_ROOT, self.MODEL_DIR, self.OUTPUT_DIR, self.LOG_DIR, self.CHART_DIR, self.REPORT_DIR]:
             os.makedirs(d, exist_ok=True)
 
 class DatasetConfig:
@@ -50,8 +50,8 @@ class Config:
         self.config_data = {
             'paths': {
                 'processed_data_root': 'data',
-                'model_dir': 'model',
                 'output_dir': 'output',
+                'model_dir': 'output/model',
                 'log_dir': 'output/logs',
                 'chart_dir': 'output/chart_data',
                 'report_dir': 'output/data_analysis_reports'
