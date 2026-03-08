@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
+from itertools import combinations
 from typing import Dict, Tuple, List, Optional
 from tqdm import tqdm
 
@@ -467,10 +468,14 @@ class DiscreteMOPSO:
         for iteration in range(self.n_iterations):
             for i in range(self.n_particles):
                 # 冯·诺依曼修正：全局最优选取拥挤距离最大的 Pareto 解，避免多样性坍塌
+                # 修复：当多个解拥挤距离相同（如 archive≤2 时均为 inf），随机选取而非总选 idx-0
                 if len(archive) > 0:
                     fitness_list = [af for ap, af in archive]
                     cd = self._compute_crowding_distance(fitness_list)
-                    gbest = archive[np.argmax(cd)][0]
+                    max_cd = max(cd)
+                    # 所有拥挤距离 ≥ max_cd*0.99 的解均作为候选 gbest（随机选取）
+                    top_indices = [j for j, d in enumerate(cd) if d >= max_cd * 0.99]
+                    gbest = archive[np.random.choice(top_indices)][0]
                 else:
                     gbest = particles[i]
                     
@@ -493,10 +498,13 @@ class DiscreteMOPSO:
                                           [self.evaluator.evaluate_combo(p, np.array([self.probs.get(q, 0.5) for q in p]), self.m_k, self.tau) for p in particles] + pbest_fitness)
             
         # 冯·诺依曼修正：返回拥挤距离最大的帕累托解作为最终推荐方案
+        # 修复：同样使用随机加权选取，避免 archive 退化时总返回第一个解
         if len(archive) > 0:
             fitness_list = [af for ap, af in archive]
             cd = self._compute_crowding_distance(fitness_list)
-            return archive[np.argmax(cd)][0]  
+            max_cd = max(cd)
+            top_indices = [j for j, d in enumerate(cd) if d >= max_cd * 0.99]
+            return archive[np.random.choice(top_indices)][0]
         return particles[0]
 
     def _update_particle(self, current, pbest, gbest) -> np.ndarray:
@@ -597,13 +605,11 @@ class RecommendationSystem:
         # 冷启动判断
         T = history_mask.sum().item()
         if T < 10:
-            ic(f"Cold start (T={T} < 10), using fallback strategy")
-            # 简化：随机推荐热门题
+            # Cold start 回退：随机热门题
             n_q = self.candidate_builder.n_question
             done_qs = history_q[history_mask.bool()].unique().cpu().numpy()
             all_qs = np.arange(1, n_q)
             avaliable_qs = np.setdiff1d(all_qs, done_qs)
-            # 随机挑选K题
             if len(avaliable_qs) < K:
                 rec = np.random.choice(all_qs, K, replace=True)
             else:
@@ -630,7 +636,12 @@ class RecommendationSystem:
         pso = DiscreteMOPSO(candidates, evaluator, cognitive_state, self.config)
         recommendation = pso.optimize(probs)
         
-        # 阶段 3: 后处理 (难度梯度排序: 按 P_q 升序，易→难)
+        # 阶段3: 后处理 (a) 多样性增强——贪心替换相似题; (b) 难度梯度排序: 按 P_q 升序，易→难
+        recommendation = self._enforce_diversity(
+            recommendation, candidates,
+            self.candidate_builder.qs_table.cpu().numpy(),
+            ild_threshold=0.70,
+        )
         rec_probs = np.array([probs[np.where(candidates == q)[0][0]].item() if q in candidates else 0.5 for q in recommendation])
         sorted_idx = np.argsort(rec_probs)
         recommendation = recommendation[sorted_idx]
@@ -640,4 +651,75 @@ class RecommendationSystem:
             'cognitive_state': cognitive_state,
             'rec_probs': rec_probs,
         }
+
+    # ------------------------------------------------------------------
+    def _enforce_diversity(self,
+                           recommendation: np.ndarray,
+                           candidates: np.ndarray,
+                           qs_table: np.ndarray,
+                           ild_threshold: float = 0.70) -> np.ndarray:
+        """
+        如果推荐列表的 ILD 低于阈値，贪心地用候选池中更多样的题目替换相似题。
+        本质上是一个幗次贪心 DPP-like 方法：循环 max_iter 次。
+        尝试替换相似度最高对中指数较大的题目，使 ILD 上升至阈値上方。
+        """
+        K = len(recommendation)
+        if K < 2:
+            return recommendation
+
+        def _ild(rec: np.ndarray) -> float:
+            vecs = qs_table[rec].astype(np.float32)
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            norms = np.where(norms < 1e-8, 1.0, norms)
+            vecs_n = vecs / norms
+            s = 0.0
+            cnt = 0
+            for i, j in combinations(range(K), 2):
+                s += 1.0 - float(np.dot(vecs_n[i], vecs_n[j]))
+                cnt += 1
+            return s / cnt if cnt > 0 else 0.0
+
+        rec = recommendation.copy()
+        cand_set_full = set(candidates.tolist())
+
+        for _attempt in range(K):            # 最多替换 K 次
+            if _ild(rec) >= ild_threshold:
+                break
+
+            # 找相似度最高的对 (i, j)，替换其中指数较大的頹 j
+            vecs = qs_table[rec].astype(np.float32)
+            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+            norms = np.where(norms < 1e-8, 1.0, norms)
+            vecs_n = vecs / norms
+
+            min_dissim, worst_j = float('inf'), -1
+            for i, j in combinations(range(K), 2):
+                d = 1.0 - float(np.dot(vecs_n[i], vecs_n[j]))
+                if d < min_dissim:
+                    min_dissim, worst_j = d, j  # j 总是较大索引
+
+            # 在候选池中找最能增大 ILD 的替换题
+            rec_set = set(rec.tolist())
+            best_gain, best_replacement = -float('inf'), -1
+            others = [k for k in range(K) if k != worst_j]
+            others_vn = vecs_n[others]
+
+            for cand in cand_set_full:
+                if cand in rec_set:
+                    continue
+                c_vec = qs_table[cand].astype(np.float32)
+                c_norm = np.linalg.norm(c_vec)
+                if c_norm < 1e-8:
+                    continue
+                c_vn = c_vec / c_norm
+                avg_dissim = float(np.mean(1.0 - others_vn @ c_vn))
+                if avg_dissim > best_gain:
+                    best_gain, best_replacement = avg_dissim, cand
+
+            # 只有替换确实能提升多样性时才操作
+            if best_replacement == -1 or best_gain <= min_dissim:
+                break
+            rec[worst_j] = best_replacement
+
+        return rec
 
