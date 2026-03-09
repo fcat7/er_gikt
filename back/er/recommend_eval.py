@@ -35,6 +35,22 @@ if _KT_DIR not in sys.path:
 from config import get_config, DEVICE  # back/kt/config.py
 from pso_recommend import RecommendationSystem  # back/er/pso_recommend.py
 
+# back/er/baselines 用 importlib 加载，绕开 back/kt/baselines 的命名冲突
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    'er_baselines',
+    os.path.join(_THIS_DIR, 'baselines', 'base_recommenders.py')
+)
+_ER_BASELINES = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_ER_BASELINES)
+
+_spec_kt = _ilu.spec_from_file_location(
+    'er_kt_baselines',
+    os.path.join(_THIS_DIR, 'baselines', 'kt_recommenders.py')
+)
+_ER_KT_BASELINES = _ilu.module_from_spec(_spec_kt)
+_spec_kt.loader.exec_module(_ER_KT_BASELINES)
+
 # 模块级 logger（在 main() 中统一初始化文件 + 控制台双 Handler）
 logger = logging.getLogger('recommend_eval')
 
@@ -94,8 +110,18 @@ class RecommendationEvaluator:
         logger.info(f"📂 Loading test data: {test_file}")
         self.test_data = pd.read_parquet(test_file)
 
-    def evaluate_offline(self, n_samples: int = None) -> pd.DataFrame:
-        """离线评估（留一法：取每条序列最后 K 步作为 GT）"""
+        # 保留路径供基线推荐器使用
+        self.train_parquet_path = train_file
+
+    def evaluate_offline(self, n_samples: int = None,
+                          recommender=None,
+                          mode_label: str = 'ours') -> pd.DataFrame:
+        """离线评估（留一法）
+        Args:
+            n_samples: 限制评估学生数
+            recommender: 如果为 None 使用 self.rec_system，否则用传入的基线推荐器
+            mode_label: 日志前缀，区分不同运行模式
+        """""
         results = []
         min_seq_len = self.config.get('min_seq_len', 10)
         K = self.config.get('K', 5)
@@ -111,10 +137,11 @@ class RecommendationEvaluator:
         if n_samples is not None:
             valid_df = valid_df.iloc[:n_samples]
 
-        logger.info(f"🚀 Evaluating {len(valid_df)} test samples (K={K}, min_seq_len={min_seq_len})")
+        _rec = recommender if recommender is not None else self.rec_system
+        logger.info(f"🚀 [{mode_label}] Evaluating {len(valid_df)} test samples (K={K}, min_seq_len={min_seq_len})")
         eval_start = time.time()
 
-        for idx, row in tqdm(valid_df.iterrows(), total=len(valid_df), desc="Evaluating"):
+        for idx, row in tqdm(valid_df.iterrows(), total=len(valid_df), desc=f"{mode_label}"):
             try:
                 sample_start = time.time()
                 all_qs = np.array(row['q_seq'])
@@ -139,7 +166,7 @@ class RecommendationEvaluator:
                     t_resp = np.array(row['t_response'], dtype=np.float32)[:T - K]
                     response_time = torch.tensor(t_resp.reshape(1, -1), dtype=torch.float32).to(DEVICE)
 
-                recommendation, info = self.rec_system.recommend(
+                recommendation, info = _rec.recommend(
                     history_q, history_r, history_mask, K=K,
                     interval_time=interval_time,
                     response_time=response_time,
@@ -155,6 +182,7 @@ class RecommendationEvaluator:
                     rec_probs=rec_probs, tau=tau, m_k=m_k
                 )
                 metrics['student_idx'] = idx
+                metrics['mode'] = mode_label
                 metrics['elapsed_s'] = round(time.time() - sample_start, 2)
                 results.append(metrics)
                 logger.debug(f"  Sample {idx:4d} | DM={metrics['dm']:.4f} "
@@ -268,11 +296,11 @@ class RecommendationEvaluator:
             'f1_score': f1,
         }
 
-    def print_results(self, df: pd.DataFrame):
+    def print_results(self, df: pd.DataFrame, mode_label: str = 'ours'):
         """打印评估结果汇总（主报告 + 参考说明）"""
-        print("=" * 60)
-        print("  OFFLINE RECOMMENDATION EVALUATION RESULTS")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info(f"  OFFLINE EVALUATION RESULTS  [{mode_label.upper()}]")
+        logger.info("=" * 60)
         # 主报告：有效教育推荐指标
         main_metrics = [
             ('skill_hit_rate', 'SkillHit@K '),
@@ -285,18 +313,55 @@ class RecommendationEvaluator:
             if col in df.columns:
                 mean_val = df[col].mean()
                 std_val = df[col].std()
-                logger.debug(f"  {label}: {mean_val:.4f} ± {std_val:.4f}")
                 logger.info(f"  {label}: {mean_val:.4f} ± {std_val:.4f}")
         if 'n_weak_skills' in df.columns:
             logger.info(f"  [avg weak skills per student: {df['n_weak_skills'].mean():.1f}]")
-        print("-" * 60)
+        logger.info("-" * 60)
         # 参考信息：干预式推荐中预期为0的传统指标
-        print("  [REF] Item-level metrics (expected 0.0 in interventional rec):")
+        logger.info("  [REF] Item-level metrics (expected 0.0 in interventional rec):")
         for col in ['precision', 'recall', 'f1_score']:
             if col in df.columns:
-                logger.debug(f"    {col:12s}: {df[col].mean():.4f}")
                 logger.info(f"    {col:12s}: {df[col].mean():.4f}")
-        print("=" * 60)
+        logger.info("=" * 60)
+
+
+def _print_comparison_table(all_results: dict):
+    """打印多方案对比表格（--baseline all 时使用）"""
+    metrics = [
+        ('dm',             'DM ↑        '),
+        ('wkc',            'WKC ↑       '),
+        ('ild',            'ILD ↑       '),
+        ('novelty',        'Novelty ↑   '),
+        ('skill_hit_rate', 'SkillHit ↑  '),
+    ]
+    modes = list(all_results.keys())
+    col_w = 16
+
+    logger.info("")
+    logger.info("=" * (14 + col_w * len(modes)))
+    logger.info("  COMPARISON TABLE")
+    logger.info("=" * (14 + col_w * len(modes)))
+    header = f"  {'Metric':<12}" + "".join(f"{m.upper():>{col_w}}" for m in modes)
+    logger.info(header)
+    logger.info("-" * (14 + col_w * len(modes)))
+    for col, label in metrics:
+        row = f"  {label:<12}"
+        best_val = -1.0
+        vals = []
+        for m in modes:
+            df = all_results[m]
+            v = df[col].mean() if col in df.columns else float('nan')
+            vals.append(v)
+            if not np.isnan(v) and v > best_val:
+                best_val = v
+        for v in vals:
+            tag = " *" if (not np.isnan(v) and abs(v - best_val) < 1e-6) else "  "
+            cell = f"{v:.4f}{tag}" if not np.isnan(v) else "  n/a  "
+            row += f"{cell:>{col_w}}"
+        logger.info(row)
+    logger.info("=" * (14 + col_w * len(modes)))
+    logger.info("  * = best in row")
+    logger.info("")
 
 
 def main():
@@ -310,6 +375,14 @@ def main():
                         help='Limit number of evaluated students')
     parser.add_argument('--debug', action='store_true',
                         help='Enable DEBUG level logging (per-sample details)')
+    parser.add_argument('--baseline', type=str, default=None,
+                        choices=['greedy', 'random', 'popularity', 'dkt_greedy', 'dkvmn_greedy', 'all'],
+                        help='Run baseline instead of (or alongside) full model. '
+                            'all = run ours + available baselines and print comparison table')
+    parser.add_argument('--dkt_model', type=str, default=None,
+                        help='Path to DKT checkpoint (.pt), used by dkt_greedy baseline')
+    parser.add_argument('--dkvmn_model', type=str, default=None,
+                        help='Path to DKVMN checkpoint (.pt), used by dkvmn_greedy baseline')
     args = parser.parse_args()
 
     # ---- 2. 时间戳（UTC+8 北京时间，对齐 train_test.py）----
@@ -322,13 +395,24 @@ def main():
     log_file = os.path.join(log_dir, f'recommend_eval_{time_now}.log')
 
     log_level = logging.DEBUG if args.debug else logging.INFO
+    # Windows GBK 终端防御：为 StreamHandler 强制 utf-8 输出
+    _stream_handler = logging.StreamHandler(sys.stdout)
+    _stream_handler.setFormatter(
+        logging.Formatter('[%(asctime)s] [%(levelname)-7s] %(message)s',
+                          datefmt='%Y-%m-%d %H:%M:%S')
+    )
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
     logging.basicConfig(
         level=log_level,
         format='[%(asctime)s] [%(levelname)-7s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
             logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout),
+            _stream_handler,
         ]
     )
     logger.info(f"{'='*60}")
@@ -380,15 +464,77 @@ def main():
     run_start = time.time()
     evaluator = RecommendationEvaluator(model_path, config_dict)
     n_eval = config_dict.get('n_eval_samples', None)
-    res_df = evaluator.evaluate_offline(n_samples=n_eval)
-    evaluator.print_results(res_df)
+
+    all_results = {}  # mode_label -> DataFrame
+
+    if args.baseline in (None, 'all'):
+        # 运行完整模型
+        res_df = evaluator.evaluate_offline(n_samples=n_eval, mode_label='ours')
+        evaluator.print_results(res_df, mode_label='ours')
+        all_results['ours'] = res_df
+
+    if args.baseline in ('greedy', 'all'):
+        greedy = _ER_BASELINES.GreedyRecommender(model_path, evaluator.metadata_path, config_dict, device=DEVICE)
+        res_g = evaluator.evaluate_offline(n_samples=n_eval, recommender=greedy, mode_label='greedy')
+        evaluator.print_results(res_g, mode_label='greedy')
+        all_results['greedy'] = res_g
+
+    if args.baseline in ('random', 'all'):
+        random_rec = _ER_BASELINES.RandomRecommender(model_path, evaluator.metadata_path, config_dict, device=DEVICE)
+        res_r = evaluator.evaluate_offline(n_samples=n_eval, recommender=random_rec, mode_label='random')
+        evaluator.print_results(res_r, mode_label='random')
+        all_results['random'] = res_r
+
+    if args.baseline in ('popularity', 'all'):
+        pop_rec = _ER_BASELINES.PopularityRecommender(
+            model_path, evaluator.metadata_path, config_dict,
+            device=DEVICE, train_parquet_path=evaluator.train_parquet_path
+        )
+        res_p = evaluator.evaluate_offline(n_samples=n_eval, recommender=pop_rec, mode_label='popularity')
+        evaluator.print_results(res_p, mode_label='popularity')
+        all_results['popularity'] = res_p
+
+    if args.baseline in ('dkt_greedy', 'all'):
+        dkt_model_path = args.dkt_model or config_dict.get('dkt_model_path', None)
+        if dkt_model_path and os.path.exists(dkt_model_path):
+            dkt_rec = _ER_KT_BASELINES.DKTGreedyRecommender(
+                dkt_model_path, evaluator.metadata_path, config_dict, device=DEVICE
+            )
+            res_dkt = evaluator.evaluate_offline(n_samples=n_eval, recommender=dkt_rec, mode_label='dkt_greedy')
+            evaluator.print_results(res_dkt, mode_label='dkt_greedy')
+            all_results['dkt_greedy'] = res_dkt
+        else:
+            logger.warning('⚠️ Skip dkt_greedy: missing --dkt_model (or dkt_model_path in TOML)')
+
+    if args.baseline in ('dkvmn_greedy', 'all'):
+        dkvmn_model_path = args.dkvmn_model or config_dict.get('dkvmn_model_path', None)
+        if dkvmn_model_path and os.path.exists(dkvmn_model_path):
+            dkvmn_rec = _ER_KT_BASELINES.DKVMNGreedyRecommender(
+                dkvmn_model_path, evaluator.metadata_path, config_dict, device=DEVICE
+            )
+            res_dkvmn = evaluator.evaluate_offline(n_samples=n_eval, recommender=dkvmn_rec, mode_label='dkvmn_greedy')
+            evaluator.print_results(res_dkvmn, mode_label='dkvmn_greedy')
+            all_results['dkvmn_greedy'] = res_dkvmn
+        else:
+            logger.warning('⚠️ Skip dkvmn_greedy: missing --dkvmn_model (or dkvmn_model_path in TOML)')
+
+    # ---- 对比表格（--baseline all 时打印）----
+    if args.baseline == 'all' and len(all_results) > 1:
+        _print_comparison_table(all_results)
+
+    # ---- 合并所有结果保存 ----
+    if not all_results:
+        raise RuntimeError('No evaluation results produced. Check baseline arguments and model paths.')
+    combined_df = pd.concat(all_results.values(), ignore_index=True)
 
     # ---- 8. 保存结果 ----
     output_dir = config_dict.get('save_dir', 'output/recommendation_sample' if not args.full else 'output/recommendation_full')
     os.makedirs(output_dir, exist_ok=True)
     config_type = 'full' if args.full else 'sample'
-    out_file = os.path.join(output_dir, f"recommend_eval_{config_type}.csv")
-    res_df.to_csv(out_file, index=False)
+    # 文件名包含 baseline 标签，避免覆盖
+    baseline_tag = f'_{args.baseline}' if args.baseline else ''
+    out_file = os.path.join(output_dir, f"recommend_eval_{config_type}{baseline_tag}.csv")
+    combined_df.to_csv(out_file, index=False)
 
     total_run = time.time() - run_start
     logger.info(f"💾 Results saved → {out_file}")
