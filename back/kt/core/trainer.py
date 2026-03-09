@@ -26,10 +26,12 @@ class BaseTrainer:
         self.k_fold = kwargs.get('k_fold', 5)
         self.batch_size = kwargs.get('batch_size', 64)
         self.learning_rate = kwargs.get('learning_rate', 1e-3)
+        self.reg_4pl = kwargs.get('reg_4pl', 1e-5)
+        self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
         
         self.criterion = nn.BCEWithLogitsLoss()
 
-    def _train_epoch(self, model, dataloader, optimizer):
+    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp):
         model.train()
         total_loss = 0
         total_samples = 0
@@ -39,7 +41,7 @@ class BaseTrainer:
             question = features[SeqFeatureKey.Q].to(torch.long)
             response = features[SeqFeatureKey.R].to(torch.long)
             mask = features[SeqFeatureKey.MASK].to(torch.bool)
-            eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+            eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
             interval = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
             r_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
             
@@ -51,46 +53,65 @@ class BaseTrainer:
             model_name = getattr(model, 'model_name', '').lower()
             cognitive_mode = getattr(model, 'cognitive_mode', None)
             
-            if model_name == 'dkt':
-                y_hat = model(question, response, mask)
-                eps = 1e-6
-                y_hat = torch.clamp(y_hat, eps, 1-eps)
-                preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
-            elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
-                y_hat = model(question, response, mask, interval, r_time)
-                if y_hat.shape[1] == question.shape[1]: 
-                    preds = y_hat[:, :-1]
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                if model_name == 'dkt':
+                    y_hat = model(question, response, mask)
+                    eps = 1e-6
+                    y_hat = torch.clamp(y_hat, eps, 1-eps)
+                    preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
+                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                    y_hat = model(question, response, mask, interval, r_time)
+                    if y_hat.shape[1] == question.shape[1]: 
+                        preds = y_hat[:, :-1]
+                    else:
+                        preds = y_hat
+                elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                    y_hat = model(question, response, mask, interval, r_time)
+                    preds = y_hat[:, 1:]
                 else:
-                    preds = y_hat
-            elif model_name in ['gikt'] or cognitive_mode == 'classic':
-                y_hat = model(question, response, mask, interval, r_time)
-                preds = y_hat[:, 1:]
-            else:
-                y_hat = model(question, response, mask)
-                preds = y_hat[:, 1:]
+                    y_hat = model(question, response, mask)
+                    preds = y_hat[:, 1:]
 
-            targets = response[:, 1:].float()
-            mask_valid = mask[:, 1:]
-            eval_mask_valid = eval_mask[:, 1:]
-            
-            final_mask = mask_valid & eval_mask_valid
-            
-            if final_mask.sum() == 0:
-                continue
+                targets = response[:, 1:].float()
+                mask_valid = mask[:, 1:]
+                eval_mask_valid = eval_mask[:, 1:]
                 
-            preds_filtered = preds[final_mask]
-            targets_filtered = targets[final_mask]
+                final_mask = mask_valid & eval_mask_valid
+                
+                if final_mask.sum() == 0:
+                    continue
+                    
+                preds_filtered = preds[final_mask]
+                targets_filtered = targets[final_mask]
+                
+                loss = self.criterion(preds_filtered, targets_filtered)
+
+                # 添加 4PL 正则化 (针对 GIKT)
+                reg_loss = 0.0
+                if hasattr(model, 'discrimination_gain'): 
+                    reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                if hasattr(model, 'discrimination_bias'): 
+                    reg_loss += self.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
+                if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                    reg_loss += self.reg_4pl * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2)
+                    reg_loss += self.reg_4pl * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                loss += reg_loss
+
+            scaler.scale(loss).backward()
             
-            loss = self.criterion(preds_filtered, targets_filtered)
-            loss.backward()
-            optimizer.step()
+            if self.gradient_clip_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip_norm)
+                
+            scaler.step(optimizer)
+            scaler.update()
             
             total_loss += loss.item() * preds_filtered.size(0)
             total_samples += preds_filtered.size(0)
             
         return total_loss / total_samples if total_samples > 0 else 0
 
-    def _evaluate(self, model, dataloader):
+    def _evaluate(self, model, dataloader, use_amp):
         model.eval()
         all_preds = []
         all_targets = []
@@ -101,7 +122,7 @@ class BaseTrainer:
                 question = features[SeqFeatureKey.Q].to(torch.long)
                 response = features[SeqFeatureKey.R].to(torch.long)
                 mask = features[SeqFeatureKey.MASK].to(torch.bool)
-                eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
+                eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
                 interval = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
                 r_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
                 
@@ -111,25 +132,26 @@ class BaseTrainer:
                 model_name = getattr(model, 'model_name', '').lower()
                 cognitive_mode = getattr(model, 'cognitive_mode', None)
                 
-                if model_name == 'dkt':
-                    y_hat = model(question, response, mask)
-                    preds = y_hat[:, :-1]
-                    preds = torch.nan_to_num(preds, nan=0.0)
-                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
-                    y_hat = model(question, response, mask, interval, r_time)
-                    y_hat = torch.sigmoid(y_hat)
-                    if y_hat.shape[1] == question.shape[1]:
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    if model_name == 'dkt':
+                        y_hat = model(question, response, mask)
                         preds = y_hat[:, :-1]
+                        preds = torch.nan_to_num(preds, nan=0.0)
+                    elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                        y_hat = model(question, response, mask, interval, r_time)
+                        y_hat = torch.sigmoid(y_hat)
+                        if y_hat.shape[1] == question.shape[1]:
+                            preds = y_hat[:, :-1]
+                        else:
+                            preds = y_hat
+                    elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                        y_hat = model(question, response, mask, interval, r_time)
+                        y_hat = torch.sigmoid(y_hat)
+                        preds = y_hat[:, 1:]
                     else:
-                        preds = y_hat
-                elif model_name in ['gikt'] or cognitive_mode == 'classic':
-                    y_hat = model(question, response, mask, interval, r_time)
-                    y_hat = torch.sigmoid(y_hat)
-                    preds = y_hat[:, 1:]
-                else:
-                    y_hat = model(question, response, mask)
-                    y_hat = torch.sigmoid(y_hat)
-                    preds = y_hat[:, 1:]
+                        y_hat = model(question, response, mask)
+                        y_hat = torch.sigmoid(y_hat)
+                        preds = y_hat[:, 1:]
 
                 targets = response[:, 1:].float()
                 mask_valid = mask[:, 1:]
@@ -199,15 +221,19 @@ class BaseTrainer:
                 config=self.config, 
                 **self.kwargs
             )
-            optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
+            optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.kwargs.get('weight_decay', 1e-5))
+            
+            # 初始化 AMP
+            use_amp = self.kwargs.get('amp_enabled', True) and torch.cuda.is_available()
+            scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
             
             best_val_auc = 0.0
             patience_counter = 0
             
             for epoch in range(self.epochs):
                 start_time = time.time()
-                train_loss = self._train_epoch(model, train_loader, optimizer)
-                val_auc, val_acc = self._evaluate(model, val_loader)
+                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp)
+                val_auc, val_acc = self._evaluate(model, val_loader, use_amp)
                 end_time = time.time()
                 
                 print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")

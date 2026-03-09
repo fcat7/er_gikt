@@ -55,6 +55,9 @@ class TrainParams:
     prefetch_factor: int = 4
     k_fold: int = 1
     verbose: bool = True
+    amp_enabled: bool = False # 是否启用 AMP
+    gradient_clip_norm: float = 1.0 # 梯度裁剪阈值
+    label_smoothing: float = 0.0 # BCF 损失的标签平滑 (如 0.05-0.1)
 
 @dataclass
 class HyperParameters:

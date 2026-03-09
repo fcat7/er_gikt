@@ -42,17 +42,33 @@ class ModelFactory:
                 ).to(device)
 
             model = GIKT(
-                num_question=num_question, 
+                num_question=num_question,
                 num_skill=num_skill,
                 q_neighbors=q_neighbors,
                 s_neighbors=s_neighbors,
                 qs_table=qs_table,
                 emb_dim=kwargs.get('emb_dim', 100),
                 agg_hops=kwargs.get('agg_hops', 3),
-                dropout_linear=kwargs.get('dropout_linear', 0.2),
-                dropout_gnn=kwargs.get('dropout_gnn', 0.4),
+                dropout_linear=kwargs.get('dropout_linear', 0.1),
+                dropout_gnn=kwargs.get('dropout_gnn', 0.1),
+                drop_edge_rate=kwargs.get('drop_edge_rate', 0.1),
+                feature_noise_scale=kwargs.get('feature_noise_scale', 0.01),
+                hard_recap=kwargs.get('hard_recap', True),
+                rank_k=kwargs.get('rank_k', 10),
                 use_cognitive_model=kwargs.get('use_cognitive_model', True),
-                cognitive_mode=kwargs.get('cognitive_mode', 'autonomous'),
+                cognitive_mode=kwargs.get('cognitive_mode', 'classic'),
+                pre_train=kwargs.get('pre_train', False),
+                data_dir=config.PROCESSED_DATA_DIR if config else None,
+                agg_method=kwargs.get('agg_method', 'gcn'),
+                recap_source=kwargs.get('recap_source', 'hsei'),
+                use_pid=kwargs.get('use_pid', True),
+                pid_mode=kwargs.get('pid_mode', 'domain'),
+                pid_ema_alpha=kwargs.get('pid_ema_alpha', 0.1),
+                pid_lambda=kwargs.get('pid_lambda', 1.0),
+                pid_init_i=kwargs.get('pid_init_i', 0.5),
+                pid_init_d=kwargs.get('pid_init_d', 0.1),
+                guessing_prob_init=kwargs.get('guessing_prob_init', 0.05),
+                slipping_prob_init=kwargs.get('slipping_prob_init', 0.02),
                 use_4pl_irt=kwargs.get('use_4pl_irt', True)
             ).to(device)
 

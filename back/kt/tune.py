@@ -18,25 +18,19 @@ def load_yaml_config(file_path):
 
 def get_metadata(processed_data_dir):
     meta_path = os.path.join(processed_data_dir, 'metadata.json')
-    config_path = os.path.join(processed_data_dir, 'config.json')
     
     if os.path.exists(meta_path):
-        with open(meta_path, 'r') as f:
-            data_config = json.load(f)
-    elif os.path.exists(config_path):
-        with open(config_path, 'r') as f:
+        with open(meta_path, 'r', encoding='utf-8') as f:
             data_config = json.load(f)
     else:
-        raise FileNotFoundError(f"Neither metadata.json nor config.json found in {processed_data_dir}")
+        raise FileNotFoundError(f"metadata.json not found in {processed_data_dir}")
+
+    num_question = data_config['metrics'].get('n_question')
+    num_skill = data_config['metrics'].get('n_skill')
         
-    num_question = data_config.get('num_questions') or data_config.get('n_question')
-    num_skill = data_config.get('num_skills') or data_config.get('n_skill')
-    
-    if num_question is None and 'metrics' in data_config:
-        num_question = data_config['metrics'].get('n_question')
-    if num_skill is None and 'metrics' in data_config:
-        num_skill = data_config['metrics'].get('n_skill')
-        
+    if num_question is None or num_skill is None:
+        raise ValueError(f"Could not parse num_question or num_skill from metadata.json in {processed_data_dir}")
+
     return num_question, num_skill
 
 def sample_hyperparameters(trial, search_space):

@@ -1,10 +1,10 @@
-import os
+﻿import os
 import json
 import numpy as np
 import torch
 import math
 import torch.nn.functional as F
-from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell
+from torch.nn import Module, Embedding, Linear, ModuleList, Dropout, LSTMCell, MultiheadAttention
 
 from config import DEVICE
 
@@ -64,10 +64,7 @@ class AutonomousCognitiveCell(Module):
         # 2. 感知矛盾 (Perceive Contradiction)
         # 计算 Surprise
         # response_val 必须是 float 类型
-        with torch.no_grad(): # Surprise 是信号，不是 Loss 来源 (或者我们可以让它传导梯度以优化 predictor，但在 KT 中通常 predictor 是隐式的)
-            # 为保持 predictor 与主任务一致，我们允许梯度回传，让 predictor 学会准确预测
-            pass
-            
+        # 这里保留梯度回传，让 predictor 与主任务共同优化。
         surprise = torch.abs(response_val - pred_prob)
         surprise_vec = F.relu(self.surprise_encoder(surprise))
         
@@ -210,8 +207,8 @@ class GIKT(Module):
         self.q_neighbor_size = self.q_neighbors_t.shape[1]
         self.s_neighbor_size = self.s_neighbors_t.shape[1]
 
-        # 简化 GAT 相关初始化
-        if self.agg_method == 'gat' and data_dir is not None:
+        # 简化 qk_gat 相关初始化
+        if self.agg_method in ['qk_gat', 'kk_gat'] and data_dir is not None:
             metadata_path = os.path.join(data_dir, 'metadata.json')
             q_features_path = None
             if os.path.exists(metadata_path):
@@ -221,18 +218,32 @@ class GIKT(Module):
                     if q_feat_file:
                         q_features_path = os.path.join(data_dir, q_feat_file)
             if q_features_path and os.path.exists(q_features_path):
-                import numpy as np
                 q_feats = np.load(q_features_path).astype(np.float32)
                 self.q_feature_embedding = Embedding.from_pretrained(torch.from_numpy(q_feats), freeze=True)
                 self.q_feat_dim = q_feats.shape[1]
-                self.gat_attn_layers = ModuleList([
-                    Linear(emb_dim * 2 + self.q_feat_dim, 1) for _ in range(agg_hops)
-                ])
-                for layer in self.gat_attn_layers:
-                    torch.nn.init.xavier_uniform_(layer.weight)
+                
+                # ONLY INITIALIZE THESE IF qk_gat
+                if self.agg_method == 'qk_gat':
+                    self.gat_attn_layers = ModuleList([
+                        Linear(emb_dim * 2 + self.q_feat_dim, 1) for _ in range(agg_hops)
+                    ])
+                    for layer in self.gat_attn_layers:
+                        torch.nn.init.xavier_uniform_(layer.weight)
             else:
-                print(f"Warning: GAT selected but q_features not found. Fallback to GCN.")
-                self.agg_method = 'gcn'
+                if self.agg_method == 'qk_gat':
+                    print(f"Warning: QK-GAT selected but q_features not found. Fallback to GCN.")
+                    self.agg_method = 'gcn'
+                else:
+                    print(f"Warning: KK-GAT selected but q_features not found. Attributes will be ignored.")
+                    self.q_feat_dim = 0
+
+        if self.agg_method == 'kk_gat':
+            # K-K 图的自注意力计算层
+            self.kk_gat_attention = MultiheadAttention(embed_dim=emb_dim, num_heads=2, dropout=dropout_gnn, batch_first=True)
+            # 融合层通道：支持问题嵌入 + 汇聚技能 + (可选)题目属性
+            q_feat_dim = getattr(self, 'q_feat_dim', 0)
+            self.kk_q_fusion = Linear(emb_dim * 2 + q_feat_dim, emb_dim)
+
 
         if pre_train:
             # 使用预训练之后的向量
@@ -520,8 +531,44 @@ class GIKT(Module):
                     emb = emb + torch.randn_like(emb) * self.feature_noise_scale
                 emb_unique_neighbors.append(emb)
         
-        # 对所有唯一问题执行一次性聚合
-        agg_unique_q, agg_list_unique = self.aggregate(emb_unique_neighbors, unique_neighbors_cache)
+        if self.agg_method == 'kk_gat':
+            # --- kk_gat decoupled approach ---
+            all_s = torch.arange(self.num_skill, device=DEVICE)
+            emb_s = self.emb_table_skill(all_s) # [Num_K, Emb]
+            if self.training and self.feature_noise_scale > 1e-6:
+                emb_s = emb_s + torch.randn_like(emb_s) * self.feature_noise_scale
+                
+            # K-K multihead attention (expects [batch=1, seq_len, emb_dim])
+            emb_s_batch = emb_s.unsqueeze(0) 
+            agg_s_batch, _ = self.kk_gat_attention(emb_s_batch, emb_s_batch, emb_s_batch)
+            agg_s = agg_s_batch.squeeze(0) # [Num_K, Emb]
+            
+            # Average pooling for unique questions
+            qs_multi_hot = self.qs_table[unique_q].float() # [Num_Unique_Q, Num_K]
+            pooled_skills = torch.matmul(qs_multi_hot, agg_s)
+            skill_counts = qs_multi_hot.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            pooled_skills = pooled_skills / skill_counts
+            
+            # Question embeddings for unique questions
+            q_emb = self.emb_table_question(unique_q) # [Num_Unique_Q, Emb]
+            if self.training and self.feature_noise_scale > 1e-6:
+                q_emb = q_emb + torch.randn_like(q_emb) * self.feature_noise_scale
+            
+            # 动态融合题目属性（如果可用）
+            if hasattr(self, 'q_feature_embedding'):
+                q_attrs = self.q_feature_embedding(unique_q) # [Num_Unique_Q, Q_Feat_Dim]
+                fusion_input = torch.cat([q_emb, pooled_skills, q_attrs], dim=-1)
+            else:
+                fusion_input = torch.cat([q_emb, pooled_skills], dim=-1)
+                
+            agg_unique_q = torch.tanh(self.kk_q_fusion(fusion_input))
+            
+            # Pack agg_list_unique to satisfy downstream needs
+            agg_unique_s_neighbors = agg_s[unique_neighbors_cache[1]] 
+            agg_list_unique = [agg_unique_q, agg_unique_s_neighbors]
+        else:
+            # 对所有唯一问题执行一次性聚合
+            agg_unique_q, agg_list_unique = self.aggregate(emb_unique_neighbors, unique_neighbors_cache)
         
         # 4. 创建查找机制
         # [Level 2] 直接映射回 [Batch, Seq, Emb] 形状
@@ -974,9 +1021,9 @@ class GIKT(Module):
         
         for i in range(self.agg_hops):
             for j in range(self.agg_hops - i):
-                if self.agg_method == 'gat':
+                if self.agg_method == 'qk_gat':
                     if node_neighbors is None:
-                        raise ValueError("GAT requires node_neighbors indices")
+                        raise ValueError("QK-GAT requires node_neighbors indices")
                     nodes_self = node_neighbors[j] 
                     nodes_neighbor = node_neighbors[j+1]
                     emb_node_neighbor[j] = self.gat_aggregate(emb_node_neighbor[j], emb_node_neighbor[j + 1], nodes_self, nodes_neighbor, j)
@@ -1251,6 +1298,54 @@ class GIKT(Module):
         result = p 
         
         return result
+
+    @torch.no_grad()
+    def get_state_for_recommendation(self, question, response, mask,
+                                      interval_time=None, response_time=None):
+        """
+        [Inference-only] 运行 forward 并捕获学生序列末尾的认知状态，
+        供习题推荐模块使用。此方法不影响模型参数与训练行为。
+
+        Args:
+            question: [1, T] 学生作答题目序列 (LongTensor)
+            response: [1, T] 学生作答结果序列 0/1 (LongTensor)
+            mask:     [1, T] 有效掩码 (LongTensor)
+            interval_time: [1, T] 时间间隔 (FloatTensor, 可选)
+            response_time: [1, T] 作答耗时 (FloatTensor, 可选)
+
+        Returns:
+            dict:
+                'current_history_state': Tensor [1, K+1, emb_dim] — 注意力 Values
+                'cached_keys':           Tensor [1, K+1, emb_dim] — 注意力 Keys (可能为 None)
+                'pid_data':              tuple(pid_ema, pid_diff) 或 None
+        """
+        captured = {}
+        _orig_predict = self.predict
+
+        def _capturing_predict(qs_concat, current_history_state,q_target=None, pid_data=None, cached_keys=None):
+            # 每次 predict() 调用都更新 captured；循环结束时保留最后一次（即序列末位）
+            captured['current_history_state'] = current_history_state
+            captured['cached_keys'] = cached_keys
+            captured['pid_data'] = pid_data
+            return _orig_predict(qs_concat, current_history_state, q_target=q_target, pid_data=pid_data, cached_keys=cached_keys)
+
+        was_training = self.training
+        self.predict = _capturing_predict
+        self.eval()
+        try:
+            _ = self.forward(question, response, mask, interval_time=interval_time, response_time=response_time)
+        finally:
+            self.predict = _orig_predict
+            if was_training:
+                self.train()
+
+        if not captured:
+            # 边缘情况：序列长度 < 2，predict() 从未被调用
+            dev = next(self.parameters()).device
+            zero = torch.zeros(1, 1, self.emb_dim, device=dev)
+            return {'current_history_state': zero, 'cached_keys': zero, 'pid_data': None}
+
+        return captured
 
     def reset_parameters(self):
         """

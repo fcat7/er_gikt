@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 import numpy as np
 from scipy import sparse
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
 from sklearn.model_selection import KFold, ShuffleSplit
 from torch.utils.data import DataLoader, Subset
 from config import Config, DEVICE, COLOR_LOG_B, COLOR_LOG_Y, COLOR_LOG_G, COLOR_LOG_END
@@ -25,13 +25,7 @@ except ImportError:
 import torch
 from torch.cuda.amp import autocast, GradScaler
 
-# 自动检测 AMP 可用性
-use_amp = torch.cuda.is_available() 
-scaler = GradScaler(enabled=use_amp)
-if use_amp:
-    print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
-else:
-    print(f"⚠️ AMP Disabled")
+# AMP 将在加载配置后再设置
 
 # @add_fzq 2025-12-25 10:42:10 -------------------------------------------
 # 固定随机种子，保证实验可复现
@@ -53,8 +47,9 @@ set_seed(42)
 def get_parser():
     parser = argparse.ArgumentParser(description="Train and Test GIKT Model")
     parser.add_argument('--full', action='store_true', help='Use full dataset (overrides --mode)')
-
     parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
+    parser.add_argument('--override', nargs='*', help='Override params, e.g. model.use_pid=False train.epochs=10')
+    parser.add_argument('--ablation_name', type=str, default='', help='If set, logs result to ablation_summary.csv')
     return parser
 
 def get_exp_config_path(isFull=False, name='default'):
@@ -76,9 +71,45 @@ if __name__ == '__main__':
     # 加载超参数
     exp_config_path = get_exp_config_path(isFull=args.full, name=args.name)
     params = HyperParameters.load(exp_config_path=exp_config_path)
+
+    # @add_fzq 2026-03-07: 动态覆写配置，支持消融实验
+    if args.override:
+        import ast
+        for override_item in args.override:
+            if '=' not in override_item: continue
+            key_path, value_str = override_item.split('=', 1)
+            try:
+                parsed_value = ast.literal_eval(value_str)
+            except (ValueError, SyntaxError):
+                parsed_value = value_str
+            
+            parts = key_path.split('.')
+            if len(parts) == 2:
+                section, key = parts
+                if hasattr(params, section):
+                    sub_obj = getattr(params, section)
+                    if hasattr(sub_obj, key):
+                        setattr(sub_obj, key, parsed_value)
+                        print(COLOR_LOG_Y + f"🔧 命令行覆写: {key_path} = {parsed_value}" + COLOR_LOG_END)
+                    else:
+                        print(f"⚠️ Warning: 找不到参数 {key} 于 {section}")
+
     # 加载配置
     dataset_name = params.train.dataset_name
     config = Config(dataset_name=dataset_name)
+    
+    # @add_fzq 2026-03-05: 从参数配置中读取 AMP 设置
+    use_amp = params.train.amp_enabled and torch.cuda.is_available()
+    scaler = GradScaler(enabled=use_amp)
+    gradient_clip_norm = params.train.gradient_clip_norm
+    if use_amp:
+        print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
+    else:
+        print(f"⚠️ AMP Disabled (Using float32 for numerical stability)")
+    if gradient_clip_norm > 0:
+        print(f"✂️ Gradient Clipping Enabled (max_norm={gradient_clip_norm})")
+    else:
+        print(f"⚠️ Gradient Clipping Disabled")
 
     output_path = f'{config.path.LOG_DIR}/{time_now}.log'
     output_dir = os.path.dirname(output_path)  # 获取目录路径    
@@ -185,6 +216,7 @@ if __name__ == '__main__':
             drop_edge_rate=params.model.drop_edge_rate,
             feature_noise_scale=params.model.feature_noise_scale,
             hard_recap=params.model.hard_recap,
+            rank_k=params.model.rank_k,
             use_cognitive_model=params.model.use_cognitive_model,
             cognitive_mode=params.model.cognitive_mode,
             pre_train=params.model.pre_train,
@@ -203,12 +235,9 @@ if __name__ == '__main__':
         ).to(DEVICE)
         
         optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, params.train.lr_gamma)
         
         best_fold_val_auc = 0.0
-        patience_counter = 0
-
-        # Data Loaders
+        fold_best_threshold = 0.5
         train_set = Subset(dataset_train_augment, train_indices)
         val_set = Subset(dataset_train_clean, test_indices)
         
@@ -222,6 +251,17 @@ if __name__ == '__main__':
             
         train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
         val_loader = DataLoader(val_set, shuffle=False, **loader_kwargs)
+        
+        # @add_fzq: LR Scheduler Upgrade (CosineAnnealing with Warmup)
+        # Using OneCycleLR which inherently includes warmup (default pct_start=0.3) and cosine annealing
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=params.train.lr, 
+            steps_per_epoch=max(1, len(train_loader)), 
+            epochs=params.train.epochs,
+            pct_start=0.1, # 10% steps for warmup
+            anneal_strategy='cos'
+        )
         
         print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(val_set)}")
         print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
@@ -237,8 +277,9 @@ if __name__ == '__main__':
             print('===================' + COLOR_LOG_Y + f'Epoch: {epoch + 1}'+ COLOR_LOG_END + '====================')
             # Training
             # ---------------------
-            print('-------------------training------------------')
-            
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f'-------------------training------------------ [LR: {current_lr:.6f}]')
+
             torch.set_grad_enabled(True)
             model.train()
             train_step = train_loss = train_total = train_right = train_auc = 0
@@ -277,8 +318,14 @@ if __name__ == '__main__':
                     final_mask = mask_valid & eval_mask_valid
                     y_hat_flat = torch.masked_select(y_hat, final_mask)
                     y_target_flat = torch.masked_select(y_target_shift, final_mask)
-                    loss = loss_fun(y_hat_flat, y_target_flat)
                     
+                    # @add_fzq: Label Smoothing
+                    if params.train.label_smoothing > 0:
+                        y_target_flat_smoothed = y_target_flat * (1.0 - params.train.label_smoothing) + 0.5 * params.train.label_smoothing
+                        loss = loss_fun(y_hat_flat, y_target_flat_smoothed)
+                    else:
+                        loss = loss_fun(y_hat_flat, y_target_flat)
+
                     # Regularization
                     reg_loss = 0.0
                     if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
@@ -289,9 +336,16 @@ if __name__ == '__main__':
                     loss += reg_loss
                 
                 scaler.scale(loss).backward()
+                # @add_fzq 2026-03-05: 梯度裁剪防止数值不稳定 (特别是 AMP + GAT 场景)
+                if gradient_clip_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
                 
+                # @add_fzq: per-batch scheduler step (OneCycleLR required)
+                scheduler.step()
+
                 # Metrics Calculation
                 y_prob = torch.sigmoid(y_hat_flat)
                 y_pred = torch.ge(y_prob, 0.5)
@@ -301,16 +355,16 @@ if __name__ == '__main__':
                 train_step += 1
                 
                 # Collect for global AUC (consistent with validation)
-                all_train_targets.extend(y_target_flat.detach().cpu().numpy())
-                all_train_probs.extend(y_prob.detach().cpu().numpy())
+                all_train_targets.append(y_target_flat.detach().cpu().numpy())
+                all_train_probs.append(y_prob.detach().cpu().numpy())
                 
                 # For diagnostic: collect without eval_mask filter
                 y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
                 y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
                 if len(y_target_flat_no_mask) > 0:
                     y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
-                    all_train_targets_no_mask.extend(y_target_flat_no_mask.detach().cpu().numpy())
-                    all_train_probs_no_mask.extend(y_prob_no_mask.detach().cpu().numpy())
+                    all_train_targets_no_mask.append(y_target_flat_no_mask.detach().cpu().numpy())
+                    all_train_probs_no_mask.append(y_prob_no_mask.detach().cpu().numpy())
                 
                 # Verbose: Per-batch logging (Optional, disabled by default to reduce noise)
                 if params.train.verbose:
@@ -327,18 +381,27 @@ if __name__ == '__main__':
                     print(f'step: {batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             train_loss /= train_step if train_step > 0 else 1
-            # 修正：在 epoch 结束后调用，必须确保 optimizer 已执行过 step
-            # 使用 getattr 安全访问 _step_count (PyTorch 内部属性)
-            step_count = getattr(optimizer, '_step_count', 0) 
-            if train_step > 0 and step_count > 0:
-                scheduler.step()
-                
+            # 修正：不再按 epoch 步进，已改为按 batch 使用 OneCycleLR 步进
+            # step_count = getattr(optimizer, '_step_count', 0)
+            # if train_step > 0 and step_count > 0:
+            #     scheduler.step()
+
             train_acc = train_right / train_total if train_total > 0 else 0
             # Calculate global training AUC (consistent with validation)
             if len(all_train_targets) > 0:
-                train_auc = roc_auc_score(all_train_targets, all_train_probs)
-                train_auc_no_mask = roc_auc_score(all_train_targets_no_mask, all_train_probs_no_mask) if len(all_train_targets_no_mask) > 0 else train_auc
-                eval_mask_filter_ratio = 1.0 - (len(all_train_targets) / max(1, len(all_train_targets_no_mask)))
+                arr_train_targets = np.concatenate(all_train_targets)
+                arr_train_probs = np.concatenate(all_train_probs)
+                train_auc = roc_auc_score(arr_train_targets, arr_train_probs)
+                
+                if len(all_train_targets_no_mask) > 0:
+                    arr_train_targets_no_mask = np.concatenate(all_train_targets_no_mask)
+                    arr_train_probs_no_mask = np.concatenate(all_train_probs_no_mask)
+                    train_auc_no_mask = roc_auc_score(arr_train_targets_no_mask, arr_train_probs_no_mask)
+                    eval_mask_filter_ratio = 1.0 - (len(arr_train_targets) / max(1, len(arr_train_targets_no_mask)))
+                else:
+                    train_auc_no_mask = train_auc
+                    eval_mask_filter_ratio = 0.0
+                    
                 # @add_fzq: 告警 - 如果有效样本过少
                 if train_total < train_set_len * 0.1:
                     print(f"{COLOR_LOG_Y}⚠️ Warning: Only {train_total} effective training samples (< 10% of {train_set_len}). Model may underfit. Consider increasing epochs or reducing stride.{COLOR_LOG_END}")
@@ -387,16 +450,16 @@ if __name__ == '__main__':
                 val_total += torch.sum(final_mask)
                 val_step += 1
 
-                all_targets.extend(y_target_flat.cpu().detach().numpy())
-                all_probs.extend(y_prob.cpu().detach().numpy())
+                all_targets.append(y_target_flat.cpu().detach().numpy())
+                all_probs.append(y_prob.cpu().detach().numpy())
 
                 # For diagnostic: collect without eval_mask filter
                 y_hat_flat_no_mask = torch.masked_select(y_hat, mask_valid)
                 y_target_flat_no_mask = torch.masked_select(y_target_shift, mask_valid)
                 if len(y_target_flat_no_mask) > 0:
                     y_prob_no_mask = torch.sigmoid(y_hat_flat_no_mask)
-                    all_targets_no_mask.extend(y_target_flat_no_mask.cpu().detach().numpy())
-                    all_probs_no_mask.extend(y_prob_no_mask.cpu().detach().numpy())
+                    all_targets_no_mask.append(y_target_flat_no_mask.cpu().detach().numpy())
+                    all_probs_no_mask.append(y_prob_no_mask.cpu().detach().numpy())
 
                 if params.train.verbose:
                     if len(y_target_flat) > 0:
@@ -412,14 +475,40 @@ if __name__ == '__main__':
                     print(f'step: {val_batch_idx}, loss: {loss.item():.4f}, acc: {batch_acc:.4f}, auc: {batch_auc:.4f}')
 
             if len(all_targets) > 0:
-                val_auc = roc_auc_score(all_targets, all_probs)
-                val_auc_no_mask = roc_auc_score(all_targets_no_mask, all_probs_no_mask) if len(all_targets_no_mask) > 0 else val_auc
-                val_eval_mask_filter_ratio = 1.0 - (len(all_targets) / max(1, len(all_targets_no_mask)))
+                arr_targets = np.concatenate(all_targets)
+                arr_probs = np.concatenate(all_probs)
+                val_auc = roc_auc_score(arr_targets, arr_probs)
+                if len(all_targets_no_mask) > 0:
+                    arr_targets_no_mask = np.concatenate(all_targets_no_mask)
+                    arr_probs_no_mask = np.concatenate(all_probs_no_mask)
+                    val_auc_no_mask = roc_auc_score(arr_targets_no_mask, arr_probs_no_mask) 
+                    val_eval_mask_filter_ratio = 1.0 - (len(arr_targets) / max(1, len(arr_targets_no_mask)))
+                else:
+                    val_auc_no_mask = val_auc
+                    val_eval_mask_filter_ratio = 0.0
+                
+                # 动态阈值搜索：分别寻找最大化 F1 和 ACC 的阈值
+                precision, recall, f1_thresholds = precision_recall_curve(arr_targets, arr_probs)
+                f1_scores = 2 * recall * precision / (recall + precision + 1e-10)
+                best_f1_idx = np.argmax(f1_scores)
+                best_val_f1 = f1_scores[best_f1_idx]
+                
+                # 为了把 ACC 压榨到极致，直接强搜最佳 ACC 的阈值
+                search_thresholds = np.linspace(0.2, 0.8, 61) # 从0.2到0.8扫描
+                acc_scores = [np.mean(arr_targets == (arr_probs >= t)) for t in search_thresholds]
+                best_acc_idx = np.argmax(acc_scores)
+                best_val_threshold = search_thresholds[best_acc_idx]
+                val_acc = acc_scores[best_acc_idx]
+
             else:
                 val_auc_no_mask = 0.0
                 val_eval_mask_filter_ratio = 0.0
+                val_acc = 0.0
+                best_val_threshold = 0.5
+                best_val_f1 = 0.0
+            
             val_loss /= val_step if val_step > 0 else 1
-            val_acc = val_right / val_total if val_total > 0 else 0
+            # val_acc = val_right / val_total if val_total > 0 else 0 (已由动态阈值替代)
             val_time = time.time() - val_start_time
             
             # Logging & Recording
@@ -432,33 +521,37 @@ if __name__ == '__main__':
             total_avg_batch_time = run_time / (val_step + train_step) if (val_step + train_step) > 0 else 0.0
             
             print(COLOR_LOG_B + f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}' + COLOR_LOG_END)
-            print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
+            print(COLOR_LOG_B + f'validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f}, f1: {best_val_f1:.4f}, thresh: {best_val_threshold:.2f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}' + COLOR_LOG_END)
             
             # @add_fzq: Eval Mask Diagnostic Output
+            n_train_targets = sum(len(arr) for arr in all_train_targets) if len(all_train_targets) > 0 else 0
+            n_train_targets_no_mask = sum(len(arr) for arr in all_train_targets_no_mask) if len(all_train_targets_no_mask) > 0 else 0
             if eval_mask_filter_ratio > 0:
                 print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: Filtered {eval_mask_filter_ratio*100:.1f}% of training samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={len(all_train_targets)})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={len(all_train_targets_no_mask)}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={n_train_targets})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={n_train_targets_no_mask}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering (all sequences are short or training non-overlapping windows)
-                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {len(all_train_targets)} samples are evaluation data)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {n_train_targets} samples are evaluation data)' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.4f}s | batches: {train_step}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'validate time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.4f}s | batches: {val_step}' + COLOR_LOG_END)
             print(COLOR_LOG_B + f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.4f}s' + COLOR_LOG_END)
             
             # @add_fzq: Validation Eval Mask Diagnostic Output
+            n_val_targets = sum(len(arr) for arr in all_targets) if len(all_targets) > 0 else 0
+            n_val_targets_no_mask = sum(len(arr) for arr in all_targets_no_mask) if len(all_targets_no_mask) > 0 else 0
             if val_eval_mask_filter_ratio > 0:
                 print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: Filtered {val_eval_mask_filter_ratio*100:.1f}% of validation samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={len(all_targets)})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={len(all_targets_no_mask)}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={n_val_targets})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={n_val_targets_no_mask}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering in validation
-                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {len(all_targets)} samples are evaluation data)' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {n_val_targets} samples are evaluation data)' + COLOR_LOG_END)
             
             # 保存输出至本地文件
             output_file.write(f'  Epoch {epoch+1} | ')
             output_file.write(f'training: loss: {train_loss:.4f}, acc: {train_acc:.4f}, auc: {train_auc: .4f} | samples: {train_total}\n')
-            output_file.write(f'          | validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}\n')
+            output_file.write(f'          | validate: loss: {val_loss:.4f}, acc: {val_acc:.4f}, auc: {val_auc: .4f}, f1: {best_val_f1:.4f}, thresh: {best_val_threshold:.2f} | samples: {val_total.item() if torch.is_tensor(val_total) else val_total}\n')
             output_file.write(f'          | train time: {train_time:.2f}s, avg batch: {train_avg_batch_time:.2f}s | ')
             output_file.write(f'test time: {val_time:.2f}s, avg batch: {val_avg_batch_time:.2f}s | ')
             output_file.write(f'total time: {run_time:.2f}s, average batch time: {total_avg_batch_time:.2f}s\n')
@@ -482,6 +575,7 @@ if __name__ == '__main__':
             if val_auc > best_fold_val_auc:
                 improvement = val_auc - best_fold_val_auc
                 best_fold_val_auc = val_auc
+                fold_best_threshold = best_val_threshold
                 # Save best model logic could go here
                 patience_counter = 0
                 if params.train.verbose:
@@ -537,7 +631,7 @@ if __name__ == '__main__':
             if len(test_targets) > 0:
                 best_fold_test_auc = roc_auc_score(test_targets, test_probs)
             best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
-            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= 0.5))
+            best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= fold_best_threshold))
 
         print('\n' + '='*70)
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
@@ -571,8 +665,35 @@ if __name__ == '__main__':
     
     output_file.close()
 
+    # 记录消融实验结果（如果指定了消融组别名）
+    if args.ablation_name:
+        import csv
+        csv_path = f'{config.path.LOG_DIR}/ablation_summary.csv'
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['Ablation Group', 'Date', 'Dataset', 'Mean AUC', 'Std AUC', 'Max AUC (Fold)', 'Min AUC (Fold)', 'Time'])
+            
+            mean_auc = np.mean(fold_results_test_auc)
+            std_auc = np.std(fold_results_test_auc)
+            max_auc_idx = np.argmax(fold_results_test_auc)
+            min_auc_idx = np.argmin(fold_results_test_auc)
+
+            writer.writerow([
+                args.ablation_name, 
+                time_now, 
+                dataset_name, 
+                f"{mean_auc:.4f}", 
+                f"{std_auc:.4f}", 
+                f"{fold_results_test_auc[max_auc_idx]:.4f} (F{max_auc_idx+1})",
+                f"{fold_results_test_auc[min_auc_idx]:.4f} (F{min_auc_idx+1})",
+                time_str
+            ])
+        print(COLOR_LOG_Y + f"📝 消融结果已追加至 {csv_path}" + COLOR_LOG_END)
+
     # Save Data
     # Optional: Save final model (from last fold, or logic to save best)
-    # torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+    torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
