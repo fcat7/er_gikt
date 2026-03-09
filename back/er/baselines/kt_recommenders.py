@@ -1,8 +1,7 @@
 """KT baseline recommenders: DKT+Greedy, DKVMN+Greedy.
 
 接口契约（与 RecommendationSystem.recommend() 一致）:
-    recommend(history_q, history_r, history_mask, K=5,
-              interval_time=None, response_time=None)
+    recommend(history_q, history_r, history_mask, K=5, interval_time=None, response_time=None)
     -> (recommendation: np.ndarray[K], info: Dict)
 """
 
@@ -57,17 +56,36 @@ class _KTGreedyBase:
         if self.n_question <= 1:
             raise ValueError('Invalid n_question in metadata/config')
 
-        self.model = self._build_model(self.n_question)
         checkpoint = torch.load(kt_model_path, map_location=device)
+        self.model = self._build_model(self.n_question, checkpoint)
         self._safe_load_checkpoint(checkpoint)
         self.model.to(device)
         self.model.eval()
 
-    def _build_model(self, n_question: int):
+    def _build_model(self, n_question: int, checkpoint: dict):
+        # 动态推断隐藏层参数，防止 state_dict 尺寸不匹配
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        if hasattr(checkpoint, 'state_dict'):
+            state_dict = checkpoint.state_dict()
+            
         if self.model_type == 'dkt':
-            return DKT(num_question=n_question)
+            # DKT: interaction_emb.weight -> [num_interaction, emb_dim]
+            emb_dim = 100
+            for k, v in state_dict.items():
+                if 'interaction_emb.weight' in k:
+                    emb_dim = v.shape[1]
+                    break
+            return DKT(num_question=n_question, emb_dim=emb_dim)
+            
         if self.model_type == 'dkvmn':
-            return DKVMN(num_question=n_question)
+            # DKVMN: Mk -> [size_m, dim_s]
+            dim_s, size_m = 50, 20
+            for k, v in state_dict.items():
+                if 'Mk' in k:
+                    size_m, dim_s = v.shape[0], v.shape[1]
+                    break
+            return DKVMN(num_question=n_question, dim_s=dim_s, size_m=size_m)
+            
         raise ValueError(f'Unsupported model type: {self.model_type}')
 
     def _safe_load_checkpoint(self, checkpoint):
