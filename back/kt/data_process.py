@@ -103,7 +103,7 @@ def normalize_and_save_features(f_df, builder, output_dir):
             f_df[c] = (f_df[c] - m) / s
             
     # 2. Map
-    num_q = len(builder.question2idx) # includes 0
+    num_q = max(builder.question2idx.values()) + 1 # includes 0
     final_mat = np.zeros((num_q, len(cols)), dtype=np.float32)
     
     f_df = f_df.set_index(StandardColumns.QUESTION_ID)  # 使用标准列名
@@ -259,6 +259,41 @@ def main():
     
     # ========== Step 8: 统一元数据生成 (metadata.json) ========== 
     ic("Step 8: 统一元数据生成 (metadata.json)...")
+    
+    # --- 1. 计算扩展统计指标 ---
+    n_interactions = len(df)
+    n_unique_q = df[StandardColumns.QUESTION_ID].nunique()
+    
+    avg_attempts_per_question = float(n_interactions / n_unique_q) if n_unique_q > 0 else 0.0
+    global_acc = float(df[StandardColumns.LABEL].mean()) if StandardColumns.LABEL in df.columns else 0.0
+    sparsity = float(1.0 - n_interactions / (len(builder.user2idx) * max(builder.question2idx.values()))) if len(builder.user2idx) > 0 and max(builder.question2idx.values()) > 0 else 1.0
+
+    avg_skills_per_q = 0.0
+    avg_q_per_skill = 0.0
+    avg_attempts_per_skill = 0.0
+
+    if StandardColumns.SKILL_IDS in df.columns:
+        valid_skills_df = df.dropna(subset=[StandardColumns.SKILL_IDS])
+        if not valid_skills_df.empty:
+            # 扁平化技能列
+            skill_series = valid_skills_df[StandardColumns.SKILL_IDS].astype(str).str.split(StandardColumns.SKILL_IDS_STD_SEP)
+            df_exploded = pd.DataFrame({
+                'q': valid_skills_df[StandardColumns.QUESTION_ID],
+                's': skill_series
+            }).explode('s')
+            # 过滤无效空串
+            df_exploded = df_exploded[df_exploded['s'].str.strip() != '']
+            df_exploded = df_exploded[df_exploded['s'].notna()]
+            
+            if not df_exploded.empty:
+                n_unique_s = df_exploded['s'].nunique()
+                avg_skills_per_q = float(df_exploded.groupby('q')['s'].nunique().mean())
+                avg_q_per_skill = float(df_exploded.groupby('s')['q'].nunique().mean())
+                avg_attempts_per_skill = float(len(df_exploded) / n_unique_s) if n_unique_s > 0 else 0.0
+
+    # --- 2. 获取源文件路径 ---
+    src_file_path = dataset_config.get("file_path", "")
+
     mappings = {
         "skill2idx": save_json_mapping(builder.skill2idx, output_dir, "skill2idx.json"),
         "question2idx": save_json_mapping(builder.question2idx, output_dir, "question2idx.json"),
@@ -268,13 +303,21 @@ def main():
     
     metadata = {
         "dataset_name": target_dataset_name,
+        "src_file_path": src_file_path,
         "metrics": {
+            "n_interactions": n_interactions,
             "n_user": len(builder.user2idx),
-            "n_question": len(builder.question2idx),
-            "n_skill": len(builder.skill2idx),
+            "n_question": max(builder.question2idx.values()) + 1,
+            "n_skill": max(builder.skill2idx.values()) + 1,
             "n_domain": len(set(builder.skill_domain_map.values())) if builder.skill_domain_map else 0,
             "avg_seq_len": float(df.groupby(StandardColumns.USER_ID).size().mean()),
-            "max_seq_len": MAX_SEQ_LEN
+            "max_seq_len": MAX_SEQ_LEN,
+            "global_accuracy": global_acc,
+            "sparsity_ratio": sparsity,
+            "avg_attempts_per_question": avg_attempts_per_question,
+            "avg_attempts_per_skill": avg_attempts_per_skill,
+            "avg_skills_per_question": avg_skills_per_q,
+            "avg_questions_per_skill": avg_q_per_skill
         },
         "config_at_processing": {
             "min_seq_len": args.min_seq_len,
@@ -298,10 +341,10 @@ def main():
 # 使用示例
 # ============================================================================
 # 1. 全量数据 + 不增强 (默认)
-#    python data_process.py --dataset assist09 --ratio 1.0 --stride 0
+#    python data_process.py --dataset assist09 --ratio 1.0 --stride 0 --min_seq_len 20
 #
 # 2. 采样 10% + 不增强
-#    python data_process.py --dataset assist09 --ratio 0.1 --stride 0
+#    python data_process.py --dataset assist09 --ratio 0.1 --stride 0 --min_seq_len 20
 #
 # 3. 采样 20% + 滑动窗口 (50% 重叠)
 #    python data_process.py --dataset assist09 --ratio 0.2 --stride 100

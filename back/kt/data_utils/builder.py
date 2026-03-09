@@ -111,8 +111,8 @@ class KTDataBuilder:
         self.idx2skill = {i: s for s, i in self.skill2idx.items()}
         
         ic(f"  - Users: {len(self.user2idx)}")
-        ic(f"  - Questions: {len(self.question2idx)}")
-        ic(f"  - Skills: {len(self.skill2idx)}")
+        ic(f"  - Questions: {max(self.question2idx.values()) + 1}")
+        ic(f"  - Skills: {max(self.skill2idx.values()) + 1}")
 
         # Save JSON maps
         # Skill-ID Map
@@ -135,8 +135,8 @@ class KTDataBuilder:
 
     def _build_adjacency_matrices(self, df):
         """构建 Q-S, Q-Q, S-S 邻接矩阵"""
-        num_q = len(self.question2idx) # 包含 0
-        num_s = len(self.skill2idx) # 包含 0
+        num_q = max(self.question2idx.values()) + 1 # 包含 0
+        num_s = max(self.skill2idx.values()) + 1 # 包含 0
         
         qs_table = np.zeros([num_q, num_s], dtype=int)
         
@@ -204,7 +204,7 @@ class KTDataBuilder:
             ic(f"Info: 使用自动 [Ward 聚类]，目标簇数: {target_n_clusters}")
         
         domain_map = None
-        num_s = len(self.skill2idx)
+        num_s = max(self.skill2idx.values()) + 1
         
         # --- 策略 A: 手动配置 ---
         if use_manual and config_path and os.path.exists(config_path):
