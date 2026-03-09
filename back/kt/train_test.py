@@ -1,6 +1,7 @@
 """
 训练并测试模型
 使用五折交叉验证法 (Standard K-Fold)
+python train_test.py --override train.dataset_name=assist09-sample_20%
 """
 import os
 import time

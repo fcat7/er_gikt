@@ -1,8 +1,10 @@
 import time
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 from sklearn.model_selection import KFold, GroupKFold, ShuffleSplit, GroupShuffleSplit
 import numpy as np
@@ -53,7 +55,7 @@ class BaseTrainer:
             model_name = getattr(model, 'model_name', '').lower()
             cognitive_mode = getattr(model, 'cognitive_mode', None)
             
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                 if model_name == 'dkt':
                     y_hat = model(question, response, mask)
                     eps = 1e-6
@@ -132,7 +134,7 @@ class BaseTrainer:
                 model_name = getattr(model, 'model_name', '').lower()
                 cognitive_mode = getattr(model, 'cognitive_mode', None)
                 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                     if model_name == 'dkt':
                         y_hat = model(question, response, mask)
                         preds = y_hat[:, :-1]
@@ -225,10 +227,25 @@ class BaseTrainer:
             
             # 初始化 AMP
             use_amp = self.kwargs.get('amp_enabled', True) and torch.cuda.is_available()
-            scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+            if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "GradScaler"):
+                scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+            elif hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+                scaler = torch.amp.GradScaler(enabled=use_amp)
+            else:
+                # 兼容 DummyScaler
+                class DummyScaler:
+                    def scale(self, loss): return loss
+                    def step(self, optimizer): optimizer.step()
+                    def update(self): pass
+                scaler = DummyScaler()
             
             best_val_auc = 0.0
             patience_counter = 0
+            
+            # TensorBoard Setup
+            trial_number = self.kwargs.get('trial_number', 'unknown')
+            log_dir = os.path.join("runs", f"trial_{trial_number}_fold_{fold+1}")
+            writer = SummaryWriter(log_dir=log_dir)
             
             for epoch in range(self.epochs):
                 start_time = time.time()
@@ -236,11 +253,18 @@ class BaseTrainer:
                 val_auc, val_acc = self._evaluate(model, val_loader, use_amp)
                 end_time = time.time()
                 
+                # Write to TensorBoard
+                writer.add_scalar('Loss/train', train_loss, epoch)
+                writer.add_scalar('AUC/val', val_auc, epoch)
+                writer.add_scalar('ACC/val', val_acc, epoch)
+                
                 print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
                 
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     patience_counter = 0
+                    if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
+                        torch.save(model.state_dict(), self.kwargs.get('model_save_path'))
                 else:
                     patience_counter += 1
                     
@@ -248,6 +272,7 @@ class BaseTrainer:
                     print(f"Early stopping triggered at epoch {epoch+1}")
                     break
                     
+            writer.close()
             print(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}\n")
             fold_aucs.append(best_val_auc)
             

@@ -14,19 +14,19 @@ CHECKPOINT_FILE = "ablation_checkpoint.json"
 # 定义我们要跑的消融实验组
 ABLATION_TARGETS = {
     # 实验名 : 要覆写（Override）的参数列表
-    # "A_Baseline": [],
+    "A_Baseline": [],
     
-    # "B_Remove_PID": [
-    #     "model.use_pid=False"
-    # ],
+    "B_Remove_PID": [
+        "model.use_pid=False"
+    ],
     
-    # "C_Remove_Cognitive": [
-    #     "model.use_cognitive_model=False"
-    # ],
+    "C_Remove_Cognitive": [
+        "model.use_cognitive_model=False"
+    ],
     
-    # "D_Remove_IRT_4PL": [
-    #     "model.use_4pl_irt=False"
-    # ],
+    "D_Remove_IRT_4PL": [
+        "model.use_4pl_irt=False"
+    ],
     
     "E_agg_method: gcn": [
         "model.agg_method=gcn"
