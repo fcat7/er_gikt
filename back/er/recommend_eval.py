@@ -179,7 +179,9 @@ class MetricsCalculator:
         # WKC
         wkc, n_weak = float('nan'), -1
         if m_k is not None:
-            weak_skills = np.where(m_k < 0.7)[0]
+            # 采用相对阈值：个体平均掌握度及一定下限，避免所有技能被判定为弱项
+            weak_threshold = float(np.mean(m_k))
+            weak_skills = np.where(m_k < weak_threshold)[0]
             if len(weak_skills) > 0:
                 total_weak_weight = np.sum(1.0 - m_k[weak_skills])
                 covered_weak = set()
