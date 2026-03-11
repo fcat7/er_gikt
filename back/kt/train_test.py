@@ -695,6 +695,8 @@ if __name__ == '__main__':
 
     # Save Data
     # Optional: Save final model (from last fold, or logic to save best)
-    torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+    if params.train.save_model:
+        torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
+        print(f'Model saved to {config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
