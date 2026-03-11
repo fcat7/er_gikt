@@ -43,10 +43,58 @@ class GIKTOld(nn.Module):
         self.MLP_key = nn.Linear(dim_emb, dim_emb)
         self.MLP_W = nn.Linear(2 * dim_emb, 1)
 
+        # Optimization: Pre-process qs_table mappings into padded dense tensors to prevent expensive torch.nonzero loops
+        max_concepts = int(self.qs_table.sum(dim=1).max().item())
+        self.max_concepts = max(1, max_concepts)
+        self.q_concept_idx = torch.zeros(self.num_question, self.max_concepts, dtype=torch.long, device=device)
+        self.q_concept_mask = torch.zeros(self.num_question, self.max_concepts, dtype=torch.bool, device=device)
+        qs_sum = self.qs_table.sum(dim=1)
+        for q in range(self.num_question):
+            n = int(qs_sum[q].item())
+            if n > 0:
+                idx = torch.nonzero(self.qs_table[q] == 1).squeeze(-1)
+                if idx.dim() == 0: 
+                    idx = idx.unsqueeze(0)
+                self.q_concept_idx[q, :n] = idx
+                self.q_concept_mask[q, :n] = True
+
     def forward(self, question, response, mask, interval_time=None, response_time=None):
         device = question.device
         batch_size, seq_len = question.shape
         q_neighbor_size, c_neighbor_size = self.q_neighbors.shape[1], self.s_neighbors.shape[1]
+        
+        # Optimization 1: Pre-calculate GNN embeddings for the WHOLE valid sequence simultaneously
+        q_flat = question.view(-1)
+        m_flat = mask.view(-1).bool()
+        
+        emb_reconstruct_flat = self.embed_question(q_flat)
+        valid_q = q_flat[m_flat]
+        
+        if valid_q.numel() > 0:
+            nodes_neighbor = [valid_q]
+            batch_size__ = len(nodes_neighbor[0])
+            for i in range(self.agg_hops):
+                nodes_current = nodes_neighbor[-1].reshape(-1)
+                neighbor_shape = [batch_size__] + \
+                                 [(q_neighbor_size if j % 2 == 0 else c_neighbor_size) for j in range(i + 1)]
+                if i % 2 == 0:
+                    nodes_neighbor.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
+                else:
+                    nodes_neighbor.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
+                    
+            emb_nodes_neighbor = []
+            for i, nodes in enumerate(nodes_neighbor):
+                if i % 2 == 0:
+                    emb_nodes_neighbor.append(self.embed_question(nodes))
+                else:
+                    emb_nodes_neighbor.append(self.embed_concept(nodes))
+                    
+            emb_valid = self.aggregate(emb_nodes_neighbor)
+            emb_reconstruct_flat = emb_reconstruct_flat.clone()
+            emb_reconstruct_flat[m_flat] = emb_valid.to(emb_reconstruct_flat.dtype)
+            
+        emb_question_reconstruct = emb_reconstruct_flat.view(batch_size, seq_len, self.dim_emb)
+        all_emb_question = self.embed_question(question)
         
         h1_pre = torch.nn.init.xavier_uniform_(torch.zeros(batch_size, self.dim_emb)).to(device)
         h2_pre = torch.nn.init.xavier_uniform_(torch.zeros(batch_size, self.dim_emb)).to(device)
@@ -54,63 +102,30 @@ class GIKTOld(nn.Module):
         y_hat = torch.zeros(batch_size, seq_len).to(device)
 
         for t in range(seq_len - 1):
-            question_t = question[:, t]
             response_t = response[:, t]
-            mask_t = torch.ne(mask[:, t], 0)
             emb_response_t = self.embed_correctness(response_t)
 
-            # GNN obtain question embedding
-            nodes_neighbor = [question_t[mask_t]]
-            batch_size__ = len(nodes_neighbor[0])
-            for i in range(self.agg_hops):
-                nodes_current = nodes_neighbor[-1]
-                nodes_current = nodes_current.reshape(-1)
-                neighbor_shape = [batch_size__] + \
-                                 [(q_neighbor_size if j % 2 == 0 else c_neighbor_size) for j in range(i + 1)]
-                if i % 2 == 0:
-                    nodes_neighbor.append(self.q_neighbors[nodes_current].reshape(neighbor_shape))
-                    continue
-                nodes_neighbor.append(self.s_neighbors[nodes_current].reshape(neighbor_shape))
-                
-            emb_nodes_neighbor = []
-            for i, nodes in enumerate(nodes_neighbor):
-                if i % 2 == 0:
-                    emb_nodes_neighbor.append(self.embed_question(nodes))
-                    continue
-                emb_nodes_neighbor.append(self.embed_concept(nodes))
-                
-            emb_question_t = self.aggregate(emb_nodes_neighbor)
-            emb_question_t_reconstruct = torch.zeros(batch_size, self.dim_emb, dtype=emb_question_t.dtype, device=device)
-            emb_question_t_reconstruct[mask_t] = emb_question_t
-            emb_question_t_reconstruct[~mask_t] = self.embed_question(question_t[~mask_t]).to(emb_question_t.dtype)
-
-            # GRU update knowledge state
+            # GRU update knowledge state (No GNN loop needed anymore)
+            emb_question_t_reconstruct = emb_question_reconstruct[:, t]
             gru1_input = torch.concat((emb_question_t_reconstruct, emb_response_t), dim=1)
             h1_pre = self.dropout_gru(self.gru1(gru1_input, h1_pre))
             gru2_output = self.dropout_gru(self.gru2(h1_pre, h2_pre))
 
-            # Find concept of next question
+            # Optimization 2: Find concept of next question using O(1) vectorized mapping
             question_next = question[:, t + 1]
-            correspond_concepts = self.qs_table[question_next]
-            correspond_concepts_list = []
-            max_concept = 1
-            for i in range(batch_size):
-                concepts_index = torch.nonzero(correspond_concepts[i] == 1).squeeze()
-                if len(concepts_index.shape) == 0:
-                    correspond_concepts_list.append(torch.unsqueeze(self.embed_concept(concepts_index), dim=0))
-                else:
-                    if concepts_index.shape[0] > max_concept:
-                        max_concept = concepts_index.shape[0]
-                    correspond_concepts_list.append(self.embed_concept(concepts_index))
-                    
+            c_idx = self.q_concept_idx[question_next]
+            c_mask = self.q_concept_mask[question_next]
+            max_c_batch = max(1, int(c_mask.sum(1).max().item()))
+            
+            c_idx = c_idx[:, :max_c_batch]
+            c_mask = c_mask[:, :max_c_batch]
+            
+            emb_concepts = self.embed_concept(c_idx)
+            emb_concepts = emb_concepts * c_mask.unsqueeze(-1).to(emb_concepts.dtype)
+            
             # Concat question and concept embeddings
-            emb_question_next = self.embed_question(question_next)
-            question_concept = torch.zeros(batch_size, max_concept + 1, self.dim_emb, dtype=emb_question_next.dtype, device=device)
-            for b, emb_concepts in enumerate(correspond_concepts_list):
-                num_qc = 1 + emb_concepts.shape[0]
-                emb_next = torch.unsqueeze(emb_question_next[b], dim=0)
-                question_concept[b, 0:num_qc] = torch.concat((emb_next, emb_concepts), dim=0).to(question_concept.dtype)
-            question_concept = question_concept.to(device)
+            emb_next = all_emb_question[:, t + 1].unsqueeze(1)
+            question_concept = torch.concat((emb_next, emb_concepts), dim=1)
             
             if t == 0:
                 y_hat[:, 0] = self.predict(question_concept, torch.unsqueeze(gru2_output, dim=1)).to(y_hat.dtype)
@@ -121,12 +136,14 @@ class GIKTOld(nn.Module):
             if t <= self.rank_k:
                 current_history_state = torch.concat((current_state, state_history[:, 0:t]), dim=1)
             else:
-                Q = self.embed_question(question_next).clone().detach().unsqueeze(dim=-1)
-                K = self.embed_question(question[:, 0:t]).clone().detach()
+                Q = all_emb_question[:, t + 1].clone().detach().unsqueeze(dim=-1)
+                K = all_emb_question[:, 0:t].clone().detach()       
                 product_score = torch.bmm(K, Q).squeeze(dim=-1)
                 _, indices = torch.topk(product_score, k=self.rank_k, dim=1)
-                select_history = torch.concat(tuple(state_history[i][indices[i]].unsqueeze(dim=0)
-                                                    for i in range(batch_size)), dim=0)
+                
+                # Fast Vectorized Select
+                batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.rank_k)
+                select_history = state_history[batch_indices, indices]
                 current_history_state = torch.concat((current_state, select_history), dim=1)
                 
             y_hat[:, t + 1] = self.predict(question_concept, current_history_state).to(y_hat.dtype)
@@ -150,28 +167,17 @@ class GIKTOld(nn.Module):
         output_g = torch.bmm(question_concept, torch.transpose(current_history_state, 1, 2))
 
         num_qc, num_state = question_concept.shape[1], current_history_state.shape[1]
-        states = torch.unsqueeze(current_history_state, dim=1)  
-        states = states.repeat(1, num_qc, 1, 1)  
-        question_concepts = torch.unsqueeze(question_concept, dim=2)  
-        question_concepts = question_concepts.repeat(1, 1, num_state, 1)  
-
-        K = torch.tanh(self.MLP_query(states))  
-        Q = torch.tanh(self.MLP_key(question_concepts))  
-        tmp = self.MLP_W(torch.concat((Q, K), dim=-1))  
-        tmp = torch.squeeze(tmp, dim=-1)  
-        alpha = torch.softmax(tmp, dim=2)  
         
-        p = torch.sum(torch.sum(alpha * output_g, dim=1), dim=1)  
+        # Optimization 4: Avoid explicit large tensor repeats in memory
+        K = torch.tanh(self.MLP_query(current_history_state))
+        Q = torch.tanh(self.MLP_key(question_concept))
         
-        # Here we don't apply sigmoid because BCEWithLogitsLoss is used externally
-        # But wait - GIKT predicts probability, and Trainer might use BCEWithLogitsLoss.
-        # Let's check BaseTrainer.
-        # In trainer.py, BaseTrainer expects logits or probabilities? 
-        # BaseTrainer uses BCEWithLogitsLoss, BUT it checks if the model name is 'gikt'.
-        # Let me see if GIKT returns logits or probabilities.
-        # Original pyedmine GIKT returns probability `result = torch.sigmoid(torch.squeeze(p, dim=-1))`.
-        # I'll return probability but comment on it if a logit is needed. Wait, in trainer.py:
-        # if cognitive_mode == 'classic' or model_name in ['gikt']:
-        #     #... we'll return logits to be safe for BCEWithLogitsLoss. Let's return `torch.squeeze(p, dim=-1)` unmodified.
-        # Let me check my previous output and trainer.py.
+        K_exp = K.unsqueeze(1).expand(-1, num_qc, -1, -1)
+        Q_exp = Q.unsqueeze(2).expand(-1, -1, num_state, -1)
+        
+        tmp = self.MLP_W(torch.concat((Q_exp, K_exp), dim=-1))
+        tmp = torch.squeeze(tmp, dim=-1)
+        alpha = torch.softmax(tmp, dim=2)
+        
+        p = torch.sum(torch.sum(alpha * output_g, dim=1), dim=1)
         return torch.squeeze(p, dim=-1)
