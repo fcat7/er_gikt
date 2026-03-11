@@ -30,7 +30,7 @@ def get_metadata(processed_data_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Train Baseline KT Models")
-    parser.add_argument('--model_name', type=str, required=True, choices=['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt'], help="Baseline model name (e.g., dkt, dkvmn)")
+    parser.add_argument('--model_name', type=str, required=True, choices=['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'gikt_old'], help="Baseline model name (e.g., dkt, dkvmn)")
     parser.add_argument('--dataset', type=str, required=True, help="Dataset name, e.g. assist09, ednet")
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--k_fold', type=int, default=5, help="K-Fold cross validation splits")
@@ -109,6 +109,6 @@ def main():
     if os.path.exists(save_path):
         print(f"✅ Successfully saved to {save_path}!")
 
-# python train_baseline.py --model_name dkt --dataset assist09 --epochs 50 --k_fold 1 --patience 3
+# python train_baseline.py --model_name dkt,dkvmn --dataset assist09 --epochs 200 --k_fold 1 --patience 10
 if __name__ == '__main__':
     main()

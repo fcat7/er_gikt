@@ -67,7 +67,7 @@ class BaseTrainer:
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
-                elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     preds = y_hat[:, 1:]
                 else:
@@ -146,7 +146,7 @@ class BaseTrainer:
                             preds = y_hat[:, :-1]
                         else:
                             preds = y_hat
-                    elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                    elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                         y_hat = model(question, response, mask, interval, r_time)
                         y_hat = torch.sigmoid(y_hat)
                         preds = y_hat[:, 1:]

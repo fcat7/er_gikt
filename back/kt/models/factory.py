@@ -3,7 +3,7 @@ import os
 from scipy import sparse
 
 # 导入基准模型
-from baselines import DKT, DKVMN, AKT, SimpleKT, QIKT, LBKT
+from baselines import DKT, DKVMN, AKT, SimpleKT, QIKT, LBKT, GIKTOld
 from .gikt import GIKT
 
 class ModelFactory:
@@ -116,6 +116,40 @@ class ModelFactory:
             qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(device)
             model = LBKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_h=emb_size, dim_factor=dim_factor).to(device)
             
+        elif name_key == 'gikt_old':
+            q_neighbors = kwargs.get('q_neighbors')
+            s_neighbors = kwargs.get('s_neighbors')
+            qs_table = kwargs.get('qs_table')
+            
+            if q_neighbors is None or s_neighbors is None or qs_table is None:
+                if config is None:
+                    raise ValueError("GIKTOld requires neighbors and qs_table or a valid config to load them.")
+                from util.utils import build_adj_list, gen_gikt_graph
+                q_neighbors_list, s_neighbors_list = build_adj_list(config.PROCESSED_DATA_DIR)
+                q_neighbors, s_neighbors = gen_gikt_graph(
+                    q_neighbors_list,
+                    s_neighbors_list,
+                    kwargs.get('size_q_neighbors', 4),
+                    kwargs.get('size_s_neighbors', 10)
+                )
+                qs_table = torch.tensor(
+                    sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(),
+                    dtype=torch.int64
+                ).to(device)
+
+            model = GIKTOld(
+                num_question=num_question,
+                num_skill=num_skill,
+                q_neighbors=q_neighbors,
+                s_neighbors=s_neighbors,
+                qs_table=qs_table,
+                agg_hops=kwargs.get('agg_hops', 3),
+                dim_emb=kwargs.get('emb_dim', 100),
+                dropout4gru=kwargs.get('dropout_linear', 0.1),
+                dropout4gnn=kwargs.get('dropout_gnn', 0.1),
+                rank_k=kwargs.get('rank_k', 10)
+            ).to(device)
+
         else:
             raise ValueError(f"Unknown model: {model_name}")
             
