@@ -102,5 +102,6 @@ def main():
 
     trainer.cross_validate(dataset)
 
+# python train_test_old_gikt.py --dataset assist09 --epochs 200 --batch_size 256 --patience 10
 if __name__ == '__main__':
     main()
