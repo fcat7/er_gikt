@@ -167,6 +167,9 @@ def main():
     parser.add_argument('--seed', type=int, default=RANDOM_SEED, help='Random seed')
     parser.add_argument('--min_seq_len', type=int, default=5, help='Min interactions per user')
     parser.add_argument('--stride', type=int, default=0, help=f'Sliding window stride for TRAIN set. 0 = disable, range: [0, {MAX_SEQ_LEN}]')
+    parser.add_argument('--k_core', type=int, default=5, help='K-Core过滤稀疏节点阈值 (默认5, <=0表示关闭)')
+    parser.add_argument('--extreme_acc_min', type=int, default=10, help='触发异常正确率100%/0%过滤的最少作答数阈值 (默认10, <=0表示关闭)')
+    parser.add_argument('--rapid_merge_sec', type=float, default=3.0, help='过滤连答/脚手架的最短合法秒数间隔 (默认3.0, <=0表示关闭)')
     
     args = parser.parse_args()
     # 检查 min_seq_len 合法性
@@ -220,6 +223,17 @@ def main():
         ic(f"Step 3: 分层采样 (ratio={args.ratio})...")
         sampler = KTDataSampler(random_seed=args.seed)
         df = sampler.stratified_sample(df, ratio=args.ratio, user_col=StandardColumns.USER_ID)  # 传入标准列名
+
+    # ========== Step 3.5: 采样后数据彻底去噪 (Denoiser) ========== 
+    # 注意：我们必须在采样（砍掉大量用户）之后，再执行 K-Core 和异常值清理
+    # 否则被采样砍出的网络破尾会导致极多新孤岛和新 100%正确率题目。
+    from data_utils.denoiser import KTDataDenoiser
+    df = KTDataDenoiser.run_denoise_pipeline(
+        df, 
+        k_core=args.k_core, 
+        extreme_acc_min=args.extreme_acc_min, 
+        rapid_merge_sec=args.rapid_merge_sec
+    )
     
     # 将标准化的数据只在处理好后（即短序列过滤/采样完成后）进行统一落盘，避免百万级 IO 导致缓慢
     standard_csv_path = os.path.join(output_dir, f'{dataset_name}_standard.csv')
