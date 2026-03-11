@@ -1,8 +1,12 @@
 import time
+import os
+import logging
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
+from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 from sklearn.model_selection import KFold, GroupKFold, ShuffleSplit, GroupShuffleSplit
 import numpy as np
@@ -21,6 +25,8 @@ class BaseTrainer:
         self.config = config
         self.kwargs = kwargs # 包含超参数
         
+        self.model_name = kwargs.get('model_name', 'Unknown')
+        self.dataset_name = kwargs.get('dataset_name', 'Unknown')
         self.epochs = kwargs.get('epochs', 50)
         self.patience = kwargs.get('patience', 5)
         self.k_fold = kwargs.get('k_fold', 5)
@@ -28,15 +34,62 @@ class BaseTrainer:
         self.learning_rate = kwargs.get('learning_rate', 1e-3)
         self.reg_4pl = kwargs.get('reg_4pl', 1e-5)
         self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
+        self.verbose_batch = kwargs.get('verbose_batch', False)  # 是否打印每个 batch 的耗时
         
         self.criterion = nn.BCEWithLogitsLoss()
+        
+        self._setup_logger()
+        self.logger.info(f"====== BaseTrainer Initialized ======")
+        self.logger.info(f"Model: {self.model_name}, Dataset: {self.dataset_name}")
+        self.logger.info(f"Configuration: ")
+        self.logger.info(f"  Num Question: {self.num_question}")
+        self.logger.info(f"  Num Skill: {self.num_skill}")
+        self.logger.info(f"  Epochs: {self.epochs}")
+        self.logger.info(f"  Batch Size: {self.batch_size}")
+        self.logger.info(f"  Learning Rate: {self.learning_rate}")
+        self.logger.info(f"  Patience: {self.patience}")
+        self.logger.info(f"  K-Fold: {self.k_fold}")
+        self.logger.info(f"  Optimization: AMP={self.kwargs.get('amp_enabled', True)}")
+        self.logger.info(f"=====================================")
 
-    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp):
+    def _setup_logger(self):
+        self.logger = logging.getLogger("BaseTrainer")
+        self.logger.setLevel(logging.INFO)
+        
+        # 防止重复添加 handler
+        if not self.logger.handlers:
+            formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', '%Y-%m-%d %H:%M:%S')
+            
+            # 控制台输出
+            ch = logging.StreamHandler()
+            ch.setFormatter(formatter)
+            self.logger.addHandler(ch)
+            
+            # 文件输出
+            try:
+                log_dir = getattr(self.config.path, 'LOG_DIR', './logs')
+            except AttributeError:
+                log_dir = './logs'
+            
+            os.makedirs(log_dir, exist_ok=True)
+            time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            # 生成日志文件名称
+            log_file = os.path.join(log_dir, f"trainer_{time_now}_{self.model_name}_{self.dataset_name}.log")
+            
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
+            
+            self.logger.info(f"Logger initialized. File output: {log_file}")
+
+    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp, epoch_idx=None):
         model.train()
         total_loss = 0
         total_samples = 0
         
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
+            batch_start_time = time.time()
             features = {k: v.to(self.device) for k, v in batch.items()}
             question = features[SeqFeatureKey.Q].to(torch.long)
             response = features[SeqFeatureKey.R].to(torch.long)
@@ -53,7 +106,7 @@ class BaseTrainer:
             model_name = getattr(model, 'model_name', '').lower()
             cognitive_mode = getattr(model, 'cognitive_mode', None)
             
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                 if model_name == 'dkt':
                     y_hat = model(question, response, mask)
                     eps = 1e-6
@@ -65,7 +118,7 @@ class BaseTrainer:
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
-                elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     preds = y_hat[:, 1:]
                 else:
@@ -109,15 +162,20 @@ class BaseTrainer:
             total_loss += loss.item() * preds_filtered.size(0)
             total_samples += preds_filtered.size(0)
             
+            if self.verbose_batch:
+                batch_time = time.time() - batch_start_time
+                self.logger.info(f"[Train] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f} | Time: {batch_time:.3f}s")
+            
         return total_loss / total_samples if total_samples > 0 else 0
 
-    def _evaluate(self, model, dataloader, use_amp):
+    def _evaluate(self, model, dataloader, use_amp, epoch_idx=None):
         model.eval()
         all_preds = []
         all_targets = []
         
         with torch.no_grad():
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader):
+                batch_start_time = time.time()
                 features = {k: v.to(self.device) for k, v in batch.items()}
                 question = features[SeqFeatureKey.Q].to(torch.long)
                 response = features[SeqFeatureKey.R].to(torch.long)
@@ -132,7 +190,7 @@ class BaseTrainer:
                 model_name = getattr(model, 'model_name', '').lower()
                 cognitive_mode = getattr(model, 'cognitive_mode', None)
                 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                     if model_name == 'dkt':
                         y_hat = model(question, response, mask)
                         preds = y_hat[:, :-1]
@@ -144,7 +202,7 @@ class BaseTrainer:
                             preds = y_hat[:, :-1]
                         else:
                             preds = y_hat
-                    elif model_name in ['gikt'] or cognitive_mode == 'classic':
+                    elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                         y_hat = model(question, response, mask, interval, r_time)
                         y_hat = torch.sigmoid(y_hat)
                         preds = y_hat[:, 1:]
@@ -168,6 +226,10 @@ class BaseTrainer:
                         
                     all_preds.extend(p)
                     all_targets.extend(t)
+                    
+                if self.verbose_batch:
+                    batch_time = time.time() - batch_start_time
+                    self.logger.info(f"[Eval] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Time: {batch_time:.3f}s")
         
         if not all_preds:
             return 0, 0
@@ -182,7 +244,7 @@ class BaseTrainer:
         acc = metrics.accuracy_score(all_targets, [1 if p >= 0.5 else 0 for p in all_preds])
         return auc, acc
 
-    def cross_validate(self, dataset):
+    def cross_validate(self, dataset, test_dataset=None):
         """
         执行 K-Fold 交叉验证
         返回: 各折在验证集上的最佳 AUC 列表
@@ -205,7 +267,7 @@ class BaseTrainer:
         fold_aucs = []
 
         for fold, (train_indices, val_indices) in enumerate(splits):
-            print(f"--- Fold {fold + 1}/{len(splits)} ---")
+            self.logger.info(f"--- Fold {fold + 1}/{len(splits)} ---")
             
             train_set = Subset(dataset, train_indices)
             val_set = Subset(dataset, val_indices)
@@ -225,30 +287,73 @@ class BaseTrainer:
             
             # 初始化 AMP
             use_amp = self.kwargs.get('amp_enabled', True) and torch.cuda.is_available()
-            scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+            if hasattr(torch.cuda, "amp") and hasattr(torch.cuda.amp, "GradScaler"):
+                scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+            elif hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+                scaler = torch.amp.GradScaler(enabled=use_amp)
+            else:
+                # 兼容 DummyScaler
+                class DummyScaler:
+                    def scale(self, loss): return loss
+                    def step(self, optimizer): optimizer.step()
+                    def update(self): pass
+                scaler = DummyScaler()
             
             best_val_auc = 0.0
             patience_counter = 0
             
+            # TensorBoard Setup
+            trial_number = self.kwargs.get('trial_number', 'unknown')
+            log_dir = os.path.join("runs", f"trial_{trial_number}_fold_{fold+1}")
+            writer = SummaryWriter(log_dir=log_dir)
+            
             for epoch in range(self.epochs):
                 start_time = time.time()
-                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp)
-                val_auc, val_acc = self._evaluate(model, val_loader, use_amp)
+                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1)
+                val_auc, val_acc = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
                 end_time = time.time()
                 
-                print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
+                # Write to TensorBoard
+                writer.add_scalar('Loss/train', train_loss, epoch)
+                writer.add_scalar('AUC/val', val_auc, epoch)
+                writer.add_scalar('ACC/val', val_acc, epoch)
+                
+                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
                 
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     patience_counter = 0
+                    if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
+                        torch.save(model.state_dict(), self.kwargs.get('model_save_path'))
                 else:
                     patience_counter += 1
                     
                 if patience_counter >= self.patience:
-                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
                     break
                     
-            print(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}\n")
+            writer.close()
+            self.logger.info(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}")
+            
+            # Evaluate on Test Set if provided
+            if test_dataset is not None:
+                if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
+                    # Load best model weights for this fold
+                    best_model_path = self.kwargs.get('model_save_path')
+                    if os.path.exists(best_model_path):
+                        self.logger.info(f"Loading best model for fold {fold+1} test evaluation...")
+                        state_dict = torch.load(best_model_path, map_location=self.device)
+                        if isinstance(state_dict, torch.nn.Module):
+                            model = state_dict
+                        else:
+                            model.load_state_dict(state_dict)
+                
+                test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
+                test_auc, test_acc = self._evaluate(model, test_loader, use_amp)
+                self.logger.info(f"Fold {fold + 1} Test ACC: {test_acc:.4f} | Test AUC: {test_auc:.4f}\n")
+            else:
+                self.logger.info("\n")
+                
             fold_aucs.append(best_val_auc)
             
         return fold_aucs

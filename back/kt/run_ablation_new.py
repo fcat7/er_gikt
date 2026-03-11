@@ -13,9 +13,29 @@ CHECKPOINT_FILE = "ablation_checkpoint.json"
 
 # 定义我们要跑的消融实验组
 ABLATION_TARGETS = {
+    "assist09-full": [
+        "train.dataset_name=assist09",
+        "train.save_model=True"
+    ],
+    "assist12-full": [
+        "train.dataset_name=assist12",
+        "train.save_model=True"
+    ],
+    "assist17-full": [
+        "train.dataset_name=assist17",
+        "train.save_model=True"
+    ],
+    "ednet_kt1-full": [
+        "train.dataset_name=ednet_kt1",
+        "train.save_model=True"
+    ],
+    "nips2020-full": [
+        "train.dataset_name=nips2020",
+        "train.save_model=True"
+    ]
     # 实验名 : 要覆写（Override）的参数列表
-    # "A_Baseline": [],
-    
+    # "A_Baseline": [
+    # ],
     # "B_Remove_PID": [
     #     "model.use_pid=False"
     # ],
@@ -28,16 +48,16 @@ ABLATION_TARGETS = {
     #     "model.use_4pl_irt=False"
     # ],
     
-    "E_agg_method: gcn": [
-        "model.agg_method=gcn"
-    ],
+    # "E_agg_method: gcn": [
+    #     "model.agg_method=gcn"
+    # ],
     
-    "F_old_gikt": [
-        "model.use_pid=False",
-        "model.use_cognitive_model=False",
-        "model.use_4pl_irt=False",
-        "model.agg_method=gcn"
-    ]
+    # "F_old_gikt": [
+    #     "model.use_pid=False",
+    #     "model.use_cognitive_model=False",
+    #     "model.use_4pl_irt=False",
+    #     "model.agg_method=gcn"
+    # ]
 }
 
 def main():
@@ -45,8 +65,8 @@ def main():
     parser.add_argument("--full", action="store_true", help="使用全量数据集 (覆盖 --full 标志)")
     parser.add_argument("--log", action="store_true", help="启用详细日志 (train.verbose=true)")
     parser.add_argument("--dataset_name", type=str, help="设置数据集名称 (train.dataset_name)")
-    parser.add_argument("--epochs", type=int, default=30, help="强制指定实验轮数 (覆盖配置，默认30)")
-    parser.add_argument("--patience", type=int, default=5, help="强制指定早停轮数 (覆盖配置，默认5)")
+    parser.add_argument("--epochs", type=int, help="强制指定实验轮数 (覆盖配置)")
+    parser.add_argument("--patience", type=int, help="强制指定早停轮数 (覆盖配置)")
     parser.add_argument("--resume", action="store_true", help="从断点恢复实验")
     parser.add_argument("--reset", action="store_true", help="清理进度并重新开始")
     args = parser.parse_args()
@@ -94,8 +114,10 @@ def main():
             final_overrides.append(f"train.dataset_name={args.dataset_name}")
         
         # 强制配置诊断性训练轮数和早停
-        final_overrides.append(f"train.epochs={args.epochs}")
-        final_overrides.append(f"train.patience={args.patience}")
+        if args.epochs:
+            final_overrides.append(f"train.epochs={args.epochs}")
+        if args.patience:
+            final_overrides.append(f"train.patience={args.patience}")
 
         # 加入覆写参数指令
         if final_overrides:

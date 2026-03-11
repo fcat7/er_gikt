@@ -16,7 +16,7 @@ TODO
 
 _^tab^_
 
-> **windows**
+> **mac**
 >
 > ```shell
 > ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/data ./data
@@ -24,7 +24,7 @@ _^tab^_
 > ln -s /Users/fcatnoby/Library/CloudStorage/GoogleDrive-m18282065259@163.com/我的云端硬盘/kt_fzq_assets/config ./config
 > ```
 
-> **mac**
+> **windows**
 >
 > ```shell
 > mklink /D data "I:\我的云端硬盘\kt_fzq_assets\data"

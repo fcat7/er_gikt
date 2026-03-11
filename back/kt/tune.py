@@ -68,6 +68,7 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
         'epochs': tune_config.get('epochs', 50),
         'patience': tune_config.get('patience', 5),
         'k_fold': tune_config.get('k_fold', 5),
+        'trial_number': trial.number,
         **sampled_params
     }
     
@@ -127,8 +128,11 @@ def main():
     model_name = tune_config['model_name']
     epochs = tune_config.get('epochs', 50)
     k_fold = tune_config.get('k_fold', 5)
-
-    study_name = f"{model_name}_{dataset_name}_e{epochs}_k{k_fold}"
+    tune_name = tune_config.get('tune_name', '')
+    if tune_name:
+        study_name = f"{model_name}_{dataset_name}_e{epochs}_k{k_fold}_{tune_name}"
+    else:
+        study_name = f"{model_name}_{dataset_name}_e{epochs}_k{k_fold}"
 
     # 统一使用一个大数据库文件，方便 Dashboard 集中管理
     default_db = "kt_tuning.db"
@@ -183,10 +187,16 @@ def main():
     except ValueError as e:
         msg = str(e)
         if 'CategoricalDistribution does not support dynamic value space' in msg:
-            print("Optuna参数空间错误：不支持“动态变更参数空间”。\n参数 choices 一旦在某个 study（实验）里确定下来，后续 trial 必须保持一致，不能在 yaml 或代码里修改参数选项，否则会报错。\n解决方法：请更换 study_name 或清理旧数据库后重试。")
+            print(f"\n[Optuna 错误] 参数空间冲突！")
+            print(f"检测到您修改了 search_space 中的选项（choices），但当前的 Study 记录 '{study_name}' 仍在使用旧的参数定义。")
+            print(f"解决方法：")
+            print(f"1. 在 YAML 配置文件中修改 'tune_name'，例如：{tune_name}-v2")
+            print(f"2. 或者删除数据库文件（{storage}）重启实验。")
+        elif 'is already registered with different' in msg:
+            print(f"\n[Optuna 错误] 您可能修改了参数的类型（例如从 categorical 改为 int）。")
+            print(f"请更换 'tune_name' 以启动新的实验。")
         else:
             print(f"Optuna参数空间错误：{e}")
-            print("请检查 search_space 是否有变动，或更换 study_name 后重试。")
         return
     
     print("\n==================================================")
@@ -210,5 +220,6 @@ def main():
 
 # python tune.py --config config/tune/dkt.yaml
 # optuna-dashboard sqlite:///kt_tuning.db
+# tensorboard --logdir=runs --port=6006
 if __name__ == '__main__':
     main()

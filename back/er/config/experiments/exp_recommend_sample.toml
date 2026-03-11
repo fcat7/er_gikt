@@ -6,6 +6,8 @@ dataset_name = "assist09-sample_20%"
 device = "auto"
 seed = 42
 model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_221537-assist09-sample_20%.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+dkt_model_path = "H:\\er_gikt\\back\\kt\\checkpoint\\dkt_assist09-sample_20%_best.pt"
+dkvmn_model_path = "H:\\er_gikt\\back\\kt\\checkpoint\\dkvmn_assist09-sample_20%_best.pt"
 
 [recommendation]
 # 推荐题目数

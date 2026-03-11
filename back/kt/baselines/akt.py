@@ -331,7 +331,11 @@ def attention(q, k, v, d_k, mask, dropout, zero_pad, gamma=None, pdiff=None):
     x2 = x1.transpose(0, 1).contiguous()
 
     with torch.no_grad():
-        scores_ = scores.masked_fill(mask == 0, -1e32)
+        # dtype为Half时，-1e32会导致溢出，使用与dtype对应的小一点的负数
+        if scores.dtype == torch.float16:
+            scores_ = scores.masked_fill(mask == 0, -65504.0)
+        else:
+            scores_ = scores.masked_fill(mask == 0, -1e32)
         scores_ = F.softmax(scores_, dim=-1)  # BS,8,seqlen,seqlen
         scores_ = scores_ * mask.float().to(q.device) # 结果和上一步一样
         distcum_scores = torch.cumsum(scores_, dim=-1)  # bs, 8, sl, sl

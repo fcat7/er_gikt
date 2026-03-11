@@ -65,7 +65,8 @@ class LBKTcell(nn.Module):
         h_pre_tilde = torch.squeeze(torch.bmm(correlation_weight.unsqueeze(1), h_pre), 1)
         
         # predict performance (logits)
-        predict_logit = self.out_logit(torch.cat([h_pre_tilde, topic_emb], -1)).squeeze(-1)
+        # h_pre_tilde: [bs, dim_h], topic_emb: [bs, dim_h]
+        predict_logit = self.out_logit(h_pre_tilde).squeeze(-1)
 
         # characterize each behavior's effect
         time_gain = self.time_gain(time_factor, interact_emb, h_pre_tilde)

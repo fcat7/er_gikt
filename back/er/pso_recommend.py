@@ -277,7 +277,8 @@ class CandidateBuilder:
         g2_mask = (probs >= self.gate_p_min) & (probs <= self.gate_p_max)
         
         # G3: 薄弱技能关联
-        weak_skills = np.where(m_k < 0.7)[0]
+        threshold = float(np.mean(m_k))
+        weak_skills = np.where(m_k < threshold)[0]
         g3_mask = np.zeros(n_q, dtype=bool)
         for q in range(1, n_q):
             related_skills = self.qs_table[q].nonzero(as_tuple=True)[0].cpu().numpy()
@@ -376,7 +377,8 @@ class FitnessEvaluator:
         )
         
         # F2: Weak skill coverage (negative for minimization)
-        weak_skills = np.where(m_k < 0.7)[0]
+        threshold = float(np.mean(m_k))
+        weak_skills = np.where(m_k < threshold)[0]
         covered_weak = set()
         for q in combo:
             related = self.qs_table[q].nonzero(as_tuple=True)[0].cpu().numpy()
