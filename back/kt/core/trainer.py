@@ -25,6 +25,8 @@ class BaseTrainer:
         self.config = config
         self.kwargs = kwargs # 包含超参数
         
+        self.model_name = kwargs.get('model_name', 'Unknown')
+        self.dataset_name = kwargs.get('dataset_name', 'Unknown')
         self.epochs = kwargs.get('epochs', 50)
         self.patience = kwargs.get('patience', 5)
         self.k_fold = kwargs.get('k_fold', 5)
@@ -37,6 +39,18 @@ class BaseTrainer:
         self.criterion = nn.BCEWithLogitsLoss()
         
         self._setup_logger()
+        self.logger.info(f"====== BaseTrainer Initialized ======")
+        self.logger.info(f"Model: {self.model_name}, Dataset: {self.dataset_name}")
+        self.logger.info(f"Configuration: ")
+        self.logger.info(f"  Num Question: {self.num_question}")
+        self.logger.info(f"  Num Skill: {self.num_skill}")
+        self.logger.info(f"  Epochs: {self.epochs}")
+        self.logger.info(f"  Batch Size: {self.batch_size}")
+        self.logger.info(f"  Learning Rate: {self.learning_rate}")
+        self.logger.info(f"  Patience: {self.patience}")
+        self.logger.info(f"  K-Fold: {self.k_fold}")
+        self.logger.info(f"  Optimization: AMP={self.kwargs.get('amp_enabled', True)}")
+        self.logger.info(f"=====================================")
 
     def _setup_logger(self):
         self.logger = logging.getLogger("BaseTrainer")
@@ -61,7 +75,7 @@ class BaseTrainer:
             time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
             
             # 生成日志文件名称
-            log_file = os.path.join(log_dir, f"trainer_{time_now}.log")
+            log_file = os.path.join(log_dir, f"trainer_{time_now}_{self.model_name}_{self.dataset_name}.log")
             
             fh = logging.FileHandler(log_file, encoding='utf-8')
             fh.setFormatter(formatter)
@@ -230,7 +244,7 @@ class BaseTrainer:
         acc = metrics.accuracy_score(all_targets, [1 if p >= 0.5 else 0 for p in all_preds])
         return auc, acc
 
-    def cross_validate(self, dataset):
+    def cross_validate(self, dataset, test_dataset=None):
         """
         执行 K-Fold 交叉验证
         返回: 各折在验证集上的最佳 AUC 列表
@@ -319,7 +333,27 @@ class BaseTrainer:
                     break
                     
             writer.close()
-            self.logger.info(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}\n")
+            self.logger.info(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}")
+            
+            # Evaluate on Test Set if provided
+            if test_dataset is not None:
+                if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
+                    # Load best model weights for this fold
+                    best_model_path = self.kwargs.get('model_save_path')
+                    if os.path.exists(best_model_path):
+                        self.logger.info(f"Loading best model for fold {fold+1} test evaluation...")
+                        state_dict = torch.load(best_model_path, map_location=self.device)
+                        if isinstance(state_dict, torch.nn.Module):
+                            model = state_dict
+                        else:
+                            model.load_state_dict(state_dict)
+                
+                test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
+                test_auc, test_acc = self._evaluate(model, test_loader, use_amp)
+                self.logger.info(f"Fold {fold + 1} Test ACC: {test_acc:.4f} | Test AUC: {test_auc:.4f}\n")
+            else:
+                self.logger.info("\n")
+                
             fold_aucs.append(best_val_auc)
             
         return fold_aucs

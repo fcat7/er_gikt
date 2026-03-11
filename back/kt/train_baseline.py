@@ -57,11 +57,16 @@ def main():
         if matched_key:
             print(f"[{args.model_name.upper()}] 🌟 Auto-loading optimal parameters for '{matched_key}':")
             override_params = best_params_dict[matched_key]
-            for param_k, param_v in override_params.items():
-                model_kwargs[param_k] = param_v
-                print(f"  |-- {param_k} = {param_v}")
+        elif 'default' in best_params_dict:
+            print(f"[{args.model_name.upper()}] ⚠️ No optimal params found for dataset '{args.dataset}', using 'default' parameters:")
+            override_params = best_params_dict['default']
         else:
-            print(f"[{args.model_name.upper()}] ⚠️ No optimal params found for dataset '{args.dataset}' in JSON.")
+            print(f"[{args.model_name.upper()}] ⚠️ No optimal params found for dataset '{args.dataset}' in JSON, and no 'default' provided.")
+            override_params = {}
+            
+        for param_k, param_v in override_params.items():
+            model_kwargs[param_k] = param_v
+            print(f"  |-- {param_k} = {param_v}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data_config = get_config(args.dataset)
@@ -69,6 +74,7 @@ def main():
     
     print(f"[{args.model_name.upper()}] Loading dataset {args.dataset}...")
     dataset = UnifiedParquetDataset(data_config, mode='train')
+    test_dataset = UnifiedParquetDataset(data_config, mode='test')
 
     checkpoint_dir = 'checkpoint'
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -78,10 +84,14 @@ def main():
     def factory_func(**f_kwargs):
         # Merge JSON params into factory kwargs
         f_kwargs.update(model_kwargs)
+        f_kwargs.pop('model_name', None)
+        f_kwargs.pop('dataset_name', None)
         return ModelFactory.get_model(args.model_name, **f_kwargs)
 
     # Supply kwargs to BaseTrainer
     kwargs = {
+        'model_name': args.model_name,
+        'dataset_name': args.dataset,
         'epochs': args.epochs,
         'batch_size': model_kwargs.get('batch_size', 64),
         'learning_rate': model_kwargs.get('learning_rate', 1e-3),
@@ -89,7 +99,7 @@ def main():
         'patience': args.patience,
         'save_model': True,
         'model_save_path': save_path,
-        'amp_enabled': True
+        'amp_enabled': False
     }
 
     trainer = BaseTrainer(
@@ -102,13 +112,13 @@ def main():
     )
     
     print(f"Start training {args.model_name.upper()}... Best model will be saved to => {save_path}")
-    fold_aucs = trainer.cross_validate(dataset)
+    fold_aucs = trainer.cross_validate(dataset, test_dataset=test_dataset)
     
     best_auc = max(fold_aucs) if fold_aucs else 0.0
     print(f"[{args.model_name.upper()}] Training finished. Max validation AUC: {best_auc:.4f}")
     if os.path.exists(save_path):
         print(f"✅ Successfully saved to {save_path}!")
 
-# python train_baseline.py --model_name dkt,dkvmn --dataset assist09 --epochs 200 --k_fold 1 --patience 10
+# python train_baseline.py --model_name lbkt --dataset assist09 --epochs 1 --k_fold 1 --patience 1
 if __name__ == '__main__':
     main()
