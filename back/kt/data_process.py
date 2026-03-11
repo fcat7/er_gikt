@@ -14,6 +14,7 @@ from tqdm import tqdm
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import get_config, RANDOM_SEED, MAX_SEQ_LEN
 from data_utils.adapter import KTDataAdapter
+from data_utils.inspector import KTDataInspector
 from data_utils.sampler import KTDataSampler
 from data_utils.builder import KTDataBuilder
 from data_utils.splitter import KTDataSplitter
@@ -48,38 +49,36 @@ def calculate_question_features_full(df):
     df_aug = df.copy()
     df_aug['user_score'] = df_aug[StandardColumns.USER_ID].map(user_scores)
     
-    feature_list = []
-    
-    # 分组计算
-    # 必须列: question_id, label. 可选: response_time
     if StandardColumns.RESPONSE_TIME not in df.columns:
         df_aug[StandardColumns.RESPONSE_TIME] = 0.0
 
+    ic("Extracting Features (Vectorized)...")
     grouped = df_aug.groupby(StandardColumns.QUESTION_ID)
+    
+    # 1. 向量化计算基础指标（极大提升速度）
+    agg_df = grouped.agg(
+        difficulty=(StandardColumns.LABEL, lambda x: 1.0 - x.mean()),
+        avg_rt=(StandardColumns.RESPONSE_TIME, 'median'),
+        count=(StandardColumns.LABEL, 'count'),
+        nunique_label=(StandardColumns.LABEL, 'nunique')
+    )
+    
+    # 2. 区分度的计算：只对符合条件的题目操作
+    valid_mask = (agg_df['count'] > 5) & (agg_df['nunique_label'] > 1)
+    valid_qids = agg_df[valid_mask].index
 
-    for qid, group in tqdm(grouped, desc="Extracting Features"):
-        avg_correct = group[StandardColumns.LABEL].mean()
-        difficulty = 1.0 - avg_correct
-
-        # response_time
-        avg_rt = group[StandardColumns.RESPONSE_TIME].median() # Median usually better for RT
-
-        # Disc
-        if len(group) > 5 and group[StandardColumns.LABEL].nunique() > 1:
-            disc = group[StandardColumns.LABEL].corr(group['user_score'])
-            if pd.isna(disc): disc = 0.0
-        else:
-            disc = 0.0
-
-        feature_list.append({
-            StandardColumns.QUESTION_ID: qid,  # 使用标准列名
-            'difficulty': difficulty,
-            'discrimination': disc,
-            'avg_rt': avg_rt
-        })
-        
-    f_df = pd.DataFrame(feature_list)
-    return f_df
+    # 只过滤出多于5条记录且有不同label的题目进行相关性计算
+    if len(valid_qids) > 0:
+        valid_df = df_aug[df_aug[StandardColumns.QUESTION_ID].isin(valid_qids)]
+        # 用 lambda 过滤计算 corr 还是会比循环所有的快几十倍
+        disc_series = valid_df.groupby(StandardColumns.QUESTION_ID).apply(
+            lambda g: g[StandardColumns.LABEL].corr(g['user_score'])
+        )
+        agg_df.loc[valid_qids, 'discrimination'] = disc_series
+    
+    agg_df['discrimination'] = agg_df.get('discrimination', 0.0).fillna(0.0)
+    agg_df = agg_df.reset_index()
+    return agg_df[[StandardColumns.QUESTION_ID, 'difficulty', 'discrimination', 'avg_rt']]
 
 def normalize_and_save_features(f_df, builder, output_dir):
     """
@@ -90,9 +89,13 @@ def normalize_and_save_features(f_df, builder, output_dir):
     
     # 1. Norm
     cols = ['difficulty', 'discrimination', 'avg_rt']
+    
+    # 防止 SettingWithCopyWarning，使用显式的复制
+    f_df = f_df.copy()
+    
     if 'avg_rt' in f_df.columns:
         # Log RT
-        f_df['avg_rt'] = np.log1p(np.clip(f_df['avg_rt'], 0, None))
+        f_df.loc[:, 'avg_rt'] = np.log1p(np.clip(f_df['avg_rt'], 0, None))
     
     # Z-Score
     for c in cols:
@@ -100,7 +103,7 @@ def normalize_and_save_features(f_df, builder, output_dir):
             m = f_df[c].mean()
             s = f_df[c].std()
             if s == 0: s = 1.0
-            f_df[c] = (f_df[c] - m) / s
+            f_df.loc[:, c] = (f_df[c] - m) / s
             
     # 2. Map
     num_q = max(builder.question2idx.values()) + 1 # includes 0
@@ -199,10 +202,6 @@ def main():
     try:
         df = KTDataAdapter.load_from_toml(dataset_config)
         ic(f"标准化后数据: {df.shape}")
-        # 保存标准化后的数据（全量）
-        standard_csv_path = os.path.join(output_dir, f'{dataset_name}_standard.csv')
-        KTDataAdapter.save_standard_csv(df, standard_csv_path)
-        ic(f"标准化数据已保存: {standard_csv_path}")
     except Exception as e:
         ic(f"数据加载失败: {e}")
         return
@@ -221,10 +220,11 @@ def main():
         ic(f"Step 3: 分层采样 (ratio={args.ratio})...")
         sampler = KTDataSampler(random_seed=args.seed)
         df = sampler.stratified_sample(df, ratio=args.ratio, user_col=StandardColumns.USER_ID)  # 传入标准列名
-        # 保存采样后的标准化 CSV
-        sampled_csv_path = os.path.join(output_dir, f'{dataset_name}_standard.csv')
-        df.to_csv(sampled_csv_path, index=False, encoding='utf-8')
-        ic(f"采样后数据已保存: {sampled_csv_path}")
+    
+    # 将标准化的数据只在处理好后（即短序列过滤/采样完成后）进行统一落盘，避免百万级 IO 导致缓慢
+    standard_csv_path = os.path.join(output_dir, f'{dataset_name}_standard.csv')
+    KTDataAdapter.save_standard_csv(df, standard_csv_path)
+    ic(f"核心清洗后数据集已落盘: {standard_csv_path}")
 
     # ========== Step 4: 用户级分割 ========== 
     ic("Step 4: 用户级分割 (Train 80% / Test 20%)...")
@@ -251,6 +251,20 @@ def main():
     test_records = builder.build_sequences(df_test, stride=None, save_prefix='test')
     pd.DataFrame(test_records).to_parquet(os.path.join(output_dir, 'test.parquet'), engine='pyarrow', index=False)
     
+
+    # ========== 数据深度体检 (Sanity Check) ==========
+    ic("执行数据深度体检...")
+    # NOTE: config is passed as None temporarily, or create a mock. The script uses no config.
+    class MockConfig:
+        class path:
+            REPORT_DIR = os.path.join(output_dir, "reports")
+    inspector = KTDataInspector(df, MockConfig())
+    inspector.run_full_sanity_check()
+    # 判断泄漏
+    train_pq = pd.DataFrame(train_records)
+    test_pq = pd.DataFrame(test_records)
+    KTDataInspector.check_train_test_leakage_and_cold_start(train_pq, test_pq)
+
     # ========== Step 7: 题目统计特征计算 ========== 
     ic("Step 7: 题目统计特征计算（仅基于训练集）...")
     # 为避免信息泄露，这里仅使用训练集用户的交互数据来计算题目难度/区分度/答题时间等特征

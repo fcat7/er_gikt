@@ -41,7 +41,7 @@ class KTDataAdapter:
         df = KTDataAdapter._standardize_columns(df, toml_config.get('column_map', {}))
         
         # Step 3: 应用过滤器
-        df = KTDataAdapter._apply_filters(df, toml_config.get('filters', {}))
+        df = KTDataAdapter._apply_filters(df, toml_config.get('filters', {})).copy()
         
         # Step 4: skill_ids 分隔符标准化（可选）
         skill_ids_col = StandardColumns.SKILL_IDS
@@ -52,7 +52,7 @@ class KTDataAdapter:
             # 支持多个分隔符及其前后空白
             import re
             pattern = f"\\s*[{re.escape(skill_ids_sep)}]\\s*"
-            df[skill_ids_col] = df[skill_ids_col].astype(str).replace(pattern, std_sep, regex=True)
+            df.loc[:, skill_ids_col] = df[skill_ids_col].astype(str).replace(pattern, std_sep, regex=True)
 
         # Step 5: 数据清洗
         df = KTDataAdapter._clean_data(df)
