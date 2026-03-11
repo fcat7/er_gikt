@@ -1,5 +1,7 @@
 import time
 import os
+import logging
+from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -30,15 +32,50 @@ class BaseTrainer:
         self.learning_rate = kwargs.get('learning_rate', 1e-3)
         self.reg_4pl = kwargs.get('reg_4pl', 1e-5)
         self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
+        self.verbose_batch = kwargs.get('verbose_batch', False)  # 是否打印每个 batch 的耗时
         
         self.criterion = nn.BCEWithLogitsLoss()
+        
+        self._setup_logger()
 
-    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp):
+    def _setup_logger(self):
+        self.logger = logging.getLogger("BaseTrainer")
+        self.logger.setLevel(logging.INFO)
+        
+        # 防止重复添加 handler
+        if not self.logger.handlers:
+            formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', '%Y-%m-%d %H:%M:%S')
+            
+            # 控制台输出
+            ch = logging.StreamHandler()
+            ch.setFormatter(formatter)
+            self.logger.addHandler(ch)
+            
+            # 文件输出
+            try:
+                log_dir = getattr(self.config.path, 'LOG_DIR', './logs')
+            except AttributeError:
+                log_dir = './logs'
+            
+            os.makedirs(log_dir, exist_ok=True)
+            time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            # 生成日志文件名称
+            log_file = os.path.join(log_dir, f"trainer_{time_now}.log")
+            
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
+            
+            self.logger.info(f"Logger initialized. File output: {log_file}")
+
+    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp, epoch_idx=None):
         model.train()
         total_loss = 0
         total_samples = 0
         
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
+            batch_start_time = time.time()
             features = {k: v.to(self.device) for k, v in batch.items()}
             question = features[SeqFeatureKey.Q].to(torch.long)
             response = features[SeqFeatureKey.R].to(torch.long)
@@ -111,15 +148,20 @@ class BaseTrainer:
             total_loss += loss.item() * preds_filtered.size(0)
             total_samples += preds_filtered.size(0)
             
+            if self.verbose_batch:
+                batch_time = time.time() - batch_start_time
+                self.logger.info(f"[Train] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f} | Time: {batch_time:.3f}s")
+            
         return total_loss / total_samples if total_samples > 0 else 0
 
-    def _evaluate(self, model, dataloader, use_amp):
+    def _evaluate(self, model, dataloader, use_amp, epoch_idx=None):
         model.eval()
         all_preds = []
         all_targets = []
         
         with torch.no_grad():
-            for batch in dataloader:
+            for batch_idx, batch in enumerate(dataloader):
+                batch_start_time = time.time()
                 features = {k: v.to(self.device) for k, v in batch.items()}
                 question = features[SeqFeatureKey.Q].to(torch.long)
                 response = features[SeqFeatureKey.R].to(torch.long)
@@ -170,6 +212,10 @@ class BaseTrainer:
                         
                     all_preds.extend(p)
                     all_targets.extend(t)
+                    
+                if self.verbose_batch:
+                    batch_time = time.time() - batch_start_time
+                    self.logger.info(f"[Eval] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Time: {batch_time:.3f}s")
         
         if not all_preds:
             return 0, 0
@@ -207,7 +253,7 @@ class BaseTrainer:
         fold_aucs = []
 
         for fold, (train_indices, val_indices) in enumerate(splits):
-            print(f"--- Fold {fold + 1}/{len(splits)} ---")
+            self.logger.info(f"--- Fold {fold + 1}/{len(splits)} ---")
             
             train_set = Subset(dataset, train_indices)
             val_set = Subset(dataset, val_indices)
@@ -249,8 +295,8 @@ class BaseTrainer:
             
             for epoch in range(self.epochs):
                 start_time = time.time()
-                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp)
-                val_auc, val_acc = self._evaluate(model, val_loader, use_amp)
+                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1)
+                val_auc, val_acc = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
                 end_time = time.time()
                 
                 # Write to TensorBoard
@@ -258,7 +304,7 @@ class BaseTrainer:
                 writer.add_scalar('AUC/val', val_auc, epoch)
                 writer.add_scalar('ACC/val', val_acc, epoch)
                 
-                print(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
+                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
                 
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
@@ -269,11 +315,11 @@ class BaseTrainer:
                     patience_counter += 1
                     
                 if patience_counter >= self.patience:
-                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
                     break
                     
             writer.close()
-            print(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}\n")
+            self.logger.info(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}\n")
             fold_aucs.append(best_val_auc)
             
         return fold_aucs

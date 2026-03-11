@@ -41,6 +41,9 @@ def main():
     parser.add_argument('--dropout4gru', type=float, default=0.1, help="Dropout rate for GRU")
     parser.add_argument('--dropout4gnn', type=float, default=0.1, help="Dropout rate for GNN")
     
+    # 打印控制
+    parser.add_argument('--verbose_batch', action='store_true', help="Print time and loss per batch")
+    
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -77,7 +80,8 @@ def main():
         'patience': args.patience,
         'save_model': True,
         'model_save_path': save_path,
-        'amp_enabled': True
+        'amp_enabled': True,
+        'verbose_batch': args.verbose_batch
     }
 
     trainer = BaseTrainer(
