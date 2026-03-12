@@ -17,4 +17,7 @@ node_modules/
 
 # 临时
 temp/
+checkpoint/
+back/er/output/
+*.pt
 *.db

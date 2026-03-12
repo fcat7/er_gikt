@@ -27,6 +27,7 @@ class BaseTrainer:
         
         self.model_name = kwargs.get('model_name', 'Unknown')
         self.dataset_name = kwargs.get('dataset_name', 'Unknown')
+        self.task_name = kwargs.get('task_name', 'train_baseline')
         self.epochs = kwargs.get('epochs', 50)
         self.patience = kwargs.get('patience', 5)
         self.k_fold = kwargs.get('k_fold', 5)
@@ -40,7 +41,7 @@ class BaseTrainer:
         
         self._setup_logger()
         self.logger.info(f"====== BaseTrainer Initialized ======")
-        self.logger.info(f"Model: {self.model_name}, Dataset: {self.dataset_name}")
+        self.logger.info(f"Task: {self.task_name} | Model: {self.model_name}, Dataset: {self.dataset_name}")
         self.logger.info(f"Configuration: ")
         self.logger.info(f"  Num Question: {self.num_question}")
         self.logger.info(f"  Num Skill: {self.num_skill}")
@@ -83,15 +84,18 @@ class BaseTrainer:
             
             self.logger.info(f"Logger initialized. File output: {log_file}")
 
-    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp, epoch_idx=None):
+    def _train_epoch(self, model, dataloader, optimizer, scaler, use_amp, epoch_idx=None, tb_writer=None):
         model.train()
         total_loss = 0
         total_samples = 0
+        all_preds = []
+        all_targets = []
         
         for batch_idx, batch in enumerate(dataloader):
             batch_start_time = time.time()
             features = {k: v.to(self.device) for k, v in batch.items()}
             question = features[SeqFeatureKey.Q].to(torch.long)
+            skill = features.get(SeqFeatureKey.C, torch.zeros_like(question)).to(torch.long)
             response = features[SeqFeatureKey.R].to(torch.long)
             mask = features[SeqFeatureKey.MASK].to(torch.bool)
             eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
@@ -108,17 +112,17 @@ class BaseTrainer:
             
             with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                 if model_name == 'dkt':
-                    y_hat = model(question, response, mask)
+                    y_hat = model(question, response, mask, skill=skill)
                     eps = 1e-6
                     y_hat = torch.clamp(y_hat, eps, 1-eps)
                     preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
-                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'dkt_forget', 'deep_irt']:
                     y_hat = model(question, response, mask, interval, r_time)
                     if y_hat.shape[1] == question.shape[1]: 
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
-                elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
+                elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     preds = y_hat[:, 1:]
                 else:
@@ -158,26 +162,69 @@ class BaseTrainer:
                 
             scaler.step(optimizer)
             scaler.update()
-            
+
+            # Record Gradients and Weights for Deep Monitoring
+            if tb_writer and batch_idx == 0:
+                try:
+                    for name, param in model.named_parameters():
+                        if param.requires_grad and param.grad is not None:
+                            # 转换成 CPU numpy，并显式指定 float32 类型，解决特定 numpy/tensorboard 版本兼容性报错
+                            grad_data = param.grad.detach().cpu().numpy().astype(np.float32).flatten()
+                            weight_data = param.detach().cpu().numpy().astype(np.float32).flatten()
+                            if grad_data.size > 0:
+                                tb_writer.add_histogram(f'Gradients/{name}', grad_data, epoch_idx)
+                            if weight_data.size > 0:
+                                tb_writer.add_histogram(f'Weights/{name}', weight_data, epoch_idx)
+                except TypeError:
+                    # 彻底隔离 Numpy>=1.24 与 Pytorch 内置 tensorboard 冲突导致的 np.greater 报错
+                    # 如果环境不兼容，直接放弃梯度直方图记录，保全模型主干训练逻辑
+                    pass
+
             total_loss += loss.item() * preds_filtered.size(0)
             total_samples += preds_filtered.size(0)
+
+            # Store predictions after Sigmoid conversion for AUC/ACC calculation
+            with torch.no_grad():
+                prob_preds = torch.sigmoid(preds_filtered)
+                # Ensure no inf/nan before appending
+                valid_mask = torch.isfinite(prob_preds) & torch.isfinite(targets_filtered)
+                if valid_mask.sum() > 0:
+                    all_preds.extend(prob_preds[valid_mask].cpu().numpy())
+                    all_targets.extend(targets_filtered[valid_mask].cpu().numpy())
             
             if self.verbose_batch:
                 batch_time = time.time() - batch_start_time
                 self.logger.info(f"[Train] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f} | Time: {batch_time:.3f}s")
             
-        return total_loss / total_samples if total_samples > 0 else 0
+        epoch_loss = total_loss / total_samples if total_samples > 0 else 0
+        
+        # Compute Train AUC and Train ACC
+        train_auc, train_acc = 0.0, 0.0
+        if all_preds and all_targets:
+            all_preds_np = np.array(all_preds)
+            all_targets_np = np.array(all_targets)
+            if not (np.isnan(all_preds_np).any() or np.isinf(all_preds_np).any()):
+                try:
+                    train_auc = metrics.roc_auc_score(all_targets_np, all_preds_np)
+                    train_acc = metrics.accuracy_score(all_targets_np, [1 if p >= 0.5 else 0 for p in all_preds_np])
+                except ValueError:
+                    pass # Handled single class exception cases mostly in very tiny batches
+
+        return epoch_loss, train_auc, train_acc
 
     def _evaluate(self, model, dataloader, use_amp, epoch_idx=None):
         model.eval()
         all_preds = []
         all_targets = []
+        total_loss = 0
+        total_samples = 0
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(dataloader):
                 batch_start_time = time.time()
                 features = {k: v.to(self.device) for k, v in batch.items()}
                 question = features[SeqFeatureKey.Q].to(torch.long)
+                skill = features.get(SeqFeatureKey.C, torch.zeros_like(question)).to(torch.long)
                 response = features[SeqFeatureKey.R].to(torch.long)
                 mask = features[SeqFeatureKey.MASK].to(torch.bool)
                 eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
@@ -192,57 +239,57 @@ class BaseTrainer:
                 
                 with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                     if model_name == 'dkt':
-                        y_hat = model(question, response, mask)
-                        preds = y_hat[:, :-1]
-                        preds = torch.nan_to_num(preds, nan=0.0)
+                        y_hat = model(question, response, mask, skill=skill)
+                        # DKT returns sigmoid probabilities, need to convert back to logits for loss
+                        eps = 1e-6
+                        y_hat = torch.clamp(y_hat, eps, 1-eps)
+                        preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
+                        y_hat_prob = y_hat[:, :-1]
                     elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
                         y_hat = model(question, response, mask, interval, r_time)
-                        y_hat = torch.sigmoid(y_hat)
-                        if y_hat.shape[1] == question.shape[1]:
-                            preds = y_hat[:, :-1]
-                        else:
-                            preds = y_hat
-                    elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
+                        preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
+                        y_hat_prob = torch.sigmoid(preds)
+                    elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
                         y_hat = model(question, response, mask, interval, r_time)
-                        y_hat = torch.sigmoid(y_hat)
                         preds = y_hat[:, 1:]
+                        y_hat_prob = torch.sigmoid(preds)
                     else:
                         y_hat = model(question, response, mask)
-                        y_hat = torch.sigmoid(y_hat)
                         preds = y_hat[:, 1:]
+                        y_hat_prob = torch.sigmoid(preds)
 
                 targets = response[:, 1:].float()
                 mask_valid = mask[:, 1:]
                 eval_mask_valid = eval_mask[:, 1:]
-                
                 final_mask = mask_valid & eval_mask_valid
                 
                 if final_mask.sum() > 0:
-                    p = preds[final_mask].cpu().numpy()
-                    t = targets[final_mask].cpu().numpy()
+                    p_logits = preds[final_mask]
+                    p_prob = y_hat_prob[final_mask].cpu().numpy()
+                    t = targets[final_mask]
                     
-                    if np.isnan(p).any() or np.isinf(p).any():
-                        continue
+                    # Calculate Val Loss
+                    val_loss = self.criterion(p_logits, t)
+                    total_loss += val_loss.item() * t.size(0)
+                    total_samples += t.size(0)
                         
-                    all_preds.extend(p)
-                    all_targets.extend(t)
+                    all_preds.extend(p_prob)
+                    all_targets.extend(t.cpu().numpy())
                     
                 if self.verbose_batch:
                     batch_time = time.time() - batch_start_time
                     self.logger.info(f"[Eval] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Time: {batch_time:.3f}s")
         
         if not all_preds:
-            return 0, 0
+            return 0.0, 0.0, 0.0
         
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0
         all_targets = np.array(all_targets)
         all_preds = np.array(all_preds)
         
-        if np.isnan(all_preds).any() or np.isinf(all_preds).any():
-            return 0, 0
-            
         auc = metrics.roc_auc_score(all_targets, all_preds)
         acc = metrics.accuracy_score(all_targets, [1 if p >= 0.5 else 0 for p in all_preds])
-        return auc, acc
+        return auc, acc, avg_loss
 
     def cross_validate(self, dataset, test_dataset=None):
         """
@@ -265,6 +312,17 @@ class BaseTrainer:
             splits = list(k_fold.split(dataset))
 
         fold_aucs = []
+        
+        # History dict for storing metrics for dataframe conversion
+        history_records = []
+
+        # TensorBoard run root: one training call -> one run directory
+        time_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        try:
+            base_out_dir = self.config.path.OUTPUT_DIR # type: ignore
+        except AttributeError:
+            base_out_dir = './output'
+        runs_root = os.path.join(base_out_dir, self.task_name, "runs", f"{self.model_name}_{self.dataset_name}_{time_now}")
 
         for fold, (train_indices, val_indices) in enumerate(splits):
             self.logger.info(f"--- Fold {fold + 1}/{len(splits)} ---")
@@ -302,23 +360,49 @@ class BaseTrainer:
             best_val_auc = 0.0
             patience_counter = 0
             
-            # TensorBoard Setup
-            trial_number = self.kwargs.get('trial_number', 'unknown')
-            log_dir = os.path.join("runs", f"trial_{trial_number}_fold_{fold+1}")
-            writer = SummaryWriter(log_dir=log_dir)
-            
+            if fold == 0:
+                train_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "train"))
+                val_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "val"))
+            else:
+                train_writer = None
+                val_writer = None
+
             for epoch in range(self.epochs):
                 start_time = time.time()
-                train_loss = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1)
-                val_auc, val_acc = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
+                train_loss, train_auc, train_acc = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1, tb_writer=train_writer)
+                val_auc, val_acc, val_loss = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
                 end_time = time.time()
-                
+
                 # Write to TensorBoard
-                writer.add_scalar('Loss/train', train_loss, epoch)
-                writer.add_scalar('AUC/val', val_auc, epoch)
-                writer.add_scalar('ACC/val', val_acc, epoch)
+                if train_writer and val_writer:
+                    train_writer.add_scalar('Performance/Loss', train_loss, epoch)
+                    train_writer.add_scalar('Performance/AUC', train_auc, epoch)
+                    train_writer.add_scalar('Performance/ACC', train_acc, epoch)
+
+                    val_writer.add_scalar('Performance/Loss', val_loss, epoch)
+                    val_writer.add_scalar('Performance/AUC', val_auc, epoch)
+                    val_writer.add_scalar('Performance/ACC', val_acc, epoch)
+                    
+                    try:
+                        current_lr = optimizer.param_groups[0]['lr']
+                        train_writer.add_scalar('Optimization/Learning_Rate', current_lr, epoch)
+                    except:
+                        pass
+
+                # Append to history
+                history_records.append({
+                    'fold': fold + 1,
+                    'epoch': epoch + 1,
+                    'train_loss': train_loss,
+                    'train_auc': train_auc,
+                    'train_acc': train_acc,
+                    'val_loss': val_loss,
+                    'val_auc': val_auc,
+                    'val_acc': val_acc,
+                    'time_sec': end_time - start_time
+                })
                 
-                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Val ACC: {val_acc:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
+                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
                 
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
@@ -332,10 +416,10 @@ class BaseTrainer:
                     self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
                     break
                     
-            writer.close()
-            self.logger.info(f"Fold {fold + 1} Best Val AUC: {best_val_auc:.4f}")
-            
-            # Evaluate on Test Set if provided
+            if train_writer and val_writer:
+                train_writer.close()
+                val_writer.close()
+
             if test_dataset is not None:
                 if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
                     # Load best model weights for this fold
@@ -347,13 +431,94 @@ class BaseTrainer:
                             model = state_dict
                         else:
                             model.load_state_dict(state_dict)
-                
+
                 test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
-                test_auc, test_acc = self._evaluate(model, test_loader, use_amp)
+                test_auc, test_acc, _ = self._evaluate(model, test_loader, use_amp)
                 self.logger.info(f"Fold {fold + 1} Test ACC: {test_acc:.4f} | Test AUC: {test_auc:.4f}\n")
             else:
                 self.logger.info("\n")
                 
             fold_aucs.append(best_val_auc)
             
+        # Save history to CSV and Plot
+        try:
+            import pandas as pd
+            df_history = pd.DataFrame(history_records)
+            chart_data_dir = os.path.join(base_out_dir, self.task_name, "chart_data")
+            chart_img_dir = os.path.join(base_out_dir, self.task_name, "chart")
+            os.makedirs(chart_data_dir, exist_ok=True)
+            os.makedirs(chart_img_dir, exist_ok=True)
+
+            csv_path = os.path.join(chart_data_dir, f"{self.model_name}_{self.dataset_name}_history_{time_now}.csv")
+            df_history.to_csv(csv_path, index=False)
+            self.logger.info(f"Training history saved to {csv_path}")
+            
+            # Write TB Hparams
+            avg_val_auc = sum(fold_aucs) / len(fold_aucs) if fold_aucs else 0.0
+            hparam_writer = SummaryWriter(log_dir=runs_root)
+            hparam_writer.add_hparams(
+                hparam_dict={
+                    'model': self.model_name,
+                    'dataset': self.dataset_name,
+                    'lr': self.learning_rate,
+                    'batch_size': self.batch_size,
+                    'epochs': self.epochs
+                },
+                metric_dict={'hparam/Avg_Best_AUC': avg_val_auc}
+            )
+            hparam_writer.close()
+
+            self._plot_training_history(df_history, chart_img_dir, time_now)
+        except Exception as e:
+            self.logger.error(f"Failed to save training history: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
         return fold_aucs
+
+    def _plot_training_history(self, df, save_dir, timestamp):
+        """绘制学术级训练历史图: 均值曲线及阴影置信区间"""
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+
+            # 设置学术风的主题
+            sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+            color_train = "#4DBBD5"  # 宁静蓝
+            color_val = "#E64B35"    # 高光红
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+            # 1. Loss Plot
+            sns.lineplot(data=df, x='epoch', y='train_loss', label='Train Loss', color=color_train, ax=axes[0], errorbar='ci', n_boot=100)
+            sns.lineplot(data=df, x='epoch', y='val_loss', label='Val Loss', color=color_val, ax=axes[0], errorbar='ci', n_boot=100)
+            axes[0].set_title(f'Loss Curve (5-Fold Mean & 95% CI)')
+            axes[0].set_xlabel('Epoch')
+            axes[0].set_ylabel('Loss')
+            axes[0].legend()
+
+            # 2. AUC Plot
+            sns.lineplot(data=df, x='epoch', y='train_auc', label='Train AUC', color=color_train, ax=axes[1], errorbar='ci', n_boot=100)
+            sns.lineplot(data=df, x='epoch', y='val_auc', label='Val AUC', color=color_val, ax=axes[1], errorbar='ci', n_boot=100)
+            axes[1].set_title(f'AUC Curve (5-Fold Mean & 95% CI)')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('AUC')
+            axes[1].legend()
+            
+            # 3. ACC Plot
+            sns.lineplot(data=df, x='epoch', y='train_acc', label='Train ACC', color=color_train, ax=axes[2], errorbar='ci', n_boot=100)
+            sns.lineplot(data=df, x='epoch', y='val_acc', label='Val ACC', color=color_val, ax=axes[2], errorbar='ci', n_boot=100)
+            axes[2].set_title(f'Accuracy Curve (5-Fold Mean & 95% CI)')
+            axes[2].set_xlabel('Epoch')
+            axes[2].set_ylabel('Accuracy')
+            axes[2].legend()
+
+            plt.tight_layout()
+            img_path = os.path.join(save_dir, f"{self.model_name}_{self.dataset_name}_metrics_{timestamp}.png")
+            plt.savefig(img_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            self.logger.info(f"Journal-quality training plots saved to {img_path}")
+        except ModuleNotFoundError:
+            self.logger.warning("Seaborn module not found. Please `pip install seaborn` for journal quality plots.")
+        except Exception as e:
+            self.logger.error(f"Failed to plot history: {e}")

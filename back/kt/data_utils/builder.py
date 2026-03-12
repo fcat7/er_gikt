@@ -138,7 +138,9 @@ class KTDataBuilder:
         num_q = max(self.question2idx.values()) + 1 # 包含 0
         num_s = max(self.skill2idx.values()) + 1 # 包含 0
         
-        qs_table = np.zeros([num_q, num_s], dtype=int)
+        # 使用稀疏矩阵的坐标记录法（COO），大大节约超大数据集的内存并加速计算
+        row_indices = []
+        col_indices = []
         
         # 遍历每个题目，填充 Q-S 表
         # 为了效率，我们先去重
@@ -148,21 +150,30 @@ class KTDataBuilder:
             q_idx = self.question2idx.get(getattr(row, self.question_col))
             if q_idx is None or q_idx == 0: continue
             
-            current_skills = self._parse_skills(getattr(row, self.skill_col))
+            raw_skill = getattr(row, self.skill_col)
+            if pd.isna(raw_skill): continue
             
+            # 使用现有解析技能方法
+            current_skills = self._parse_skills(raw_skill)
+                            
             for s in current_skills:
                 if s in self.skill2idx:
                     s_idx = self.skill2idx[s]
-                    qs_table[q_idx, s_idx] = 1
+                    row_indices.append(q_idx)
+                    col_indices.append(s_idx)
                     
-        # 计算 Q-Q 和 S-S
-        qq_table = np.matmul(qs_table, qs_table.T)
-        ss_table = np.matmul(qs_table.T, qs_table)
+        # 创建稀疏矩阵 Q-S
+        data = np.ones(len(row_indices), dtype=int)
+        qs_sparse = sparse.csr_matrix((data, (row_indices, col_indices)), shape=(num_q, num_s))
+        
+        # 通过稀疏矩阵直接乘法进行运算，极大幅度降低时间复杂度
+        qq_sparse = qs_sparse.dot(qs_sparse.T)
+        ss_sparse = qs_sparse.T.dot(qs_sparse)
         
         # 保存为稀疏矩阵
-        sparse.save_npz(os.path.join(self.output_dir, 'qs_table.npz'), sparse.coo_matrix(qs_table))
-        sparse.save_npz(os.path.join(self.output_dir, 'qq_table.npz'), sparse.coo_matrix(qq_table))
-        sparse.save_npz(os.path.join(self.output_dir, 'ss_table.npz'), sparse.coo_matrix(ss_table))
+        sparse.save_npz(os.path.join(self.output_dir, 'qs_table.npz'), qs_sparse.tocoo())
+        sparse.save_npz(os.path.join(self.output_dir, 'qq_table.npz'), qq_sparse.tocoo())
+        sparse.save_npz(os.path.join(self.output_dir, 'ss_table.npz'), ss_sparse.tocoo())
         
         ic("邻接矩阵构建完成")
 
@@ -328,9 +339,35 @@ class KTDataBuilder:
         # 简单实现，仅占位
         pass
 
-    def build_sequences(self, df, stride=None, save_prefix="train"):
+    def get_question_avg_time(self, df):
+        """
+        从指定的 DataFrame 中提取每道题的中位答题时间，返回 {q_idx: median_rt} 字典。
+        用于训练集计算后传递给测试集，防止 t_response 特征泄漏。
+        """
+        question_avg_time = {}
+        if self.rt_col not in df.columns:
+            return question_avg_time
+        rt_series = pd.to_numeric(df[self.rt_col], errors='coerce')
+        valid_mask = (rt_series > 0) & (rt_series < 3600000)
+        valid_df = df[valid_mask]
+        if not valid_df.empty:
+            median_series = valid_df.groupby(self.question_col)[self.rt_col].median()
+            for q_raw, med_val in median_series.items():
+                q_idx = self.question2idx.get(q_raw)
+                if q_idx:
+                    question_avg_time[q_idx] = float(med_val)
+        ic(f"提取 question_avg_time: {len(question_avg_time)} 道题")
+        return question_avg_time
+
+    def build_sequences(self, df, stride=None, save_prefix="train", question_avg_time_override=None):
         """
         构建序列数据，返回 List of Dicts
+        使用提前向量化运算与字典映射极致加速序列构建
+        
+        Args:
+            question_avg_time_override: 外部传入的 {q_idx: median_rt} 字典。
+                若提供则直接使用（用于测试集复用训练集统计量，防止特征泄漏）；
+                若为 None 则从当前 df 中自行计算。
         """
         ic(f"开始构建序列 [{save_prefix}] (Stride={stride})...")
         max_len = MAX_SEQ_LEN
@@ -340,17 +377,72 @@ class KTDataBuilder:
         question_avg_time = {}
         if has_time:
             df[self.rt_col] = pd.to_numeric(df[self.rt_col], errors='coerce')
-            valid_rt = df[(df[self.rt_col] > 0) & (df[self.rt_col] < 3600000)]
-            if not valid_rt.empty:
-                question_avg_time = valid_rt.groupby(self.question_col)[self.rt_col].median().to_dict()
+            if question_avg_time_override is not None:
+                # 使用外部传入的统计量（防止测试集特征泄漏）
+                question_avg_time = question_avg_time_override
+                ic(f"  [防泄漏] 使用外部传入的 question_avg_time ({len(question_avg_time)} 题)")
+            else:
+                valid_rt = df[(df[self.rt_col] > 0) & (df[self.rt_col] < 3600000)]
+                if not valid_rt.empty:
+                    question_avg_time_series = valid_rt.groupby(self.question_col)[self.rt_col].median()
+                    # 预先映射为 q_idx 字典
+                    for q_raw, med_val in question_avg_time_series.items():
+                        q_idx = self.question2idx.get(q_raw)
+                        if q_idx:
+                            question_avg_time[q_idx] = med_val
 
-        records = []
-        grouped = df.groupby(self.user_col)
+        # --- 提速核心：预解析所有不重列的Skill与Question ---
+        # 1. 预先映射所有的 q_idx
+        q_raw_vals = df[self.question_col].values
+        q_idx_arr = np.array([self.question2idx.get(q, 0) for q in q_raw_vals], dtype=np.int32)
         
-        for user_id, group in grouped:
-            u_idx = self.user2idx.get(user_id)
+        lbl_arr = df[self.label_col].values.astype(np.int8)
+
+        # 2. 预先解析技能字符串
+        # 提取出所有唯一的 skill 字符串，避免数百万次重复正则或 split 操作
+        unique_skills = df[self.skill_col].unique() if self.skill_col in df.columns else []
+        skill_cache = {}
+        for raw_s in unique_skills:
+            if pd.isna(raw_s):
+                skill_cache[raw_s] = [0]
+            else:
+                s_raw_list = self._parse_skills(raw_s)
+                s_ids = [self.skill2idx.get(x) for x in s_raw_list if self.skill2idx.get(x) is not None]
+                skill_cache[raw_s] = s_ids if s_ids else [0]
+        
+        s_raw_vals = df[self.skill_col].values if self.skill_col in df.columns else [None]*len(df)
+        c_seq_list = [skill_cache.get(x, [0]) for x in s_raw_vals]
+        
+        # 3. 预先抓取时间序列
+        if has_time:
+            ts_arr = df[self.timestamp_col].fillna(0.0).values.astype(np.float64)
+            rt_arr = df[self.rt_col].fillna(0.0).values.astype(np.float64)
+        else:
+            ts_arr = np.zeros(len(df))
+            rt_arr = np.zeros(len(df))
+
+        u_raw_vals = df[self.user_col].values
+        
+        # 构建一个以 User_ID 为键，内部存放 Tuple 列表的临时字典以取代 Groupby，极大加速速度
+        user_data = {}
+        for i in range(len(df)):
+            u_raw = u_raw_vals[i]
+            u_idx = self.user2idx.get(u_raw)
             if u_idx is None: continue
             
+            if u_idx not in user_data:
+                user_data[u_idx] = []
+            user_data[u_idx].append((
+                q_idx_arr[i], 
+                lbl_arr[i], 
+                c_seq_list[i], 
+                ts_arr[i] if has_time else 0.0, 
+                rt_arr[i] if has_time else 0.0
+            ))
+
+        records = []
+        
+        for u_idx, rows in user_data.items():
             full_seq = []
             full_c_seq = []
             full_res = []
@@ -359,27 +451,13 @@ class KTDataBuilder:
             
             user_last_skill_time = {} 
             
-            for row in group.itertuples(index=False):
-                q_idx = self.question2idx.get(getattr(row, self.question_col), 0)
+            for q_idx, lbl, curr_skills, ts, raw_rt in rows:
                 full_seq.append(q_idx)
-                full_res.append(int(getattr(row, self.label_col)))
-                
-                curr_skills = []
-                if hasattr(row, self.skill_col) and pd.notna(getattr(row, self.skill_col)):
-                    s_raw_list = self._parse_skills(getattr(row, self.skill_col))
-                    for s_raw in s_raw_list:
-                        s_id = self.skill2idx.get(s_raw)
-                        if s_id is not None: curr_skills.append(s_id)
-                
-                # 保存所有关联的 skill，如果没有则为 [0]
-                full_c_seq.append(curr_skills if curr_skills else [0])
+                full_res.append(int(lbl))
+                full_c_seq.append(curr_skills)
                 
                 if has_time:
-                    try:
-                        ts = float(getattr(row, self.timestamp_col)) if pd.notna(getattr(row, self.timestamp_col)) else 0.0
-                    except: ts = 0.0
                     if ts < 0: ts = 0.0
-                    
                     intervals = []
                     for s_idx in curr_skills:
                         last = user_last_skill_time.get(s_idx, ts)
@@ -389,8 +467,8 @@ class KTDataBuilder:
                     avg_int = sum(intervals)/len(intervals) if intervals else 0.0
                     full_interval.append(float(np.tanh(np.log(avg_int + 1))))
                     
-                    avg_t = question_avg_time.get(getattr(row, self.question_col), 1.0)
-                    raw_rt = getattr(row, self.rt_col) if (hasattr(row, self.rt_col) and pd.notna(getattr(row, self.rt_col)) and getattr(row, self.rt_col) >=0) else 0.0
+                    avg_t = question_avg_time.get(q_idx, 1.0)
+                    if raw_rt < 0: raw_rt = 0.0
                     full_response.append(float(np.tanh(min(raw_rt / max(avg_t, 1e-6), 10.0))))
 
             total_interactions = len(full_seq)

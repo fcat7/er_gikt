@@ -52,6 +52,7 @@ class TrainParams:
     aug_mask_prob: float = 0.1 # 随机Mask概率 (默认 10%)
     reg_4pl: float = 1e-5 # 4PL/IRT 正则化系数 (针对区分度/猜测率/失误率)
     patience: int = 0 # 早停机制 (0 表示禁用)
+    enable_lr_scheduler: bool = True # 是否启用学习率调度器 (余弦退火)
     prefetch_factor: int = 4
     k_fold: int = 1
     verbose: bool = True

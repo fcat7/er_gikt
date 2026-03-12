@@ -48,13 +48,11 @@ class GIKTOld(nn.Module):
         self.max_concepts = max(1, max_concepts)
         self.q_concept_idx = torch.zeros(self.num_question, self.max_concepts, dtype=torch.long, device=device)
         self.q_concept_mask = torch.zeros(self.num_question, self.max_concepts, dtype=torch.bool, device=device)
-        qs_sum = self.qs_table.sum(dim=1)
+        qs_sum = (self.qs_table > 0).sum(dim=1)
         for q in range(self.num_question):
             n = int(qs_sum[q].item())
             if n > 0:
-                idx = torch.nonzero(self.qs_table[q] == 1).squeeze(-1)
-                if idx.dim() == 0: 
-                    idx = idx.unsqueeze(0)
+                idx = torch.nonzero(self.qs_table[q] > 0).squeeze(-1)
                 self.q_concept_idx[q, :n] = idx
                 self.q_concept_mask[q, :n] = True
 

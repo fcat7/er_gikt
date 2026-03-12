@@ -4,6 +4,8 @@ from scipy import sparse
 
 # 导入基准模型
 from baselines import DKT, DKVMN, AKT, SimpleKT, QIKT, LBKT, GIKTOld
+from baselines.deep_irt import DeepIRT
+from baselines.dkt_forget import DKTForget
 from .gikt import GIKT
 
 class ModelFactory:
@@ -116,6 +118,17 @@ class ModelFactory:
             qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(device)
             model = LBKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_h=emb_size, dim_factor=dim_factor).to(device)
             
+        elif name_key == 'deep_irt':
+            emb_size = kwargs.get('emb_size', 64)
+            size_m = kwargs.get('size_m', 50)
+            dropout = kwargs.get('dropout', 0.1)
+            model = DeepIRT(num_q=num_question, num_c=num_skill, dim_s=emb_size, size_m=size_m, dropout=dropout).to(device)
+            
+        elif name_key == 'dkt_forget':
+            emb_size = kwargs.get('emb_size', 64)
+            dropout = kwargs.get('dropout', 0.1)
+            model = DKTForget(num_q=num_question, num_c=num_skill, emb_size=emb_size, dropout=dropout).to(device)
+
         elif name_key == 'gikt_old':
             q_neighbors = kwargs.get('q_neighbors')
             s_neighbors = kwargs.get('s_neighbors')

@@ -1,7 +1,7 @@
 """
 训练并测试模型
 使用五折交叉验证法 (Standard K-Fold)
-python train_test.py --override train.dataset_name=assist09-sample_20%
+python train_test.py --override train.dataset_name=assist12-sample_7%
 """
 import os
 import time
@@ -112,7 +112,7 @@ if __name__ == '__main__':
     else:
         print(f"⚠️ Gradient Clipping Disabled")
 
-    output_path = f'{config.path.LOG_DIR}/{time_now}.log'
+    output_path = f'{config.path.LOG_DIR}/{time_now}_{params.train.dataset_name}{ "_save_model"  if params.train.save_model else "" }.log'
     output_dir = os.path.dirname(output_path)  # 获取目录路径    
     os.makedirs(output_dir, exist_ok=True) # 创建目录（如果不存在）
     output_file = open(output_path, 'a', buffering=1) # 解决日志丢失问题
@@ -255,14 +255,17 @@ if __name__ == '__main__':
         
         # @add_fzq: LR Scheduler Upgrade (CosineAnnealing with Warmup)
         # Using OneCycleLR which inherently includes warmup (default pct_start=0.3) and cosine annealing
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, 
-            max_lr=params.train.lr, 
-            steps_per_epoch=max(1, len(train_loader)), 
-            epochs=params.train.epochs,
-            pct_start=0.1, # 10% steps for warmup
-            anneal_strategy='cos'
-        )
+        if params.train.enable_lr_scheduler:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, 
+                max_lr=params.train.lr, 
+                steps_per_epoch=max(1, len(train_loader)), 
+                epochs=params.train.epochs,
+                pct_start=0.1, # 10% steps for warmup
+                anneal_strategy='cos'
+            )
+        else:
+            scheduler = None
         
         print(f"Fold {fold+1} Stats: Train Samples={len(train_set)}, Val Samples={len(val_set)}")
         print(f"Initial Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
@@ -345,7 +348,8 @@ if __name__ == '__main__':
                 scaler.update()
                 
                 # @add_fzq: per-batch scheduler step (OneCycleLR required)
-                scheduler.step()
+                if scheduler is not None:
+                    scheduler.step()
 
                 # Metrics Calculation
                 y_prob = torch.sigmoid(y_hat_flat)

@@ -5,12 +5,24 @@ import torch
 import os
 import json
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 from config import get_config
 from dataset import UnifiedParquetDataset
 from models.factory import ModelFactory
 from core.trainer import BaseTrainer
 from optuna.samplers import GridSampler
+
+def _sanitize_hparams(params):
+    safe = {}
+    for k, v in params.items():
+        if isinstance(v, np.generic):
+            v = v.item()
+        if isinstance(v, (int, float, str, bool)):
+            safe[k] = v
+        else:
+            safe[k] = str(v)
+    return safe
 
 def load_yaml_config(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -54,9 +66,15 @@ def sample_hyperparameters(trial, search_space):
             
     return params
 
-def objective(trial, tune_config, dataset, num_question, num_skill, device, data_config):
+def objective(trial, tune_config, dataset, num_question, num_skill, device, data_config, tb_root=None):
     # 1. 采样超参数
     sampled_params = sample_hyperparameters(trial, tune_config['search_space'])
+    model_name = tune_config['model_name']
+    dataset_name = tune_config['dataset_name']
+    tb_writer = None
+    if tb_root:
+        tb_writer = SummaryWriter(log_dir=os.path.join(tb_root, f"trial_{trial.number}"))
+        tb_writer.add_text("trial/params", json.dumps(sampled_params, ensure_ascii=False), 0)
     
     # 新增：检查是否已有相同参数组合，如果有则跳过
     for past_trial in trial.study.trials:
@@ -65,6 +83,9 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
     
     # 2. 合并基础配置和采样参数
     kwargs = {
+        'task_name': 'tune',
+        'model_name': model_name,
+        'dataset_name': dataset_name,
         'epochs': tune_config.get('epochs', 50),
         'patience': tune_config.get('patience', 5),
         'k_fold': tune_config.get('k_fold', 5),
@@ -76,8 +97,12 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
     print(f"Params: {sampled_params}")
     
     # 3. 定义模型工厂函数 (使用闭包绑定 model_name)
-    model_name = tune_config['model_name']
     def factory_func(**f_kwargs):
+        # 去除 Trainer 侧管理字段，避免与 get_model(model_name, ...) 参数冲突
+        f_kwargs.pop('model_name', None)
+        f_kwargs.pop('dataset_name', None)
+        f_kwargs.pop('task_name', None)
+        f_kwargs.pop('trial_number', None)
         return ModelFactory.get_model(model_name, **f_kwargs)
         
     # 4. 初始化 Trainer
@@ -96,12 +121,35 @@ def objective(trial, tune_config, dataset, num_question, num_skill, device, data
     except RuntimeError as e:
         msg = str(e)
         if 'out of memory' in msg or 'cudaErrorMemoryAllocation' in msg:
+            if tb_writer:
+                tb_writer.add_text("trial/status", "pruned: out of memory", 0)
+                tb_writer.close()
             print(f"Trial {trial.number} 显存溢出，自动跳过该参数组合。")
             raise optuna.exceptions.TrialPruned()
         else:
+            if tb_writer:
+                tb_writer.add_text("trial/status", f"failed: {msg}", 0)
+                tb_writer.close()
             raise
     # 6. 计算平均 AUC 作为优化目标
     mean_auc = np.mean(fold_aucs)
+
+    if tb_writer:
+        for idx, auc in enumerate(fold_aucs, start=1):
+            tb_writer.add_scalar('trial/fold_auc', auc, idx)
+        tb_writer.add_scalar('trial/mean_auc', mean_auc, 0)
+        tb_writer.close()
+
+    # HParams: 写到 tune 根目录，显式 run_name，避免出现不可读的时间戳子目录
+    if tb_root:
+        hp_writer = SummaryWriter(log_dir=tb_root)
+        hp_writer.add_hparams(
+            hparam_dict=_sanitize_hparams(sampled_params),
+            metric_dict={'hparam/mean_auc': float(mean_auc)},
+            run_name=f"trial_{trial.number}"
+        )
+        hp_writer.close()
+
     print(f"Trial {trial.number} Finished | Mean CV AUC: {mean_auc:.4f}")
     
     return mean_auc
@@ -142,6 +190,14 @@ def main():
     print(f"Stats: Model: {model_name} | Dataset: {dataset_name} | Study Name: {study_name}")
     print(f"Stats: Storage: {storage}")
 
+    # 可选 TensorBoard（最小侵入）：用于查看 trial 级别指标，不替代 optuna .db
+    try:
+        tb_base_out = data_config.path.OUTPUT_DIR # type: ignore
+    except AttributeError:
+        tb_base_out = './output'
+    tune_tb_root = os.path.join(tb_base_out, 'tune', 'runs', study_name)
+    print(f"Stats: TensorBoard: {tune_tb_root}")
+
     sampler_type = tune_config.get('sampler', 'tpe')
     if sampler_type == 'grid':
         # 构建 GridSampler 所需的搜索字典（所有参数必须为 categorical）
@@ -181,7 +237,7 @@ def main():
     # 开始优化（捕获参数空间变动相关错误并友好提示）
     try:
         study.optimize(
-            lambda trial: objective(trial, tune_config, dataset, num_question, num_skill, device, data_config),
+            lambda trial: objective(trial, tune_config, dataset, num_question, num_skill, device, data_config, tune_tb_root),
             n_trials=n_trials
         )
     except ValueError as e:
