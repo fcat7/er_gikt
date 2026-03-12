@@ -63,12 +63,16 @@ def plot_radar_chart(df, output_dir):
     # 增加加粗的全局标题
     plt.title("Comprehensive Trade-off (Radar Chart)", fontsize=18, fontweight='bold', pad=40)
     
-    # 【恢复清新配色】参考之前经典的柔和配色
+    # 【恢复清新配色】参考之前经典的柔和配色，并新增消融实验的对应项
     color_dict = {
         'ours': '#e377c2',            # 粉粉嫩嫩的粉红色 (最上层)
+        'full': '#e377c2',            # 消融实验中的 full (等同于 ours)
         'dkt_greedy': '#66c2a5',      # 护眼的青绿色/薄荷绿
+        'no_pid': '#66c2a5',          # 消融：no_pid
         'dkvmn_greedy': '#fc8d62',    # 柔和的桃橘色
+        'no_mopso': '#fc8d62',        # 消融：no_mopso
         'greedy': '#8da0cb',          # 优雅的灰蓝色/淡紫
+        'no_f2': '#8da0cb',           # 消融：no_f2
         'popularity': '#a6d854',      # 清新的黄绿色
         'random': '#ffd92f'           # 明亮的黄色
     }
@@ -76,9 +80,13 @@ def plot_radar_chart(df, output_dir):
     # 根据之前的图设置不同 marker 形状以增加区分度
     marker_dict = {
         'ours': 'D',            # 菱形
+        'full': 'D',
         'dkt_greedy': 'o',      # 圆形
+        'no_pid': 'o',
         'dkvmn_greedy': 's',    # 正方形
+        'no_mopso': 's',
         'greedy': '^',          # 正三角
+        'no_f2': '^',
         'popularity': 'v',      # 倒三角
         'random': '*'           # 星形
     }
@@ -86,14 +94,18 @@ def plot_radar_chart(df, output_dir):
     # 针对遮挡问题：为模型配置不同的线型
     ls_dict = {
         'ours': '-',
+        'full': '-',
         'dkt_greedy': '--',
+        'no_pid': '--',
         'dkvmn_greedy': '-.',
+        'no_mopso': '-.',
         'greedy': ':',
+        'no_f2': ':',
         'popularity': '--',
         'random': '-.'
     }
     
-    # 制定绘制层级和样式，确保 OURS 覆盖在最上层
+    # 制定绘制层级和样式，确保 OURS/FULL 覆盖在最上层
     for idx, row in plot_df.iterrows():
         mode_id = row['mode'].lower()
         values = row[avail_metrics].values.tolist()
@@ -105,7 +117,7 @@ def plot_radar_chart(df, output_dir):
         marker = marker_dict.get(mode_id, 'o')
         ls = ls_dict.get(mode_id, '-')
         
-        if mode_id == 'ours':
+        if mode_id in ['ours', 'full']:
             lw = 2.5
             alpha = 0.15
             zorder = 10
@@ -156,7 +168,8 @@ def plot_radar_chart(df, output_dir):
 
 if __name__ == "__main__":
     set_style()
-    csv_path = r"output/recommendation_full/recommend_eval_full_all.csv"
+    # csv_path = r"output/recommendation_full/recommend_eval_full_all.csv"
+    csv_path = r"output/ablation_er/ablation_eval_full.csv"
     if not os.path.exists(csv_path):
         import glob
         files = glob.glob(r"output/recommendation_*/recommend_eval_*.csv")
