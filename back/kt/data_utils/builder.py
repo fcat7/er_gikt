@@ -339,10 +339,35 @@ class KTDataBuilder:
         # 简单实现，仅占位
         pass
 
-    def build_sequences(self, df, stride=None, save_prefix="train"):
+    def get_question_avg_time(self, df):
+        """
+        从指定的 DataFrame 中提取每道题的中位答题时间，返回 {q_idx: median_rt} 字典。
+        用于训练集计算后传递给测试集，防止 t_response 特征泄漏。
+        """
+        question_avg_time = {}
+        if self.rt_col not in df.columns:
+            return question_avg_time
+        rt_series = pd.to_numeric(df[self.rt_col], errors='coerce')
+        valid_mask = (rt_series > 0) & (rt_series < 3600000)
+        valid_df = df[valid_mask]
+        if not valid_df.empty:
+            median_series = valid_df.groupby(self.question_col)[self.rt_col].median()
+            for q_raw, med_val in median_series.items():
+                q_idx = self.question2idx.get(q_raw)
+                if q_idx:
+                    question_avg_time[q_idx] = float(med_val)
+        ic(f"提取 question_avg_time: {len(question_avg_time)} 道题")
+        return question_avg_time
+
+    def build_sequences(self, df, stride=None, save_prefix="train", question_avg_time_override=None):
         """
         构建序列数据，返回 List of Dicts
         使用提前向量化运算与字典映射极致加速序列构建
+        
+        Args:
+            question_avg_time_override: 外部传入的 {q_idx: median_rt} 字典。
+                若提供则直接使用（用于测试集复用训练集统计量，防止特征泄漏）；
+                若为 None 则从当前 df 中自行计算。
         """
         ic(f"开始构建序列 [{save_prefix}] (Stride={stride})...")
         max_len = MAX_SEQ_LEN
@@ -352,14 +377,19 @@ class KTDataBuilder:
         question_avg_time = {}
         if has_time:
             df[self.rt_col] = pd.to_numeric(df[self.rt_col], errors='coerce')
-            valid_rt = df[(df[self.rt_col] > 0) & (df[self.rt_col] < 3600000)]
-            if not valid_rt.empty:
-                question_avg_time_series = valid_rt.groupby(self.question_col)[self.rt_col].median()
-                # 预先映射为 q_idx 字典
-                for q_raw, med_val in question_avg_time_series.items():
-                    q_idx = self.question2idx.get(q_raw)
-                    if q_idx:
-                        question_avg_time[q_idx] = med_val
+            if question_avg_time_override is not None:
+                # 使用外部传入的统计量（防止测试集特征泄漏）
+                question_avg_time = question_avg_time_override
+                ic(f"  [防泄漏] 使用外部传入的 question_avg_time ({len(question_avg_time)} 题)")
+            else:
+                valid_rt = df[(df[self.rt_col] > 0) & (df[self.rt_col] < 3600000)]
+                if not valid_rt.empty:
+                    question_avg_time_series = valid_rt.groupby(self.question_col)[self.rt_col].median()
+                    # 预先映射为 q_idx 字典
+                    for q_raw, med_val in question_avg_time_series.items():
+                        q_idx = self.question2idx.get(q_raw)
+                        if q_idx:
+                            question_avg_time[q_idx] = med_val
 
         # --- 提速核心：预解析所有不重列的Skill与Question ---
         # 1. 预先映射所有的 q_idx

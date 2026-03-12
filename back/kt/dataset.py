@@ -11,6 +11,7 @@ class SeqFeatureKey:
     统一管理序列特征键名，避免魔法字符串 / 魔法下标。
     """
     Q = "q_seq"
+    C = "c_seq"
     R = "r_seq"
     MASK = "mask"
     EVAL_MASK = "eval_mask"
@@ -82,6 +83,15 @@ class UnifiedParquetDataset(Dataset):
 
         # 动态 Padding 并转换为 Tensor
         q_seq = torch.from_numpy(self._pad_sequence(row['q_seq'], dtype=np.int64))
+        
+        # 兼容 Skill ID (处理可能的多技能情况)
+        if 'c_seq' in row and row['c_seq'] is not None:
+            # 取每个题目的第一个技能，如果没有则为0
+            c_seq_list = [c[0] if (isinstance(c, (list, np.ndarray)) and len(c) > 0) else (c if np.isscalar(c) else 0) for c in row['c_seq']]
+            c_seq = torch.from_numpy(self._pad_sequence(c_seq_list, dtype=np.int64))
+        else:
+            c_seq = torch.zeros_like(q_seq)
+            
         r_seq = torch.from_numpy(self._pad_sequence(row['r_seq'], dtype=np.int64))
         mask = torch.from_numpy(self._pad_sequence(row['mask'], dtype=bool, pad_val=False))
         # 评估掩码
@@ -119,6 +129,7 @@ class UnifiedParquetDataset(Dataset):
         # 返回“具名字段”的字典视图，便于不同模型按需取用
         return {
             SeqFeatureKey.Q: q_seq,
+            SeqFeatureKey.C: c_seq,
             SeqFeatureKey.R: r_seq,
             SeqFeatureKey.MASK: mask,
             SeqFeatureKey.EVAL_MASK: eval_mask,

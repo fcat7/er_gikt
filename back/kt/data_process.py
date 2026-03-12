@@ -170,6 +170,7 @@ def main():
     parser.add_argument('--k_core', type=int, default=5, help='K-Core过滤稀疏节点阈值 (默认5, <=0表示关闭)')
     parser.add_argument('--extreme_acc_min', type=int, default=10, help='触发异常正确率100%/0%过滤的最少作答数阈值 (默认10, <=0表示关闭)')
     parser.add_argument('--rapid_merge_sec', type=float, default=3.0, help='过滤连答/脚手架的最短合法秒数间隔 (默认3.0, <=0表示关闭)')
+    parser.add_argument('--no_denoise', action='store_true', help='一键关闭所有降噪清洗规则 (K-Core, 逻辑异常, 防时序泄漏)')
     
     args = parser.parse_args()
     # 检查 min_seq_len 合法性
@@ -210,12 +211,12 @@ def main():
         return
     
 
-    # ========== Step 2: 过滤短序列 ========== 
+    # ========== Step 2: 首次过滤短序列 ========== 
     ic(f"Step 2: 过滤交互数 < {args.min_seq_len} 的用户...")
     user_counts = df[StandardColumns.USER_ID].value_counts()  # 使用标准列名
     valid_users = user_counts[user_counts >= args.min_seq_len].index
     df = df[df[StandardColumns.USER_ID].isin(valid_users)].copy()
-    ic(f"过滤后用户数: {df[StandardColumns.USER_ID].nunique()}")
+    ic(f"首次过滤后用户数: {df[StandardColumns.USER_ID].nunique()}")
 
 
     # ========== Step 3: 分层采样 ========== 
@@ -225,25 +226,52 @@ def main():
         df = sampler.stratified_sample(df, ratio=args.ratio, user_col=StandardColumns.USER_ID)  # 传入标准列名
 
     # ========== Step 3.5: 采样后数据彻底去噪 (Denoiser) ========== 
-    # 注意：我们必须在采样（砍掉大量用户）之后，再执行 K-Core 和异常值清理
-    # 否则被采样砍出的网络破尾会导致极多新孤岛和新 100%正确率题目。
+    # ⚠️ 学术声明 (关于为何在划分前进行全局去噪):
+    # 此处在划分 Train/Test 之前执行了全量数据的 K-Core 算法和规则过滤。
+    # 严格的学院派理论中，任何依赖 Test 数据分布的超前修剪都可能构成轻微“信息泄漏”。
+    # 但在工程与经典学术研究中（如 DKT, GKT 等），通常选择在统一数据可访问域 (Universe of Accessible Interactions) 
+    # 中建立稳定的知识图谱拓扑基线。本管线的去噪目的是为了剥离系统本身的物理缺陷噪音（机器刷单、100%正确作弊题）。
+    # 防止被采样砍出的网络破尾会导致极多新孤岛和新 100%正确率题目。
     from data_utils.denoiser import KTDataDenoiser
-    df = KTDataDenoiser.run_denoise_pipeline(
-        df, 
-        k_core=args.k_core, 
-        extreme_acc_min=args.extreme_acc_min, 
-        rapid_merge_sec=args.rapid_merge_sec
-    )
+    if not args.no_denoise:
+        df = KTDataDenoiser.run_denoise_pipeline(
+            df, 
+            k_core=args.k_core, 
+            extreme_acc_min=args.extreme_acc_min, 
+            rapid_merge_sec=args.rapid_merge_sec
+        )
+    else:
+        ic("⚠️ Warning: 所有降噪(Denoiser)规则已通过 --no_denoise 参数一键禁用")
+        
+    # ========== Step 3.6: 去噪后再次过滤短序列 (防破坏兜底) ==========
+    if not args.no_denoise:
+        user_counts_after = df[StandardColumns.USER_ID].value_counts()
+        valid_users_after = user_counts_after[user_counts_after >= args.min_seq_len].index
+        dropped_count = len(df[StandardColumns.USER_ID].unique()) - len(valid_users_after)
+        if dropped_count > 0:
+            df = df[df[StandardColumns.USER_ID].isin(valid_users_after)].copy()
+            ic(f"⚠️ 兜底清理: 去噪管线导致 {dropped_count} 名用户序列在清洗后过短 (<{args.min_seq_len})，已被移除。")
+        else:
+            ic("✅ 兜底检测: 未发现因去噪导致的短序列残缺。")
+            
+    # 为了防止后续 builder 和 diff 的随机时序异常，此节点强制开启全局排序
+    if StandardColumns.TIMESTAMP in df.columns:
+        ic("-> 强制时序全局对齐 (按 UserID -> Timestamp)...")
+        # 此时强行转换为数值以防万一
+        df[StandardColumns.TIMESTAMP] = pd.to_numeric(df[StandardColumns.TIMESTAMP], errors='coerce')
+        df.sort_values([StandardColumns.USER_ID, StandardColumns.TIMESTAMP], inplace=True)
     
     # 将标准化的数据只在处理好后（即短序列过滤/采样完成后）进行统一落盘，避免百万级 IO 导致缓慢
     standard_csv_path = os.path.join(output_dir, f'{dataset_name}_standard.csv')
     KTDataAdapter.save_standard_csv(df, standard_csv_path)
     ic(f"核心清洗后数据集已落盘: {standard_csv_path}")
 
-    # ========== Step 4: 用户级分割 ========== 
+    # ========== Step 4: 用户级分割 (序列级无偏划分) ========== 
     ic("Step 4: 用户级分割 (Train 80% / Test 20%)...")
+    # ⚠️ 关于冷启动泄漏/模型瞎猜: 此处采用了纯净的以用户为单位的割接 (User-Level Split)。
+    # 目的：严格考察模型对于没见过的陌生人的推理和部分题目零样本(Zero-Shot)的能力。这也是知识追踪领域测试冷启动的标准做法。
     splitter = KTDataSplitter(random_seed=args.seed)
-    train_users, test_users = splitter.split_users(df, test_ratio=0.2, user_col=StandardColumns.USER_ID)  # 传入标准列名
+    train_users, test_users = splitter.split_users(df, test_ratio=0.2, min_seq_len=args.min_seq_len, user_col=StandardColumns.USER_ID)  # 传入管线的 min_seq_len 保持一致
     ic(f"Train Users: {len(train_users)}, Test Users: {len(test_users)}")
     
     # ========== Step 5: 全景图结构构建 (DataBuilder) ========== 
@@ -252,17 +280,18 @@ def main():
     builder.build_maps(df)  # Builder 内部需要适配标准列名
     
     # ========== Step 6: 序列构建 (Parquet) ========== 
-    ic("Step 6: 序列构建 (Parquet)...")
+    ic("Step 6: 序列构建 (Parquet) 并计算相对时序特征...")
     df_train = df[df[StandardColumns.USER_ID].isin(train_users)].copy()
-    if StandardColumns.TIMESTAMP in df_train.columns:
-        df_train.sort_values([StandardColumns.USER_ID, StandardColumns.TIMESTAMP], inplace=True)
     train_records = builder.build_sequences(df_train, stride=train_stride, save_prefix='train')
     pd.DataFrame(train_records).to_parquet(os.path.join(output_dir, 'train.parquet'), engine='pyarrow', index=False)
 
+    # ⚠️ 防特征泄漏：提取训练集的 question_avg_time，供测试集复用
+    # 测试集的 t_response 特征必须基于训练集的中位答题时间，而非测试集自身的统计量
+    train_question_avg_time = builder.get_question_avg_time(df_train)
+    
     df_test = df[df[StandardColumns.USER_ID].isin(test_users)].copy()
-    if StandardColumns.TIMESTAMP in df_test.columns:
-        df_test.sort_values([StandardColumns.USER_ID, StandardColumns.TIMESTAMP], inplace=True)
-    test_records = builder.build_sequences(df_test, stride=None, save_prefix='test')
+    # 按照严格的评测标准，测试集应将超长用户按 50% 重叠的滑动窗口(MAX_SEQ_LEN//2) 切开，依靠 builder 内部的 eval_mask 解决状态截断导致的冷启动。
+    test_records = builder.build_sequences(df_test, stride=MAX_SEQ_LEN // 2, save_prefix='test', question_avg_time_override=train_question_avg_time)
     pd.DataFrame(test_records).to_parquet(os.path.join(output_dir, 'test.parquet'), engine='pyarrow', index=False)
     
 
@@ -382,6 +411,9 @@ def main():
 #
 # 5. 采样 10% + 最小重叠 (仅切分超长序列)
 #    python data_process.py --dataset assist09 --ratio 0.1 --stride 200
+# 
+# 6. 一键关闭数据降噪 (用于对比降噪前后的性能差异)
+#    python data_process.py --dataset assist09 --no_denoise
 # ============================================================================
 
 if __name__ == "__main__":
