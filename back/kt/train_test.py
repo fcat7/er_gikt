@@ -200,6 +200,33 @@ if __name__ == '__main__':
     # y_label_all: [Metric, Fold*Epoch] (Sequential)
     y_label_all = np.zeros([3, params.train.epochs * len(splits)]) 
 
+    # === [add_fzq] Enhanced Logging Initialization ===
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from torch.utils.tensorboard import SummaryWriter
+
+    history_records = []
+    
+    if args.ablation_name:
+        task_dir = os.path.join(config.path.OUTPUT_DIR, "run_ablation")
+        run_name = f"gikt_{dataset_name}_{args.ablation_name}_{time_now}"
+    else:
+        task_dir = os.path.join(config.path.OUTPUT_DIR, "train_test")
+        run_name = f"gikt_{dataset_name}_{time_now}"
+        
+    chart_data_dir = os.path.join(task_dir, "chart_data")
+    chart_img_dir = os.path.join(task_dir, "chart")
+    runs_root = os.path.join(task_dir, "runs", run_name)
+    
+    os.makedirs(chart_data_dir, exist_ok=True)
+    os.makedirs(chart_img_dir, exist_ok=True)
+    os.makedirs(runs_root, exist_ok=True)
+    
+    # 覆盖原有的 CHART_DIR 使得旧代码兼容
+    config.path.CHART_DIR = chart_data_dir
+    # ================================================
+
     # --------------------------------------------------------------------------
     # Outer Loop: Folds
     # --------------------------------------------------------------------------
@@ -207,6 +234,14 @@ if __name__ == '__main__':
         print('===================' + COLOR_LOG_Y + f'fold: {fold + 1} / {len(splits)}'+ COLOR_LOG_END + '====================')
         output_file.write('===================' + f'fold: {fold + 1} / {len(splits)}' + '====================\n')
         
+        # Initialize Writers for fold 1
+        if fold == 0:
+            train_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "train"))
+            val_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "val"))
+        else:
+            train_writer = None
+            val_writer = None
+
         # 1. Initialize Model & Optimizer (RESET FOR EACH FOLD)
         model = GIKT(
             num_question, num_skill, q_neighbors, s_neighbors, qs_table,
@@ -576,6 +611,32 @@ if __name__ == '__main__':
                 y_label_all[1][idx] = val_acc
                 y_label_all[2][idx] = val_auc
 
+            # === [add_fzq] Enhanced History Tracking ===
+            history_records.append({
+                'fold': fold + 1,
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_auc': train_auc,
+                'train_acc': train_acc,
+                'val_loss': val_loss,
+                'val_auc': val_auc,
+                'val_acc': val_acc,
+                'time_sec': run_time
+            })
+            
+            if train_writer and val_writer:
+                train_writer.add_scalar('Performance/Loss', train_loss, epoch)
+                train_writer.add_scalar('Performance/AUC', train_auc, epoch)
+                train_writer.add_scalar('Performance/ACC', train_acc, epoch)
+                try:
+                    train_writer.add_scalar('Optimization/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+                except:
+                    pass
+
+                val_writer.add_scalar('Performance/Loss', val_loss, epoch)
+                val_writer.add_scalar('Performance/AUC', val_auc, epoch)
+                val_writer.add_scalar('Performance/ACC', val_acc, epoch)
+
             # Early Stopping (Per Fold)
             if val_auc > best_fold_val_auc:
                 improvement = val_auc - best_fold_val_auc
@@ -704,3 +765,65 @@ if __name__ == '__main__':
         print(f'Model saved to {config.path.MODEL_DIR}/{time_now}.pt')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
+
+    # === [add_fzq] Enhanced Output Generation (CSV + PNG + TensorBoard HParams) ===
+    tb_hparam_writer = SummaryWriter(log_dir=runs_root)
+    avg_val_auc = np.mean(fold_results_test_auc) if fold_results_test_auc else 0.0
+    tb_hparam_writer.add_hparams(
+        hparam_dict={'model': 'GIKT', 'dataset': dataset_name, 'lr': params.train.lr},
+        metric_dict={'hparam/Avg_Test_AUC': avg_val_auc}
+    )
+    tb_hparam_writer.close()
+
+    try:
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        df_history = pd.DataFrame(history_records)
+        if args.ablation_name:
+            csv_filename = f"gikt_{args.ablation_name}_{dataset_name}_history_{time_now}.csv"
+            img_filename = f"gikt_{args.ablation_name}_{dataset_name}_metrics_{time_now}.png"
+        else:
+            csv_filename = f"gikt_{dataset_name}_history_{time_now}.csv"
+            img_filename = f"gikt_{dataset_name}_metrics_{time_now}.png"
+            
+        csv_path = os.path.join(chart_data_dir, csv_filename)
+        df_history.to_csv(csv_path, index=False)
+        print(f"📊 历史训练数据已保存至 {csv_path}")
+        
+        # Plotting
+        sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+        color_train = "#4DBBD5"
+        color_val = "#E64B35"
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        sns.lineplot(data=df_history, x='epoch', y='train_loss', label='Train Loss', color=color_train, ax=axes[0], errorbar='ci', n_boot=100)
+        sns.lineplot(data=df_history, x='epoch', y='val_loss', label='Val Loss', color=color_val, ax=axes[0], errorbar='ci', n_boot=100)
+        axes[0].set_title('Loss Curve (Mean & CI)')
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend()
+        
+        sns.lineplot(data=df_history, x='epoch', y='train_auc', label='Train AUC', color=color_train, ax=axes[1], errorbar='ci', n_boot=100)
+        sns.lineplot(data=df_history, x='epoch', y='val_auc', label='Val AUC', color=color_val, ax=axes[1], errorbar='ci', n_boot=100)
+        axes[1].set_title('AUC Curve (Mean & CI)')
+        axes[1].set_xlabel('Epoch')
+        axes[1].set_ylabel('AUC')
+        axes[1].legend()
+        
+        sns.lineplot(data=df_history, x='epoch', y='train_acc', label='Train ACC', color=color_train, ax=axes[2], errorbar='ci', n_boot=100)
+        sns.lineplot(data=df_history, x='epoch', y='val_acc', label='Val ACC', color=color_val, ax=axes[2], errorbar='ci', n_boot=100)
+        axes[2].set_title('Accuracy Curve (Mean & CI)')
+        axes[2].set_xlabel('Epoch')
+        axes[2].set_ylabel('Accuracy')
+        axes[2].legend()
+        
+        plt.tight_layout()
+        img_path = os.path.join(chart_img_dir, img_filename)
+        plt.savefig(img_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"📈 训练曲线图已保存至 {img_path}")
+        print(f"📝 Tensorboard 目录: {runs_root}")
+        
+    except Exception as e:
+        print(f"⚠️ 生成增强历史图表失败: {e}")
