@@ -6,8 +6,8 @@ import seaborn as sns
 
 def set_style():
     sns.set_theme(style="whitegrid", context="paper", font_scale=1.3)
-    # 支持中文显示
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'PingFang SC', 'sans-serif']
+    # 支持中文显示，同时指定英文使用 Times New Roman 会更美观
+    plt.rcParams['font.family'] = ['Times New Roman', 'SimHei', 'Microsoft YaHei', 'sans-serif']
     plt.rcParams['axes.unicode_minus'] = False
     try:
         plt.rcParams['text.usetex'] = False
@@ -59,6 +59,9 @@ def plot_radar_chart(df, output_dir):
     angles += angles[:1]
     
     fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
+    
+    # 增加加粗的全局标题
+    plt.title("Comprehensive Trade-off (Radar Chart)", fontsize=18, fontweight='bold', pad=40)
     
     # 【恢复清新配色】参考之前经典的柔和配色
     color_dict = {
@@ -112,13 +115,16 @@ def plot_radar_chart(df, output_dir):
     ax.set_theta_offset(np.pi / 2)
     ax.set_theta_direction(-1)
     
-    # 扩大 y_lim 给外围标签留出缓冲空间，防止中文相互覆盖
-    ax.set_ylim(0, 1.05)
+    # 扩大 y_lim 给外围标签留出缓冲空间，防止由于数据直接触顶导致的挤压重叠
+    ax.set_ylim(0, 1.15)
     
     ax.set_xticks(angles[:-1])
-    # 增加 pad 参数，把标签往外推使其不会和图表及顶点重叠
-    ax.tick_params(axis='x', pad=20) 
-    ax.set_xticklabels(labels, fontsize=13, fontweight='bold', color='#333333')
+    # 增加 pad 参数，同时加上一定大小和家族字体设定，避免中文覆盖
+    ax.tick_params(axis='x', pad=25) 
+    ax.set_xticklabels(labels, fontsize=13, fontweight='bold', color='#333333', family='SimHei')
+    
+    # 用虚线重新画同心圆，显得更通透
+    ax.yaxis.grid(True, linestyle='--', color='gray', alpha=0.5)
     
     # 恢复带层次的同心圆内部网格标注 (0.2, 0.4, 0.6, 0.8, 1.0)
     ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
@@ -126,8 +132,8 @@ def plot_radar_chart(df, output_dir):
     # 将内部标签的角度旋转到斜右上方以免被正上方的线条挡住
     ax.set_rlabel_position(75) 
     
-    # 图例设计
-    plt.legend(loc='upper right', bbox_to_anchor=(1.4, 1.05), frameon=True, fontsize=11)
+    # 图例设计，将其稍微向左调或者向上调避免由于扩大了y_lim导致的图例脱离
+    plt.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1), frameon=True, fontsize=11, prop={'family': 'Times New Roman', 'size': 11})
     
     plt.savefig(os.path.join(output_dir, 'recommendation_radar.pdf'), dpi=300, bbox_inches='tight')
     plt.close()
