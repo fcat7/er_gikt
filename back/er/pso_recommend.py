@@ -101,35 +101,47 @@ class CognitiveStateExtractor:
             response_time=response_time.to(self.device) if response_time is not None else None,
         )
         
-        # Probing：对每个技能逐个预测锚题
-        m_k = []
-        # qs_concat needs to be of shape: [batch_size, max_num_skill + 1, emb_dim]
-        # Since we are probing single skills, max_num_skill = 1
-        for s in range(self.n_skill):
-            q_anchor = self.anchor_questions[s]
-            q_target = torch.tensor([q_anchor], dtype=torch.long, device=self.device)  # [1]
-            
-            # 构造伪 qs_concat（仅包含锚题及其技能）
-            qs_concat = torch.zeros(1, 2, self.model.emb_dim, device=self.device)
-            qs_concat[0, 0] = self.model.emb_table_question(q_target).detach()
-            # 第二维度放该技能嵌入
-            qs_concat[0, 1] = self.model.emb_table_skill(
-                torch.tensor([s], dtype=torch.long, device=self.device)
-            ).detach()
-            
-            # 预测该锚题
-            with torch.no_grad():
+# 构造批量 probing (Shape: [n_skill, 2, emb_dim])
+        BATCH_SIZE = min(512, self.n_skill)
+        m_k = np.zeros(self.n_skill)
+
+        with torch.no_grad():
+            for i in range(0, self.n_skill, BATCH_SIZE):
+                end_i = min(i + BATCH_SIZE, self.n_skill)
+                b_size = end_i - i
+                
+                # 获取此批次技能的锚题
+                anchor_qs = [self.anchor_questions[s] for s in range(i, end_i)]
+                q_targets = torch.tensor(anchor_qs, dtype=torch.long, device=self.device)
+                
+                qs_concat = torch.zeros(b_size, 2, self.model.emb_dim, device=self.device)
+                qs_concat[:, 0] = self.model.emb_table_question(q_targets).detach()
+                qs_concat[:, 1] = self.model.emb_table_skill(
+                    torch.arange(i, end_i, dtype=torch.long, device=self.device)
+                ).detach()
+                
+                curr_state_expanded = state_dict['current_history_state'].expand(b_size, -1, -1).to(self.device)
+                
+                cached_keys_expanded = None
+                if state_dict['cached_keys'] is not None:
+                    cached_keys_expanded = state_dict['cached_keys'].expand(b_size, -1, -1).to(self.device)
+                    
+                pid_data_expanded = None
+                if state_dict['pid_data'] is not None:
+                    pid_e, pid_d = state_dict['pid_data']
+                    pid_e_exp = pid_e.expand(b_size, -1) if len(pid_e.shape)==2 else pid_e.expand(b_size)
+                    pid_d_exp = pid_d.expand(b_size, -1) if pid_d is not None and len(pid_d.shape)==2 else (pid_d.expand(b_size) if pid_d is not None else None)
+                    pid_data_expanded = (pid_e_exp, pid_d_exp)
+
                 logits = self.model.predict(
                     qs_concat,
-                    state_dict['current_history_state'].to(self.device),
-                    q_target=q_target,
-                    pid_data=state_dict['pid_data'],
-                    cached_keys=state_dict['cached_keys'].to(self.device) if state_dict['cached_keys'] is not None else None
+                    curr_state_expanded,
+                    q_target=q_targets,
+                    pid_data=pid_data_expanded,
+                    cached_keys=cached_keys_expanded
                 )
-                prob = torch.sigmoid(logits).squeeze().item()
-                m_k.append(prob)
-                
-        m_k = np.array(m_k)
+                probs = torch.sigmoid(logits).squeeze(-1).cpu().numpy()
+                m_k[i:end_i] = probs
         
         # 提取 PID 状态
         pid_ema, pid_diff = state_dict['pid_data'] if state_dict['pid_data'] is not None else (None, None)
@@ -277,13 +289,13 @@ class CandidateBuilder:
         g2_mask = (probs >= self.gate_p_min) & (probs <= self.gate_p_max)
         
         # G3: 薄弱技能关联
+        qs_table_np = self.qs_table.cpu().numpy()
         threshold = float(np.mean(m_k))
-        weak_skills = np.where(m_k < threshold)[0]
+        weak_skills_mask = m_k < threshold
+        
         g3_mask = np.zeros(n_q, dtype=bool)
-        for q in range(1, n_q):
-            related_skills = self.qs_table[q].nonzero(as_tuple=True)[0].cpu().numpy()
-            if len(related_skills) > 0 and np.any(np.isin(related_skills, weak_skills)):
-                g3_mask[q] = True
+        if weak_skills_mask.any() and n_q > 1:
+            g3_mask[1:] = (qs_table_np[1:] * weak_skills_mask).sum(axis=1) > 0
                 
         # G4: 未做过
         done_qs = history_q[history_mask.bool()].unique().cpu().numpy()
@@ -306,11 +318,14 @@ class CandidateBuilder:
 
         # G5（软）：置信折扣 + 高斯软排序
         beta_q = np.ones(len(candidates)) * self.confidence_discount
-        seen_skills = set(self.qs_table[done_qs].nonzero(as_tuple=True)[1].cpu().numpy())
-        for i, q in enumerate(candidates):
-            related_skills = self.qs_table[q].nonzero(as_tuple=True)[0].cpu().numpy()
-            if len(related_skills) > 0 and len(set(related_skills).intersection(seen_skills)) > 0:
-                beta_q[i] = 1.0 # 只要涉及过相关技能，则不进行折扣
+        seen_skills_idx = self.qs_table[done_qs].nonzero(as_tuple=True)[1].cpu().numpy()
+        seen_skills_mask = np.zeros(qs_table_np.shape[1], dtype=bool)
+        seen_skills_mask[seen_skills_idx] = True
+        
+        if len(candidates) > 0:
+            candidates_qs = qs_table_np[candidates]
+            has_seen_skill = (candidates_qs * seen_skills_mask).sum(axis=1) > 0
+            beta_q[has_seen_skill] = 1.0 # 只要涉及过相关技能，则不进行折扣
             
         # 计算动态 ZPD
         tau = self._compute_zpd(cognitive_state)
@@ -356,6 +371,7 @@ class FitnessEvaluator:
             config: 包含参数配置
         """
         self.qs_table = qs_table
+        self.qs_table_np = qs_table.cpu().numpy()
         self.K = config.get('K', 5)
 
     def evaluate_combo(self, combo: np.ndarray, probs: np.ndarray,
@@ -376,19 +392,19 @@ class FitnessEvaluator:
             (np.sqrt(1 - probs) - np.sqrt(1 - tau)) ** 2
         )
         
-        # F2: Weak skill coverage (negative for minimization)
+                # F2: Weak skill coverage (negative for minimization)
         threshold = float(np.mean(m_k))
-        weak_skills = np.where(m_k < threshold)[0]
-        covered_weak = set()
-        for q in combo:
-            related = self.qs_table[q].nonzero(as_tuple=True)[0].cpu().numpy()
-            covered_weak.update(np.intersect1d(related, weak_skills))
-            
-        if len(weak_skills) == 0:
+        weak_skills_mask = m_k < threshold
+        
+        qs_combo = self.qs_table_np[combo] # [K, n_skill]
+        covered_mask = qs_combo.sum(axis=0) > 0 # [n_skill]
+        covered_weak_mask = covered_mask & weak_skills_mask # [n_skill]
+
+        if not weak_skills_mask.any():
             f2 = 0.0
         else:
             # 加权覆盖（只覆盖没有就算）
-            f2 = -sum(1 - m_k[s] for s in covered_weak)
+            f2 = -float(np.sum(1 - m_k[covered_weak_mask]))
             
         return float(hellinger), float(f2)
 
