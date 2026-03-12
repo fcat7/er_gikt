@@ -18,6 +18,9 @@ def parse_data(csv_path):
     df = pd.read_csv(csv_path)
     return df
 
+def length_alpha(base_alpha):
+    return max(0.02, base_alpha * 0.4)
+
 def plot_radar_chart(df, output_dir):
     """
     绘制多目标雷达图，非常适合展示多目标优化(MOPSO)能取得“帕累托占优”的综合优势。
@@ -37,19 +40,28 @@ def plot_radar_chart(df, output_dir):
     mean_df = df.groupby('mode')[avail_metrics].mean().reset_index()
     mean_df = mean_df.fillna(0)
     
+    std_df = df.groupby('mode')[avail_metrics].std().reset_index()
+    std_df = std_df.fillna(0)
+    
     print("\n--- 原始均值数据 ---")
     print(mean_df.to_string(index=False))
 
     # 【核心调整】数据 Min-Max 标准化展示外缘轮廓
     # 警告：此标准化仅为绘制雷达图形状使用，必须在论文题注中说明！
     plot_df = mean_df.copy()
+    plot_std_df = std_df.copy()
+    
     for col in avail_metrics:
-        col_min = plot_df[col].min()
-        col_max = plot_df[col].max()
+        col_min = mean_df[col].min()
+        col_max = mean_df[col].max()
         if col_max > col_min:
-            plot_df[col] = 0.1 + 0.9 * (plot_df[col] - col_min) / (col_max - col_min)
+            scale = 0.9 / (col_max - col_min)
+            plot_df[col] = 0.1 + (mean_df[col] - col_min) * scale
+            # 方差进行同比例放缩，以保证置信区间的视觉比例正确
+            plot_std_df[col] = std_df[col] * scale
         else:
             plot_df[col] = 1.0  
+            plot_std_df[col] = 0.0
             
     print("\n--- 归一化后的数据 ---")
     print(plot_df.to_string(index=False))
@@ -133,6 +145,16 @@ def plot_radar_chart(df, output_dir):
         ax.plot(angles, values, color=color, linewidth=lw, label=mode_name_disp, 
                 linestyle=ls, marker=marker, markersize=markersize, 
                 markerfacecolor=mfc, markeredgewidth=1.2, zorder=zorder)
+                
+        # 添加带方差的置信带(Shaded Area)
+        std_row = plot_std_df[plot_std_df['mode'].str.lower() == mode_id].iloc[0]
+        stds = std_row[avail_metrics].values.tolist()
+        stds += stds[:1]
+        
+        upper_bound = np.clip(np.array(values) + np.array(stds), 0, 1)
+        lower_bound = np.clip(np.array(values) - np.array(stds), 0, 1)
+        
+        ax.fill_between(angles, lower_bound, upper_bound, color=color, alpha=length_alpha(alpha), zorder=zorder-1)
         ax.fill(angles, values, color=color, alpha=alpha, zorder=zorder)
         
     ax.set_theta_offset(np.pi / 2)
@@ -168,8 +190,8 @@ def plot_radar_chart(df, output_dir):
 
 if __name__ == "__main__":
     set_style()
-    # csv_path = r"output/recommendation_full/recommend_eval_full_all.csv"
-    csv_path = r"output/ablation_er/ablation_eval_full.csv"
+    csv_path = r"output/recommendation_full/recommend_eval_full_all.csv"
+    # csv_path = r"output/ablation_er/ablation_eval_full.csv"
     if not os.path.exists(csv_path):
         import glob
         files = glob.glob(r"output/recommendation_*/recommend_eval_*.csv")
