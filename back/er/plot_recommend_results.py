@@ -83,6 +83,16 @@ def plot_radar_chart(df, output_dir):
         'random': '*'           # 星形
     }
     
+    # 针对遮挡问题：为模型配置不同的线型
+    ls_dict = {
+        'ours': '-',
+        'dkt_greedy': '--',
+        'dkvmn_greedy': '-.',
+        'greedy': ':',
+        'popularity': '--',
+        'random': '-.'
+    }
+    
     # 制定绘制层级和样式，确保 OURS 覆盖在最上层
     for idx, row in plot_df.iterrows():
         mode_id = row['mode'].lower()
@@ -93,23 +103,24 @@ def plot_radar_chart(df, output_dir):
         
         color = color_dict.get(mode_id, '#999999')
         marker = marker_dict.get(mode_id, 'o')
+        ls = ls_dict.get(mode_id, '-')
         
         if mode_id == 'ours':
             lw = 2.5
             alpha = 0.15
             zorder = 10
             markersize = 8
+            mfc = color  # 实心
         else:
             lw = 1.5
             alpha = 0.05
             zorder = 2
             markersize = 6
-        
-        # 统一使用实线，视觉较虚线更连贯、清新
-        ls = '-'
+            mfc = 'none' # 空心，透视后面的线
         
         ax.plot(angles, values, color=color, linewidth=lw, label=mode_name_disp, 
-                linestyle=ls, marker=marker, markersize=markersize, zorder=zorder)
+                linestyle=ls, marker=marker, markersize=markersize, 
+                markerfacecolor=mfc, markeredgewidth=1.2, zorder=zorder)
         ax.fill(angles, values, color=color, alpha=alpha, zorder=zorder)
         
     ax.set_theta_offset(np.pi / 2)
@@ -123,12 +134,16 @@ def plot_radar_chart(df, output_dir):
     ax.tick_params(axis='x', pad=25) 
     ax.set_xticklabels(labels, fontsize=13, fontweight='bold', color='#333333', family='SimHei')
     
-    # 用虚线重新画同心圆，显得更通透
-    ax.yaxis.grid(True, linestyle='--', color='gray', alpha=0.5)
+    # 用虚线重新画同心圆，显得更通透，同时提高 zorder 确保网格线在色块之上
+    ax.yaxis.grid(True, linestyle='--', color='gray', alpha=0.5, zorder=15)
+    ax.xaxis.grid(True, linestyle='-', color='gray', alpha=0.3, zorder=15)
     
     # 恢复带层次的同心圆内部网格标注 (0.2, 0.4, 0.6, 0.8, 1.0)
     ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
-    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], color="grey", size=10)
+    y_labels = ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], color="dimgrey", size=10, fontweight='bold')
+    for label in y_labels:
+        label.set_zorder(20)  # 【解决由于遮挡导致字体不可见的核心】提高字体层级
+        
     # 将内部标签的角度旋转到斜右上方以免被正上方的线条挡住
     ax.set_rlabel_position(75) 
     
