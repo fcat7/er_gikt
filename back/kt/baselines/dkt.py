@@ -15,11 +15,10 @@ class DKT(Module):
         self.emb_dim = emb_dim
         self.hidden_size = emb_dim
         
-        # In standard DKT on datasets with skills, we predict Skill/Concept instead of Question to avoid massive sparsity and overfitting.
-        # [紧急修改]: 根据要求，强制使用题目级别(Question-level)。如需恢复技能级别(Skill-level)，将 force_question_level 改为 False
-        force_question_level = False
-        self.use_skill = (not force_question_level) and (self.num_skill is not None and self.num_skill > 0 and self.num_skill < self.num_question)
-        self.num_concepts = self.num_skill if self.use_skill else self.num_question
+        # 强制题目级 DKT：输入与输出都基于 question，而不是 skill/concept。
+        # 这是你当前实验需要的设定；否则会退化成技能级 DKT，和你的实验目标不一致。
+        self.use_skill = False
+        self.num_concepts = self.num_question
 
         # DKT Input: Interaction Embedding (Concept_ID + Correctness)
         self.interaction_emb = Embedding(self.num_concepts * 2, self.emb_dim)
@@ -38,7 +37,7 @@ class DKT(Module):
             skill: [batch_size, seq_len] Optional skill sequences
             mask: [batch_size, seq_len] (Padding mask)
         """
-        inp = skill if (self.use_skill and skill is not None) else question
+        inp = question
 
         # x = concept + num_concepts * response
         x = inp + self.num_concepts * response 
@@ -66,7 +65,4 @@ class DKT(Module):
         final_logits = torch.zeros(batch_size, seq_len, device=question.device)
         final_logits[:, :-1] = gathered_logits
 
-        return final_logits
-        final_logits[:, :-1] = gathered_logits
-        
         return final_logits

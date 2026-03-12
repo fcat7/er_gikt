@@ -112,10 +112,9 @@ class BaseTrainer:
             
             with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                 if model_name == 'dkt':
+                    # 当前 DKT 前向返回的是题目级 next-item logits，不是概率。
                     y_hat = model(question, response, mask, skill=skill)
-                    eps = 1e-6
-                    y_hat = torch.clamp(y_hat, eps, 1-eps)
-                    preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
+                    preds = y_hat[:, :-1]
                 elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'dkt_forget', 'deep_irt']:
                     y_hat = model(question, response, mask, interval, r_time)
                     if y_hat.shape[1] == question.shape[1]: 
@@ -239,12 +238,10 @@ class BaseTrainer:
                 
                 with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                     if model_name == 'dkt':
+                        # 当前 DKT 前向返回的是题目级 next-item logits，不是概率。
                         y_hat = model(question, response, mask, skill=skill)
-                        # DKT returns sigmoid probabilities, need to convert back to logits for loss
-                        eps = 1e-6
-                        y_hat = torch.clamp(y_hat, eps, 1-eps)
-                        preds = torch.log(y_hat[:, :-1] / (1 - y_hat[:, :-1]))
-                        y_hat_prob = y_hat[:, :-1]
+                        preds = y_hat[:, :-1]
+                        y_hat_prob = torch.sigmoid(preds)
                     elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
                         y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
