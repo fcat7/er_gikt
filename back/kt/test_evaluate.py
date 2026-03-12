@@ -73,7 +73,7 @@ def evaluate_model(model, dataloader, device, use_amp=True):
             with torch.amp.autocast(device_type='cuda', enabled=use_amp):
                 if model_name == 'dkt' or 'dkt' in model_name and 'lbkt' not in model_name:
                     y_hat = model(question, response, mask)
-                    preds = y_hat[:, :-1]
+                    preds = torch.sigmoid(y_hat[:, :-1])
                     preds = torch.nan_to_num(preds, nan=0.0)
                 elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
                     y_hat = model(question, response, mask, interval, r_time)
