@@ -1210,7 +1210,9 @@ class GIKT(Module):
         # HSSI (Hidden State): 方差较大，导致 p 值分布过宽，sigmoid 后梯度消失/爆炸
         # HSEI (Input Emb): 方差较小，p 值稳定
         # 添加缩放因子以稳定训练动态 (参考 Transformer)
-        p = p / (self.emb_dim ** 0.5)
+        # p = p / (self.emb_dim ** 0.5) 
+        # [Remove artificial squashing! p is theta, giving it fixed variance reduces maximum absolute logit]
+
 
         # @add_fzq: PID-GIKT Bias Injection
         # Modify Student Ability (p) with PID Control Signal
