@@ -340,7 +340,8 @@ class BaseTrainer:
                 config=self.config, 
                 **self.kwargs
             )
-            optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.kwargs.get('weight_decay', 1e-5))
+            wd = float(self.kwargs.get('weight_decay', 1e-5))
+            optimizer = optim.Adam(model.parameters(), lr=float(self.learning_rate), weight_decay=wd)
             
             # 初始化 AMP
             use_amp = self.kwargs.get('amp_enabled', True) and torch.cuda.is_available()
