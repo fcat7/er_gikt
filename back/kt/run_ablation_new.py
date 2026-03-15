@@ -13,51 +13,62 @@ CHECKPOINT_FILE = "ablation_checkpoint.json"
 
 # 定义我们要跑的消融实验组
 ABLATION_TARGETS = {
-    "assist09-full": [
-        "train.dataset_name=assist09",
-        "train.save_model=True"
-    ],
-    "assist12-full": [
-        "train.dataset_name=assist12",
-        "train.save_model=True"
-    ],
-    "assist17-full": [
-        "train.dataset_name=assist17",
-        "train.save_model=True"
-    ],
-    "ednet_kt1-full": [
-        "train.dataset_name=ednet_kt1",
-        "train.save_model=True"
-    ],
-    "nips2020-full": [
-        "train.dataset_name=nips2020",
-        "train.save_model=True"
-    ]
+    # "assist09-full": [
+    #     "train.dataset_name=assist09",
+    #     "train.save_model=True"
+    # ],
+    # "assist12-full": [
+    #     "train.dataset_name=assist12",
+    #     "train.save_model=True"
+    # ],
+    # "assist17-full": [
+    #     "train.dataset_name=assist17",
+    #     "train.save_model=True"
+    # ],
+    # "ednet_kt1-full": [
+    #     "train.dataset_name=ednet_kt1",
+    #     "train.save_model=True"
+    # ],
+    # "nips2020-full": [
+    #     "train.dataset_name=nips2020_task34",
+    #     "train.save_model=True"
+    # ],
     # 实验名 : 要覆写（Override）的参数列表
-    # "A_Baseline": [
-    # ],
-    # "B_Remove_PID": [
-    #     "model.use_pid=False"
+    "A_Baseline": [
+    ],
+    "B_Remove_PID": [
+        "model.use_pid=False"
+    ],
+    
+    "C_Remove_Cognitive": [
+        "model.use_cognitive_model=False"
+    ],
+    
+    "D_Remove_IRT": [
+        "model.use_4pl_irt=False"
+    ],
+    
+    # "E_agg_method-kk_gat": [
+    #     "model.agg_method=kk_gat"
     # ],
     
-    # "C_Remove_Cognitive": [
-    #     "model.use_cognitive_model=False"
-    # ],
-    
-    # "D_Remove_IRT_4PL": [
-    #     "model.use_4pl_irt=False"
-    # ],
-    
-    # "E_agg_method: gcn": [
-    #     "model.agg_method=gcn"
-    # ],
-    
-    # "F_old_gikt": [
-    #     "model.use_pid=False",
-    #     "model.use_cognitive_model=False",
-    #     "model.use_4pl_irt=False",
-    #     "model.agg_method=gcn"
-    # ]
+    "F_old_gikt": [
+        "model.use_pid=False",
+        "model.use_cognitive_model=False",
+        "model.use_4pl_irt=False"
+    ],
+    "G_remove_PID_Cognitive": [
+        "model.use_pid=False",
+        "model.use_cognitive_model=False"
+    ],
+    "H_remove_PID_IRT": [
+        "model.use_pid=False",
+        "model.use_4pl_irt=False"
+    ],
+    "I_remove_Cognitive_IRT": [
+        "model.use_cognitive_model=False",
+        "model.use_4pl_irt=False"
+    ]
 }
 
 def main():

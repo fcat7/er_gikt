@@ -1,7 +1,7 @@
 """
 训练并测试模型
 使用五折交叉验证法 (Standard K-Fold)
-python train_test.py --override train.dataset_name=assist12-sample_7%
+python train_test.py --override train.dataset_name=assist09_gikt_old train.lr=0.01
 """
 import os
 import time
@@ -368,10 +368,16 @@ if __name__ == '__main__':
                     # Regularization
                     reg_loss = 0.0
                     if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
-                    if hasattr(model, 'discrimination_bias'): reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
+                    
+                    # 4PL-IRT Regularization (Zero-mean L2 for stable priors)
+                    if hasattr(model, 'difficulty_bias'): 
+                         reg_loss += params.train.reg_4pl * torch.sum(model.difficulty_bias.weight ** 2)
+                    if hasattr(model, 'discrimination_bias'): 
+                         reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
                     if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
-                         reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2) 
-                         reg_loss += params.train.reg_4pl * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                         reg_loss += params.train.reg_4pl * torch.sum(model.guessing_bias.weight ** 2) 
+                         reg_loss += params.train.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
+
                     loss += reg_loss
                 
                 scaler.scale(loss).backward()

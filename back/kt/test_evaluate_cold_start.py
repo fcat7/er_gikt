@@ -32,8 +32,8 @@ def get_available_checkpoints(checkpoint_dir=None):
         checkpoint_dir = os.path.join(current_dir, 'checkpoint')
     available_combos = []
     known_models = [
-        'dkt_forget', 'deep_irt', 'simplekt', 'gikt_old',
-        'dkvmn', 'lbkt', 'qikt', 'gikt', 'dkt', 'akt'
+        'deep_irt', 'simplekt', 'gikt_old',
+        'dkvmn', 'qikt', 'gikt', 'dkt', 'akt'
     ]
     if os.path.exists(checkpoint_dir):
         for f in os.listdir(checkpoint_dir):

@@ -31,13 +31,14 @@ def get_metadata(processed_data_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Train Baseline KT Models")
-    parser.add_argument('--model_name', type=str, required=True, choices=['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'deep_irt', 'dkt_forget', 'gikt_old'], help="Baseline model name (e.g., dkt, dkvmn)")
+    parser.add_argument('--model_name', type=str, required=True, choices=['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gikt_old'], help="Baseline model name (e.g., dkt, dkvmn)")
     parser.add_argument('--dataset', type=str, required=True, help="Dataset name, e.g. assist09, ednet")
     parser.add_argument('--epochs', type=int, default=50, help="Number of training epochs")
     parser.add_argument('--k_fold', type=int, default=5, help="K-Fold cross validation splits")
     parser.add_argument('--patience', type=int, default=3, help="Early stopping patience")
     parser.add_argument('--no_save_model', action='store_true', help="启用则不保存模型")
-    parser.add_argument('--batch_size', type=int, default=128, help="批大小")
+    parser.add_argument('--batch_size', type=int, default=64, help="批大小")
+    parser.add_argument('--learning_rate', type=float, default=None, help="如果提供，将覆盖最优学习率 (快速测试使用)")
     
     args = parser.parse_args()
 
@@ -73,6 +74,11 @@ def main():
         for param_k, param_v in override_params.items():
             model_kwargs[param_k] = param_v
             print(f"  |-- {param_k} = {param_v}")
+
+    # ===== 允许命令行覆盖学习率 (用于快速测试或强行提速) =====
+    if args.learning_rate is not None:
+        model_kwargs['learning_rate'] = args.learning_rate
+        print(f"[{args.model_name.upper()}] ⚡ Command line override! learning_rate forced to: {args.learning_rate}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     data_config = get_config(args.dataset)
@@ -125,6 +131,6 @@ def main():
     if os.path.exists(save_path):
         print(f"✅ Successfully saved to {save_path}!")
 
-# python train_baseline.py --model_name dkt --dataset assist09 --epochs 10 --k_fold 1 --patience 1 --no_save_model --batch_size 256
+# python train_baseline.py --model_name gikt_old --dataset assist09_gikt_old --epochs 50 --k_fold 1 --patience 3 --no_save_model --batch_size 128 --learning_rate 0.01
 if __name__ == '__main__':
     main()

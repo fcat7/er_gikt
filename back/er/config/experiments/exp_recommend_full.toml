@@ -2,14 +2,15 @@
 # 用于最终汇报的完整配置
 
 [common]
-dataset_name = "assist09"
+dataset_name = "assist09-min20"
 device = "auto"
 seed = 42
 # model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_185358-gikt-assist09-full-min_len!5.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
-model_path = "H:\\er_gikt\\back\\kt\\checkpoint\\gikt_assist09_best.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+# model_path = "H:\\er_gikt\\back\\kt\\checkpoint-min20\\gikt_assist09_best.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
+model_path = "H:\\er_gikt\\back\\kt\\checkpoint-min20\\gikt_assist09_min20.pt" # 修复版
 # model_path = "H:\\er_gikt\\back\\kt\\output\\model\\20260308_185358-gikt-assist09-full-min_len_5.pt" # 可选：直接在这里配置模型路径，若配置则命令行优先
-dkt_model_path = "H:\\er_gikt\\back\\kt\\checkpoint\\dkt_assist09_best.pt"
-dkvmn_model_path = "H:\\er_gikt\\back\\kt\\checkpoint\\dkvmn_assist09_best.pt"
+dkt_model_path = "H:\\er_gikt\\back\\kt\\checkpoint-min20\\dkt_assist09_best.pt"
+dkvmn_model_path = "H:\\er_gikt\\back\\kt\\checkpoint-min20\\dkvmn_assist09_best.pt"
 
 
 [recommendation]

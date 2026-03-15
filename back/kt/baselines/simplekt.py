@@ -13,7 +13,7 @@ class Dim(IntEnum):
     feature = 2
 
 class SimpleKT(nn.Module):
-    def __init__(self, n_question, d_model=256, n_blocks=1, dropout=0.05, d_ff=256, 
+    def __init__(self, n_question, n_skill=None, d_model=256, n_blocks=1, dropout=0.05, d_ff=256, 
             kq_same=1, final_fc_dim=512, num_attn_heads=8, separate_qa=False):
         super().__init__()
         """
@@ -26,6 +26,7 @@ class SimpleKT(nn.Module):
         """
         self.model_name = "simplekt"
         self.n_question = n_question
+        self.n_skill = n_skill if n_skill is not None else n_question
         self.dropout = dropout
         self.kq_same = kq_same
         self.n_pid = 0
@@ -35,7 +36,8 @@ class SimpleKT(nn.Module):
         embed_l = d_model
         
         # n_question+1 ,d_model
-        self.q_embed = nn.Embedding(self.n_question, embed_l)
+        self.q_embed = nn.Embedding(self.n_question + 1, embed_l // 2)
+        self.c_embed = nn.Embedding(self.n_skill + 1, embed_l // 2)
         if self.separate_qa: 
             self.qa_embed = nn.Embedding(2*self.n_question+1, embed_l) # interaction emb
         else: # false default
@@ -59,23 +61,37 @@ class SimpleKT(nn.Module):
             if p.size(0) == self.n_pid+1 and self.n_pid > 0:
                 torch.nn.init.constant_(p, 0.)
 
-    def base_emb(self, q_data, target):
-        q_embed_data = self.q_embed(q_data)  # BS, seqlen,  d_model# c_ct
+    def base_emb(self, q_data, c_data, target):
+        safe_q = q_data * (q_data > -1).long()
+        safe_c = c_data * (c_data > -1).long()
+        safe_target = target * (target > -1).long()
+        
+        if safe_q.max() >= self.n_question + 1:
+            print('q_data out of bounds:', safe_q.max().item(), 'max allowed:', self.n_question)
+        if safe_c.max() >= self.n_skill + 1:
+            print('c_data out of bounds:', safe_c.max().item(), 'max allowed:', self.n_skill)
+        if safe_target.max() >= 2:
+            print('target out of bounds:', safe_target.max().item())
+
+        q_emb = self.q_embed(safe_q)
+        c_emb = self.c_embed(safe_c)
+        q_embed_data = torch.cat([q_emb, c_emb], dim=-1)
+
         if self.separate_qa:
-            qa_data = q_data + self.n_question * target
+            qa_data = safe_q + self.n_question * safe_target
             qa_embed_data = self.qa_embed(qa_data)
         else:
-            # BS, seqlen, d_model # c_ct+ g_rt =e_(ct,rt)
-            qa_embed_data = self.qa_embed(target)+q_embed_data
+            qa_embed_data = self.qa_embed(safe_target) + q_embed_data
         return q_embed_data, qa_embed_data
 
-    def forward(self, question, response, mask=None, interval_time=None, response_time=None):
+    def forward(self, question, response, mask=None, interval_time=None, response_time=None, skill=None):
         q_data = question
+        c_data = skill if skill is not None else torch.zeros_like(question)
         target = response
         emb_type = self.emb_type
         # Batch First
         if emb_type.startswith("qid"):
-            q_embed_data, qa_embed_data = self.base_emb(q_data, target)
+            q_embed_data, qa_embed_data = self.base_emb(q_data, c_data, target)
 
         pid_embed_data = None
         c_reg_loss = 0.

@@ -115,13 +115,13 @@ class BaseTrainer:
                     # 当前 DKT 前向返回的是题目级 next-item logits，不是概率。
                     y_hat = model(question, response, mask, skill=skill)
                     preds = y_hat[:, :-1]
-                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'dkt_forget', 'deep_irt']:
+                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
                     y_hat = model(question, response, mask, interval, r_time)
                     if y_hat.shape[1] == question.shape[1]: 
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
-                elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
+                elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     preds = y_hat[:, 1:]
                 else:
@@ -142,15 +142,17 @@ class BaseTrainer:
                 
                 loss = self.criterion(preds_filtered, targets_filtered)
 
-                # 添加 4PL 正则化 (针对 GIKT)
+                # 添加 4PL 正则化 (针对 GIKT: Zero-mean L2 for stable priors)
                 reg_loss = 0.0
                 if hasattr(model, 'discrimination_gain'): 
                     reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                if hasattr(model, 'difficulty_bias'): 
+                    reg_loss += self.reg_4pl * torch.sum(model.difficulty_bias.weight ** 2)
                 if hasattr(model, 'discrimination_bias'): 
                     reg_loss += self.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
                 if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
-                    reg_loss += self.reg_4pl * torch.sum(torch.relu(model.guessing_bias.weight + 2.0)**2)
-                    reg_loss += self.reg_4pl * torch.sum(torch.relu(model.slipping_bias.weight + 3.0)**2)
+                    reg_loss += self.reg_4pl * torch.sum(model.guessing_bias.weight ** 2)
+                    reg_loss += self.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
                 loss += reg_loss
 
             scaler.scale(loss).backward()
@@ -242,11 +244,11 @@ class BaseTrainer:
                         y_hat = model(question, response, mask, skill=skill)
                         preds = y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
-                    elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                    elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
                         y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
-                    elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
+                    elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                         y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat[:, 1:]
                         y_hat_prob = torch.sigmoid(preds)
@@ -338,7 +340,8 @@ class BaseTrainer:
                 config=self.config, 
                 **self.kwargs
             )
-            optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=self.kwargs.get('weight_decay', 1e-5))
+            wd = float(self.kwargs.get('weight_decay', 1e-5))
+            optimizer = optim.Adam(model.parameters(), lr=float(self.learning_rate), weight_decay=wd)
             
             # 初始化 AMP
             use_amp = self.kwargs.get('amp_enabled', True) and torch.cuda.is_available()
@@ -399,8 +402,15 @@ class BaseTrainer:
                     'time_sec': end_time - start_time
                 })
                 
-                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
-                
+                vram_info = ""
+                if torch.cuda.is_available():
+                    # 显示最大已分配(Allocated)和最大已保留(Reserved)对显存的使用情况
+                    vram_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    vram_res_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
+                    vram_info = f" | VRAM: {vram_alloc_gb:.2f}G (Res: {vram_res_gb:.2f}G)"
+
+                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s{vram_info}")
+
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     patience_counter = 0

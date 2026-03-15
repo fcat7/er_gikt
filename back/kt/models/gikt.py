@@ -415,10 +415,18 @@ class GIKT(Module):
                 self.w_pid_d = torch.nn.Parameter(torch.tensor(pid_init_d))
         self.reset_parameters()
         
-        # @fix_fzq: Re-apply 4PL initialization (must be done AFTER reset_parameters)
-        # Convert Probability to Logits (Bias): x = ln(p / (1-p))
-        guessing_bias = math.log(guessing_prob_init / (1 - guessing_prob_init)) if 0 < guessing_prob_init < 1 else -3.0
-        slipping_bias = math.log(slipping_prob_init / (1 - slipping_prob_init)) if 0 < slipping_prob_init < 1 else -4.0
+        # @fix_fzq: Modern 4PL-IRT Initialization (Shifted Sigmoid + Zero-mean bounds)
+        # 1. Define hard mathematical ceiling caps for probabilistic parameters
+        self.c_max = 0.50  # 猜测率上限设为 50%
+        self.d_max = 0.20  # 失误率上限设为 20%
+        
+        # 2. Foolproof logic: clip configuration probabilities slightly below the ceiling
+        safe_guess_init = min(max(guessing_prob_init, 1e-5), self.c_max - 1e-5)
+        safe_slip_init = min(max(slipping_prob_init, 1e-5), self.d_max - 1e-5)
+        
+        # 3. Calculate constant offsets: W = ln(p / (C_max - p))
+        self.guess_offset = math.log(safe_guess_init / (self.c_max - safe_guess_init))
+        self.slip_offset = math.log(safe_slip_init / (self.d_max - safe_slip_init))
 
         if hasattr(self, 'difficulty_bias'):
             torch.nn.init.constant_(self.difficulty_bias.weight, 0.0)
@@ -427,9 +435,9 @@ class GIKT(Module):
         if hasattr(self, 'discrimination_bias'):
             torch.nn.init.constant_(self.discrimination_bias.weight, 0.0)
         if hasattr(self, 'guessing_bias'):
-            torch.nn.init.constant_(self.guessing_bias.weight, guessing_bias)
+            torch.nn.init.constant_(self.guessing_bias.weight, 0.0)
         if hasattr(self, 'slipping_bias'):
-            torch.nn.init.constant_(self.slipping_bias.weight, slipping_bias)
+            torch.nn.init.constant_(self.slipping_bias.weight, 0.0)
         # # 可学习的融合参数 beta，初始化为 0.1
         # self.beta = torch.nn.Parameter(torch.tensor(0.1))
 
@@ -1210,7 +1218,9 @@ class GIKT(Module):
         # HSSI (Hidden State): 方差较大，导致 p 值分布过宽，sigmoid 后梯度消失/爆炸
         # HSEI (Input Emb): 方差较小，p 值稳定
         # 添加缩放因子以稳定训练动态 (参考 Transformer)
-        p = p / (self.emb_dim ** 0.5)
+        # p = p / (self.emb_dim ** 0.5) 
+        # [Remove artificial squashing! p is theta, giving it fixed variance reduces maximum absolute logit]
+
 
         # @add_fzq: PID-GIKT Bias Injection
         # Modify Student Ability (p) with PID Control Signal
@@ -1276,13 +1286,14 @@ class GIKT(Module):
                 # 3. 引入判别度、猜测率与失误率 (Step 3: 4PL Model)
                 if self.use_4pl_irt:
                     # a_q (Discrimination): 区分度，必须为正。使用 softplus 确保平滑且 > 0
-                    a_q = 1.0 + F.softplus(torch.squeeze(self.discrimination_bias(q_target), dim=-1))
+                    # 初始化为 0.0 时，F.softplus(0.0) ≈ 0.69，加上 base 0.5，起步值为近 1.19，符合标准 4PL 均值
+                    a_q = 0.5 + F.softplus(torch.squeeze(self.discrimination_bias(q_target), dim=-1))
                     
-                    # c_q (Guessing): 猜测率，收紧到 [0, 0.2]
-                    c_q = 0.2 * torch.sigmoid(torch.squeeze(self.guessing_bias(q_target), dim=-1))
+                    # c_q (Guessing): 猜测率，应用常量 offset，使得 W=0 时概率正好等于配置的 guessing_prob_init
+                    c_q = self.c_max * torch.sigmoid(torch.squeeze(self.guessing_bias(q_target), dim=-1) + self.guess_offset)
                     
-                    # d_q (Slipping): 失误率，收紧到 [0, 0.05]
-                    d_q = 0.05 * torch.sigmoid(torch.squeeze(self.slipping_bias(q_target), dim=-1))
+                    # d_q (Slipping): 失误率，应用常量 offset，使得 W=0 时概率正好等于配置的 slipping_prob_init
+                    d_q = self.d_max * torch.sigmoid(torch.squeeze(self.slipping_bias(q_target), dim=-1) + self.slip_offset)
                     
                     # 4PL 核心预测公式: P = c + (1 - c - d) * sigmoid(a * (theta - b))
                     # 此处 p 作为注意力聚合后的能力值 theta (Student Ability)

@@ -3,9 +3,8 @@ import os
 from scipy import sparse
 
 # 导入基准模型
-from baselines import DKT, DKVMN, AKT, SimpleKT, QIKT, LBKT, GIKTOld
+from baselines import DKT, DKVMN, AKT, SimpleKT, QIKT, GIKTOld
 from baselines.deep_irt import DeepIRT
-from baselines.dkt_forget import DKTForget
 from .gikt import GIKT
 
 class ModelFactory:
@@ -74,6 +73,7 @@ class ModelFactory:
                 use_4pl_irt=kwargs.get('use_4pl_irt', True)
             ).to(device)
 
+
         elif name_key == 'dkt':
             emb_size = kwargs.get('emb_size', 64)
             dropout = kwargs.get('dropout', 0.1)
@@ -93,14 +93,14 @@ class ModelFactory:
             d_ff = kwargs.get('d_ff', 256)
             num_attn_heads = kwargs.get('num_attn_heads', 8)
             dropout = kwargs.get('dropout', 0.1)
-            model = AKT(n_question=num_question, d_model=d_model, n_blocks=n_blocks, 
+            model = AKT(n_question=num_question, n_skill=num_skill, d_model=d_model, n_blocks=n_blocks, 
                     d_ff=d_ff, num_attn_heads=num_attn_heads, dropout=dropout).to(device)
 
         elif name_key == 'simplekt':
             emb_size = kwargs.get('emb_size', 64)
             d_model = kwargs.get('d_model', emb_size)
             dropout = kwargs.get('dropout', 0.1)
-            model = SimpleKT(n_question=num_question, d_model=d_model, dropout=dropout).to(device)
+            model = SimpleKT(n_question=num_question, n_skill=num_skill, d_model=d_model, dropout=dropout).to(device)
 
         elif name_key == 'qikt':
             emb_size = kwargs.get('emb_size', 64)
@@ -110,25 +110,13 @@ class ModelFactory:
             qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(device)
             model = QIKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_emb=emb_size, dropout=dropout).to(device)
         
-        elif name_key == 'lbkt':
-            emb_size = kwargs.get('emb_size', 64)
-            dim_factor = kwargs.get('dim_factor', 1)
-            if config is None:
-                raise ValueError("LBKT requires config to load qs_table")
-            qs_table = torch.tensor(sparse.load_npz(os.path.join(config.PROCESSED_DATA_DIR, 'qs_table.npz')).toarray(), dtype=torch.float32).to(device)
-            model = LBKT(num_question=num_question, num_concept=num_skill, qs_table=qs_table, dim_h=emb_size, dim_factor=dim_factor).to(device)
-            
+
         elif name_key == 'deep_irt':
             emb_size = kwargs.get('emb_size', 64)
             size_m = kwargs.get('size_m', 50)
             dropout = kwargs.get('dropout', 0.1)
             model = DeepIRT(num_q=num_question, num_c=num_skill, dim_s=emb_size, size_m=size_m, dropout=dropout).to(device)
             
-        elif name_key == 'dkt_forget':
-            emb_size = kwargs.get('emb_size', 64)
-            dropout = kwargs.get('dropout', 0.1)
-            model = DKTForget(num_q=num_question, num_c=num_skill, emb_size=emb_size, dropout=dropout).to(device)
-
         elif name_key == 'gikt_old':
             q_neighbors = kwargs.get('q_neighbors')
             s_neighbors = kwargs.get('s_neighbors')
