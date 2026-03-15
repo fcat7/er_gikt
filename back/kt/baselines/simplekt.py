@@ -35,13 +35,18 @@ class SimpleKT(nn.Module):
         self.emb_type = "qid"
         embed_l = d_model
         
-        # n_question+1 ,d_model
-        self.q_embed = nn.Embedding(self.n_question + 1, embed_l // 2)
-        self.c_embed = nn.Embedding(self.n_skill + 1, embed_l // 2)
+        # 严格复现 SimpleKT 原论文的特征嵌入机制
+        # Concept (c), Question Difficulty (\mu_q), Concept Variation (d_c)
+        self.c_embed = nn.Embedding(self.n_skill + 10, embed_l)
+        self.q_diff_embed = nn.Embedding(self.n_question + 10, embed_l)
+        self.c_var_embed = nn.Embedding(self.n_skill + 10, embed_l)
+        
         if self.separate_qa: 
-            self.qa_embed = nn.Embedding(2*self.n_question+1, embed_l) # interaction emb
+            self.r_embed = nn.Embedding(2*self.n_question+10, embed_l)
+            self.r_var_embed = nn.Embedding(2*self.n_question+10, embed_l)
         else: # false default
-            self.qa_embed = nn.Embedding(2, embed_l)
+            self.r_embed = nn.Embedding(10, embed_l)
+            self.r_var_embed = nn.Embedding(10, embed_l)
 
         # Architecture Object. It contains stack of attention block
         self.model = Architecture(n_question=n_question, n_blocks=n_blocks, n_heads=num_attn_heads, dropout=dropout,
@@ -73,15 +78,25 @@ class SimpleKT(nn.Module):
         if safe_target.max() >= 2:
             print('target out of bounds:', safe_target.max().item())
 
-        q_emb = self.q_embed(safe_q)
         c_emb = self.c_embed(safe_c)
-        q_embed_data = torch.cat([q_emb, c_emb], dim=-1)
+        q_diff = self.q_diff_embed(safe_q)
+        c_var = self.c_var_embed(safe_c)
+        
+        # 1:1 复刻 论文核心：mu_{q_t} * d_ct + c_ct
+        q_embed_data = c_emb + q_diff * c_var
 
         if self.separate_qa:
             qa_data = safe_q + self.n_question * safe_target
-            qa_embed_data = self.qa_embed(qa_data)
+            r_emb = self.r_embed(qa_data)
+            r_var = self.r_var_embed(qa_data)
+            qa_embed_data = r_emb + q_diff * r_var
         else:
-            qa_embed_data = self.qa_embed(safe_target) + q_embed_data
+            r_emb = self.r_embed(safe_target)
+            r_var = self.r_var_embed(safe_target)
+            # 1:1 复刻 论文核心：e_{(c_t, r_t)} + mu_{q_t} * f_{(c_t, r_t)}
+            # 其中 e_{(c_t, r_t)} = c_{c_t} + r_{r_t}, 对应的变化量组合如下：
+            qa_embed_data = (c_emb + r_emb) + q_diff * (r_var + c_var)
+            
         return q_embed_data, qa_embed_data
 
     def forward(self, question, response, mask=None, interval_time=None, response_time=None, skill=None):
