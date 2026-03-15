@@ -3,62 +3,37 @@ from torch import nn
 from torch.nn import Module, Embedding, LSTM, Linear, Dropout
 
 class DKT(Module):
-    def __init__(self, num_question, num_skill=None, emb_dim=100, dropout=0.1):
-        """
-        Deep Knowledge Tracing (DKT) implementation.
-        Reference: https://arxiv.org/abs/1506.05908
-        """
+    def __init__(self, num_question, num_skill=None, emb_dim=100, dropout=0.6):
         super(DKT, self).__init__()
         self.model_name = "dkt"
         self.num_question = num_question
-        self.num_skill = num_skill
+        self.num_skill = num_skill if num_skill is not None else num_question
         self.emb_dim = emb_dim
         self.hidden_size = emb_dim
         
-        # 强制题目级 DKT：输入与输出都基于 question，而不是 skill/concept。
-        # 这是你当前实验需要的设定；否则会退化成技能级 DKT，和你的实验目标不一致。
-        self.use_skill = False
-        self.num_concepts = self.num_question
-
-        # DKT Input: Interaction Embedding (Concept_ID + Correctness)
-        self.interaction_emb = Embedding(self.num_concepts * 2, self.emb_dim)
+        # 降维：仅使用知识点(KC)级别进行嵌入和预测，防止在小数据集上因题目参数过多引起严重过拟合
+        self.c_emb = Embedding(self.num_skill * 2, self.emb_dim)
 
         self.lstm_layer = LSTM(self.emb_dim, self.hidden_size, batch_first=True)
         self.dropout_layer = Dropout(dropout)
 
-        # Output layer predicts the probability of answering correctly for EACH concept
-        self.out_layer = Linear(self.hidden_size, self.num_concepts)
+        self.out_layer = Linear(self.hidden_size, self.num_skill)
 
     def forward(self, question, response, mask=None, interval_time=None, response_time=None, skill=None):
-        """
-        Args:
-            question: [batch_size, seq_len]
-            response: [batch_size, seq_len]
-            skill: [batch_size, seq_len] Optional skill sequences
-            mask: [batch_size, seq_len] (Padding mask)
-        """
-        inp = question
+        skill = skill if skill is not None else torch.zeros_like(question)
 
-        # x = concept + num_concepts * response
-        x = inp + self.num_concepts * response 
+        xc = skill + self.num_skill * response
 
-        input_emb = self.interaction_emb(x)
+        input_emb = self.c_emb(xc)
 
         h, _ = self.lstm_layer(input_emb)
         h = self.dropout_layer(h)
 
-        y_logits = self.out_layer(h) # [B, L, C]
-        
-        # Prediction logic (Shifted for Next-Item Prediction)
-        # y_logits[:, t] predicts all items at t+1. 
-        # We gather only the logit for the actual next concept inp[:, t+1].
+        y_logits = self.out_layer(h) # [B, L, num_skill]
 
-        # Next-item prediction
-        pred_logits_full = y_logits[:, :-1, :] # [B, L-1, C]
-        next_items = inp[:, 1:]       # [B, L-1]
+        pred_logits_full = y_logits[:, :-1, :] # [B, L-1, num_skill]
+        next_items = skill[:, 1:]       # [B, L-1] 使用 skill 预测下一个 skill
 
-        # Gather specific concept logits
-        # gathered_logits: [B, L-1]
         gathered_logits = torch.gather(pred_logits_full, 2, next_items.unsqueeze(2)).squeeze(2)
         
         batch_size, seq_len = question.shape

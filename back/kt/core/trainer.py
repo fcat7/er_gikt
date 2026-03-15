@@ -115,13 +115,13 @@ class BaseTrainer:
                     # 当前 DKT 前向返回的是题目级 next-item logits，不是概率。
                     y_hat = model(question, response, mask, skill=skill)
                     preds = y_hat[:, :-1]
-                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'dkt_forget', 'deep_irt']:
+                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
                     y_hat = model(question, response, mask, interval, r_time)
                     if y_hat.shape[1] == question.shape[1]: 
                         preds = y_hat[:, :-1]
                     else:
                         preds = y_hat
-                elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
+                elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     preds = y_hat[:, 1:]
                 else:
@@ -244,11 +244,11 @@ class BaseTrainer:
                         y_hat = model(question, response, mask, skill=skill)
                         preds = y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
-                    elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
+                    elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
                         y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
-                    elif model_name in ['gikt', 'gikt_old', 'dkt_forget', 'deep_irt'] or cognitive_mode == 'classic':
+                    elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                         y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat[:, 1:]
                         y_hat_prob = torch.sigmoid(preds)
@@ -402,8 +402,15 @@ class BaseTrainer:
                     'time_sec': end_time - start_time
                 })
                 
-                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s")
-                
+                vram_info = ""
+                if torch.cuda.is_available():
+                    # 显示最大已分配(Allocated)和最大已保留(Reserved)对显存的使用情况
+                    vram_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    vram_res_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
+                    vram_info = f" | VRAM: {vram_alloc_gb:.2f}G (Res: {vram_res_gb:.2f}G)"
+
+                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s{vram_info}")
+
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     patience_counter = 0

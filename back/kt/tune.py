@@ -274,7 +274,7 @@ def main():
         json.dump(trial.params, f, indent=4)
     print(f"Saved best params to: {best_params_file}")
 
-# python tune.py --config config/tune/dkt.yaml
+# python tune.py --config config/tune/gikt_full_data_final.yaml
 # optuna-dashboard sqlite:///kt_tuning.db
 # tensorboard --logdir=runs --port=6006
 if __name__ == '__main__':

@@ -12,12 +12,14 @@ class DeepIRT(Module):
         self.size_m = size_m
 
         # 注意：这里我们同时支持知识点和题目的映射，为了兼容原版，核心以题目/知识点作为键。
-        # 这里统一退化为接收题目 Q 序列（或知识点 C 序列）。
-        # 根据我们统一的 Trainer，传进来的是 q_seq 和 r_seq。
+        # 这里进行双重嵌入（Joint Embedding Trick）
         
-        # 互动 embedding。因为 response 是 0 或 1，最大索引是 num_q * 2
-        self.v_emb_layer = Embedding(self.num_q * 2, self.dim_s)
-        self.k_emb_layer = Embedding(self.num_q, self.dim_s)
+        # 互动 embedding。一半由于Q，一半用于C
+        self.v_q_emb_layer = Embedding(self.num_q * 2 + 10, self.dim_s // 2)
+        self.v_c_emb_layer = Embedding(self.num_c * 2 + 10, self.dim_s // 2)
+        
+        self.k_q_emb_layer = Embedding(self.num_q + 10, self.dim_s // 2)
+        self.k_c_emb_layer = Embedding(self.num_c + 10, self.dim_s // 2)
 
         self.Mk = Parameter(torch.Tensor(self.size_m, self.dim_s))
         self.Mv0 = Parameter(torch.Tensor(self.size_m, self.dim_s))
@@ -36,15 +38,23 @@ class DeepIRT(Module):
         self.e_layer = Linear(self.dim_s, self.dim_s)
         self.a_layer = Linear(self.dim_s, self.dim_s)
 
-    def forward(self, question, response, mask=None, interval_time=None, r_time=None, **kwargs):
+    def forward(self, question, response, mask=None, interval_time=None, r_time=None, skill=None, **kwargs):
         # question: [bs, seq_len], response: [bs, seq_len]
         batch_size = question.shape[0]
         
-        # Interaction index: q + num_q * r
-        x = question + self.num_q * response
+        skill = skill if skill is not None else torch.zeros_like(question)
         
-        k = self.k_emb_layer(question) # question embedding [bs, seq_len, dim_s]
-        v = self.v_emb_layer(x)        # interaction embedding [bs, seq_len, dim_s]
+        # Interaction index
+        xq = question + self.num_q * response
+        xc = skill + self.num_c * response
+        
+        k_q = self.k_q_emb_layer(question)
+        k_c = self.k_c_emb_layer(skill)
+        k = torch.cat([k_q, k_c], dim=-1) # question embedding [bs, seq_len, dim_s]
+        
+        v_q = self.v_q_emb_layer(xq)
+        v_c = self.v_c_emb_layer(xc)
+        v = torch.cat([v_q, v_c], dim=-1) # interaction embedding [bs, seq_len, dim_s]
         
         # 初始记忆矩阵
         Mvt = self.Mv0.unsqueeze(0).repeat(batch_size, 1, 1) # [bs, size_m, dim_s]
@@ -77,8 +87,8 @@ class DeepIRT(Module):
             self.f_layer(
                 torch.cat(
                     [
-                        (w.unsqueeze(-1) * Mv[:, :-1]).sum(-2), # [bs, seq_len, dim_s]
-                        k
+                        (w[:, 1:].unsqueeze(-1) * Mv[:, 1:-1]).sum(-2), # [bs, seq_len, dim_s]
+                        k[:, 1:]
                     ],
                     dim=-1
                 )
@@ -87,7 +97,7 @@ class DeepIRT(Module):
         
         # 可解释的 1PL-IRT 层
         stu_ability = self.ability_layer(self.dropout_layer(f)) # 学生能力
-        que_diff = self.diff_layer(self.dropout_layer(k))       # 题目难度
+        que_diff = self.diff_layer(self.dropout_layer(k[:, 1:]))       # 题目难度
 
         # 输出 Logits，为了适配我们 Trainer 里的 BCEWithLogitsLoss
         # 原始公式为 p = torch.sigmoid(3.0 * stu_ability - que_diff) 

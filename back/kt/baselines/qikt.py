@@ -47,8 +47,8 @@ class QIKT(nn.Module):
         self.q2c_transfer_table = nn.Parameter(self.q2c_transfer_table, requires_grad=False)
         self.q2c_mask_table = nn.Parameter(self.q2c_mask_table, requires_grad=False)
 
-        self.question_emb = nn.Embedding(num_question, dim_emb)
-        self.concept_emb = nn.Embedding(num_concept, dim_emb)
+        self.question_emb = nn.Embedding(num_question + 10, dim_emb)
+        self.concept_emb = nn.Embedding(num_concept + 10, dim_emb)
 
         self.rnn_layer4question = nn.LSTM(dim_emb * 4, dim_emb, batch_first=True, num_layers=num_rnn_layer)
         self.rnn_layer4concept = nn.LSTM(dim_emb * 2, dim_emb, batch_first=True, num_layers=num_rnn_layer)

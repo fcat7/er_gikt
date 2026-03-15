@@ -146,15 +146,20 @@ def plot_radar_chart(df, output_dir):
                 linestyle=ls, marker=marker, markersize=markersize, 
                 markerfacecolor=mfc, markeredgewidth=1.2, zorder=zorder)
                 
-        # 添加带方差的置信带(Shaded Area)
+        # 添加带方差的置信带(Shaded Area) 或 误差棒 (Error Bars)
         std_row = plot_std_df[plot_std_df['mode'].str.lower() == mode_id].iloc[0]
         stds = std_row[avail_metrics].values.tolist()
         stds += stds[:1]
         
-        upper_bound = np.clip(np.array(values) + np.array(stds), 0, 1)
-        lower_bound = np.clip(np.array(values) - np.array(stds), 0, 1)
+        # 方案B: 如果是核心模型，画一个明显一点的晕影（半透明带）
+        if mode_id in ['ours', 'full']:
+            upper_bound = np.clip(np.array(values) + np.array(stds), 0, 1)
+            lower_bound = np.clip(np.array(values) - np.array(stds), 0, 1)
+            ax.fill_between(angles, lower_bound, upper_bound, color=color, alpha=0.3, zorder=zorder-1)
+            
+            # 并在各个顶点画上 errorbar
+            ax.errorbar(angles, values, yerr=stds, fmt='none', ecolor=color, elinewidth=2, capsize=4, zorder=zorder+1)
         
-        ax.fill_between(angles, lower_bound, upper_bound, color=color, alpha=length_alpha(alpha), zorder=zorder-1)
         ax.fill(angles, values, color=color, alpha=alpha, zorder=zorder)
         
     ax.set_theta_offset(np.pi / 2)
@@ -190,8 +195,8 @@ def plot_radar_chart(df, output_dir):
 
 if __name__ == "__main__":
     set_style()
-    csv_path = r"output/recommendation_full/recommend_eval_full_all.csv"
-    # csv_path = r"output/ablation_er/ablation_eval_full.csv"
+    # csv_path = r"output/recommendation_full/recommend_eval_full_all.bak-论文当前用图"
+    csv_path = r"output/ablation_er/ablation_eval_full.bak-论文当前用图"
     if not os.path.exists(csv_path):
         import glob
         files = glob.glob(r"output/recommendation_*/recommend_eval_*.csv")

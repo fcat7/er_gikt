@@ -4,14 +4,31 @@ import time
 from datetime import datetime
 
 # ================= 🔧 配置区域 =================
-# 配置你想跑的模型，支持：['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'gikt_old']
-MODELS = ['dkt', 'dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt', 'gikt_old'] 
+# 全局开关：是否为快速调试模式？
+# True：所有模型强制使用较高的学习率（加快收敛步伐，用于快速摸底验证）
+# False：严格遵守 config/best_params 中每个基线论文宣称的最佳超参（用于写论文的夜间最终跑批）
+IS_DEBUG_MODE = True
+
+# 配置你想跑的模型及其专属的 Batch Size（以此适配 6GB 显存，防止 OOM）
+# 建议的快速试错学习率同样配置在下方字典中。若 IS_DEBUG_MODE=False，'debug_lr' 将被忽略。
+MODELS = {
+    'dkt': {'batch_size': 256, 'debug_lr': 0.01},           # RNN经典，极省内存。调试时可激进（time: 6.48s | VRAM: 2.52G (Res: 3.78G)；
+    'dkvmn': {'batch_size': 128, 'debug_lr': 0.01},         # 记忆网络矩阵较小（128，time: 31.04s | VRAM: 4.15G (Res: 6.05G；64，time: 27.93s | VRAM: 2.11G (Res: 3.23G))
+    'deep_irt': {'batch_size': 64, 'debug_lr': 0.005},     # 增加IR特性，适中（128，time: 44.85s |VRAM: 6.32G (Res: 8.99G)；64，time: 15.84s | VRAM: 3.18G (Res: 4.53G)）
+    'gikt_old': {'batch_size': 128, 'debug_lr': 0.005},      # GNN节点聚合，需要一定显存（128，time: 49.19s | VRAM: 2.64G (Res: 6.64G)；64，time: 84.24s | VRAM: 1.36G (Res: 5.26G)）
+    'simplekt': {'batch_size': 256, 'debug_lr': 0.001},      # 注意力模型(Transformer架构)，内存消耗大，防炸（256，time: 8.40s | VRAM: 3.27G (Res: 3.62G)；128，time: 8.54s | VRAM: 1.64G (Res: 1.67G)）
+    'akt': {'batch_size': 64, 'debug_lr': 0.001},           # 同为重型注意力机制，占用大（64，time: 38.41s | VRAM: 4.06G (Res: 4.14G)）
+    'qikt': {'batch_size': 128, 'debug_lr': 0.0005}          # 结构最重，极易OOM，即便调试也不能太激进（256，time: 7.01s | VRAM: 2.33G (Res: 2.61G)；128，time: 3.15s | VRAM: 1.20G (Res: 1.34G)）
+}
 
 # 配置你想跑的数据集名称
 DATASETS = [
     # 'assist09',
-    'assist12'
-    ]
+    'assist09_builder',
+    # 'assist12',
+    # 'ednet_kt1',
+    # 'nips2020_task34'
+]
 
 # 通用训练超参数配置
 EPOCHS = 200
@@ -33,21 +50,27 @@ def run_batch():
     print(f"模型的训练细节日志将被归档至: {log_dir}\n")
     
     for dataset in DATASETS:
-        for model in MODELS:
+        for model_name, m_config in MODELS.items():
             current_task += 1
-            task_name = f"{model}_{dataset}"
+            batch_size = m_config['batch_size']
+            task_name = f"{model_name}_{dataset}_bs{batch_size}"
             task_start_fmt = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{task_start_fmt}] 🚀 进度: {current_task}/{total_tasks} | 正在训练: {task_name}")
             
             # 构建命令
             cmd = [
                 "python", "train_baseline.py",
-                "--model_name", model,
+                "--model_name", model_name,
                 "--dataset", dataset,
                 "--epochs", str(EPOCHS),
+                "--batch_size", str(batch_size),
                 "--k_fold", str(K_FOLD),
                 "--patience", str(PATIENCE)
             ]
+            
+            # 如果是快速调试模式，则强制追加学习率来覆盖最优参数
+            if IS_DEBUG_MODE and 'debug_lr' in m_config:
+                cmd.extend(["--learning_rate", str(m_config['debug_lr'])])
             
             # 定义日志文件路径: model_dataset_20231015_083000.log
             log_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{task_name}.log"
