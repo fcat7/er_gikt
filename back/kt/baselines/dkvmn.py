@@ -13,7 +13,8 @@ class DKVMN(Module):
         self.size_m = size_m
 
         # 降维：仅使用知识点(KC)级别进行嵌入
-        self.k_c_emb = Embedding(self.num_skill, self.dim_s)
+        # +10 防御性编程容错
+        self.k_c_emb = Embedding(self.num_skill + 10, self.dim_s)
         
         self.Mk = Parameter(torch.Tensor(self.size_m, self.dim_s))
         self.Mv0 = Parameter(torch.Tensor(self.size_m, self.dim_s))
@@ -21,7 +22,7 @@ class DKVMN(Module):
         kaiming_normal_(self.Mk)
         kaiming_normal_(self.Mv0)
 
-        self.v_c_emb = Embedding(self.num_skill * 2, self.dim_s)
+        self.v_c_emb = Embedding(self.num_skill * 2 + 10, self.dim_s)
 
         self.f_layer = Linear(self.dim_s * 2, self.dim_s)
         self.dropout_layer = Dropout(dropout)

@@ -12,7 +12,8 @@ class DKT(Module):
         self.hidden_size = emb_dim
         
         # 降维：仅使用知识点(KC)级别进行嵌入和预测，防止在小数据集上因题目参数过多引起严重过拟合
-        self.c_emb = Embedding(self.num_skill * 2, self.emb_dim)
+        # +10 防御性编程：防止 1-based index 加上偏移量后，取到最大的 2*num_skill 导致越界崩溃
+        self.c_emb = Embedding(self.num_skill * 2 + 10, self.emb_dim)
 
         self.lstm_layer = LSTM(self.emb_dim, self.hidden_size, batch_first=True)
         self.dropout_layer = Dropout(dropout)

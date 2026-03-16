@@ -5,6 +5,7 @@ python train_test.py --override train.dataset_name=assist09_gikt_old train.lr=0.
 """
 import os
 import time
+import copy
 from datetime import datetime
 import numpy as np
 from scipy import sparse
@@ -193,6 +194,9 @@ if __name__ == '__main__':
         splits = list(k_fold.split(dataset_train_clean))
 
     fold_results_test_auc = []
+    fold_results_test_acc = []
+    fold_results_test_loss = []
+    fold_result_records = []
     
     # 初始化记录数组 (Metric x Fold*Epoch)
     # y_label_aver: [Metric, Epoch] (Averaged across folds)
@@ -273,7 +277,12 @@ if __name__ == '__main__':
         optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
         
         best_fold_val_auc = 0.0
+        best_fold_val_acc = 0.0
+        best_fold_val_loss = float('inf')
+        best_fold_epoch = 0
         fold_best_threshold = 0.5
+        best_model_state = None
+        patience_counter = 0
         train_set = Subset(dataset_train_augment, train_indices)
         val_set = Subset(dataset_train_clean, test_indices)
         
@@ -647,8 +656,11 @@ if __name__ == '__main__':
             if val_auc > best_fold_val_auc:
                 improvement = val_auc - best_fold_val_auc
                 best_fold_val_auc = val_auc
+                best_fold_val_acc = val_acc
+                best_fold_val_loss = val_loss
+                best_fold_epoch = epoch + 1
                 fold_best_threshold = best_val_threshold
-                # Save best model logic could go here
+                best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
                 if params.train.verbose:
                     print(COLOR_LOG_G + f'🎯 新的最佳验证AUC: {best_fold_val_auc:.4f} (提升 +{improvement:.4f})' + COLOR_LOG_END)
@@ -666,7 +678,9 @@ if __name__ == '__main__':
         best_fold_test_auc = 0.0
         best_fold_test_loss = 0.0
         best_fold_test_acc = 0.0
-        # 使用最佳模型状态（已在早期停止逻辑中预先加载）对测试集进行重新评估
+        # 使用最佳验证AUC对应的模型状态对测试集进行重新评估
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
         model.eval()
         test_targets = []
         test_probs = []
@@ -709,16 +723,35 @@ if __name__ == '__main__':
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
         print('='*70 + '\n')
         fold_results_test_auc.append(best_fold_test_auc)
+        fold_results_test_acc.append(best_fold_test_acc)
+        fold_results_test_loss.append(best_fold_test_loss)
+        fold_result_records.append({
+            'fold': fold + 1,
+            'best_epoch': best_fold_epoch,
+            'best_val_auc': best_fold_val_auc,
+            'best_val_acc': best_fold_val_acc,
+            'best_val_loss': best_fold_val_loss,
+            'best_threshold': fold_best_threshold,
+            'test_auc': best_fold_test_auc,
+            'test_acc': best_fold_test_acc,
+            'test_loss': best_fold_test_loss,
+        })
         
     print('\n' + '='*70)
     print(COLOR_LOG_G + '🎉 交叉验证完成！' + COLOR_LOG_END)
     print('='*70)
     print(f"各折测试集AUC: {[f'{auc:.4f}' for auc in fold_results_test_auc]}")
+    print(f"各折测试集ACC: {[f'{acc:.4f}' for acc in fold_results_test_acc]}")
+    print(f"各折测试集LOSS: {[f'{loss:.4f}' for loss in fold_results_test_loss]}")
     print(f"平均AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f} ± {np.std(fold_results_test_auc):.4f}")
+    print(f"平均ACC (Holdout Test Set): {np.mean(fold_results_test_acc):.4f} ± {np.std(fold_results_test_acc):.4f}")
+    print(f"平均LOSS (Holdout Test Set): {np.mean(fold_results_test_loss):.4f} ± {np.std(fold_results_test_loss):.4f}")
     print(f"最佳AUC: {np.max(fold_results_test_auc):.4f} (Fold {np.argmax(fold_results_test_auc)+1})")
     print(f"最差AUC: {np.min(fold_results_test_auc):.4f} (Fold {np.argmin(fold_results_test_auc)+1})")
     print('='*70 + '\n')
     output_file.write(f"CV Mean AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f}\n")
+    output_file.write(f"CV Mean ACC (Holdout Test Set): {np.mean(fold_results_test_acc):.4f}\n")
+    output_file.write(f"CV Mean LOSS (Holdout Test Set): {np.mean(fold_results_test_loss):.4f}\n")
 
     # Normalize Averages
     if len(splits) > 0:
@@ -740,27 +773,60 @@ if __name__ == '__main__':
     # 记录消融实验结果（如果指定了消融组别名）
     if args.ablation_name:
         import csv
-        csv_path = f'{config.path.LOG_DIR}/ablation_summary.csv'
-        file_exists = os.path.exists(csv_path)
+        csv_path = os.path.join(config.path.OUTPUT_DIR, 'run_ablation', 'ablation_summary.csv')
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
         with open(csv_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(['Ablation Group', 'Date', 'Dataset', 'Mean AUC', 'Std AUC', 'Max AUC (Fold)', 'Min AUC (Fold)', 'Time'])
+                writer.writerow([
+                    'Ablation Group', 'Date', 'Dataset', 'K Fold',
+                    'Fold Best Epochs', 'Fold Best Val AUCs', 'Fold Best Val ACCs', 'Fold Best Val LOSSes', 'Fold Best Thresholds',
+                    'Fold Test AUCs', 'Fold Test ACCs', 'Fold Test LOSSes',
+                    'Mean Test AUC', 'Std Test AUC', 'Mean Test ACC', 'Std Test ACC', 'Mean Test LOSS', 'Std Test LOSS',
+                    'Max AUC (Fold)', 'Min AUC (Fold)', 'Time', 'experiments_name'
+                ])
             
             mean_auc = np.mean(fold_results_test_auc)
             std_auc = np.std(fold_results_test_auc)
+            mean_acc = np.mean(fold_results_test_acc)
+            std_acc = np.std(fold_results_test_acc)
+            mean_loss = np.mean(fold_results_test_loss)
+            std_loss = np.std(fold_results_test_loss)
             max_auc_idx = np.argmax(fold_results_test_auc)
             min_auc_idx = np.argmin(fold_results_test_auc)
+            fold_best_epochs = '; '.join([f"F{r['fold']}:{r['best_epoch']}" for r in fold_result_records])
+            fold_best_val_aucs = '; '.join([f"F{r['fold']}:{r['best_val_auc']:.4f}" for r in fold_result_records])
+            fold_best_val_accs = '; '.join([f"F{r['fold']}:{r['best_val_acc']:.4f}" for r in fold_result_records])
+            fold_best_val_losses = '; '.join([f"F{r['fold']}:{r['best_val_loss']:.4f}" for r in fold_result_records])
+            fold_best_thresholds = '; '.join([f"F{r['fold']}:{r['best_threshold']:.2f}" for r in fold_result_records])
+            fold_test_aucs = '; '.join([f"F{r['fold']}:{r['test_auc']:.4f}" for r in fold_result_records])
+            fold_test_accs = '; '.join([f"F{r['fold']}:{r['test_acc']:.4f}" for r in fold_result_records])
+            fold_test_losses = '; '.join([f"F{r['fold']}:{r['test_loss']:.4f}" for r in fold_result_records])
 
             writer.writerow([
                 args.ablation_name, 
                 time_now, 
                 dataset_name, 
+                len(splits),
+                fold_best_epochs,
+                fold_best_val_aucs,
+                fold_best_val_accs,
+                fold_best_val_losses,
+                fold_best_thresholds,
+                fold_test_aucs,
+                fold_test_accs,
+                fold_test_losses,
                 f"{mean_auc:.4f}", 
                 f"{std_auc:.4f}", 
+                f"{mean_acc:.4f}",
+                f"{std_acc:.4f}",
+                f"{mean_loss:.4f}",
+                f"{std_loss:.4f}",
                 f"{fold_results_test_auc[max_auc_idx]:.4f} (F{max_auc_idx+1})",
                 f"{fold_results_test_auc[min_auc_idx]:.4f} (F{min_auc_idx+1})",
-                time_str
+                time_str,
+                run_name
             ])
         print(COLOR_LOG_Y + f"📝 消融结果已追加至 {csv_path}" + COLOR_LOG_END)
 

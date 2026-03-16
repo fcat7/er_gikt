@@ -35,18 +35,20 @@ class SimpleKT(nn.Module):
         self.emb_type = "qid"
         embed_l = d_model
         
-        # 严格复现 SimpleKT 原论文的特征嵌入机制
-        # Concept (c), Question Difficulty (\mu_q), Concept Variation (d_c)
+        # 1:1 复刻 PyKT SimpleKT 的 Rasch 嵌入机制
+        # c_embed: 知识点嵌入 (concept embedding, indexed by skill)
         self.c_embed = nn.Embedding(self.n_skill + 10, embed_l)
+        # q_diff_embed: 题目难度向量 (difficulty vector, indexed by question) —— SimpleKT 中是 d_model 维向量！
         self.q_diff_embed = nn.Embedding(self.n_question + 10, embed_l)
+        # c_var_embed: 知识点变化量 (concept variation, indexed by skill)
         self.c_var_embed = nn.Embedding(self.n_skill + 10, embed_l)
         
         if self.separate_qa: 
             self.r_embed = nn.Embedding(2*self.n_question+10, embed_l)
-            self.r_var_embed = nn.Embedding(2*self.n_question+10, embed_l)
         else: # false default
             self.r_embed = nn.Embedding(10, embed_l)
-            self.r_var_embed = nn.Embedding(10, embed_l)
+        # 注意：PyKT SimpleKT 没有 r_var_embed / qa_embed_diff！
+        # difficulty 只作用于 q_embed_data，qa_embed_data 不受难度影响
 
         # Architecture Object. It contains stack of attention block
         self.model = Architecture(n_question=n_question, n_blocks=n_blocks, n_heads=num_attn_heads, dropout=dropout,
@@ -64,8 +66,9 @@ class SimpleKT(nn.Module):
     def reset(self):
         for p in self.parameters():
             if p.size(0) == self.n_pid+1 and self.n_pid > 0:
-                torch.nn.init.constant_(p, 0.)
-
+                torch.nn.init.constant_(p, 0.)        # Rasch difficulty parameter zero-initialization (P1 fix)
+        if hasattr(self, 'q_diff_embed'):
+            torch.nn.init.constant_(self.q_diff_embed.weight, 0.)
     def base_emb(self, q_data, c_data, target):
         safe_q = q_data * (q_data > -1).long()
         safe_c = c_data * (c_data > -1).long()
@@ -78,24 +81,22 @@ class SimpleKT(nn.Module):
         if safe_target.max() >= 2:
             print('target out of bounds:', safe_target.max().item())
 
-        c_emb = self.c_embed(safe_c)
-        q_diff = self.q_diff_embed(safe_q)
-        c_var = self.c_var_embed(safe_c)
+        c_emb = self.c_embed(safe_c)              # [bs, seq, d_model]
+        q_diff = self.q_diff_embed(safe_q)         # [bs, seq, d_model] ← 向量（SimpleKT 特有）
+        c_var = self.c_var_embed(safe_c)            # [bs, seq, d_model]
         
-        # 1:1 复刻 论文核心：mu_{q_t} * d_ct + c_ct
+        # PyKT 原版: q_embed = concept_emb + difficulty_vector * concept_variation
         q_embed_data = c_emb + q_diff * c_var
 
         if self.separate_qa:
             qa_data = safe_q + self.n_question * safe_target
             r_emb = self.r_embed(qa_data)
-            r_var = self.r_var_embed(qa_data)
-            qa_embed_data = r_emb + q_diff * r_var
         else:
             r_emb = self.r_embed(safe_target)
-            r_var = self.r_var_embed(safe_target)
-            # 1:1 复刻 论文核心：e_{(c_t, r_t)} + mu_{q_t} * f_{(c_t, r_t)}
-            # 其中 e_{(c_t, r_t)} = c_{c_t} + r_{r_t}, 对应的变化量组合如下：
-            qa_embed_data = (c_emb + r_emb) + q_diff * (r_var + c_var)
+        
+        # ★ 关键区别：PyKT SimpleKT 中 qa_embed_data 不受 difficulty 影响！
+        # qa_embed = response_emb + original_concept_emb (无难度融合)
+        qa_embed_data = c_emb + r_emb
             
         return q_embed_data, qa_embed_data
 
@@ -264,8 +265,7 @@ class MultiHeadAttention(nn.Module):
             self.dropout = nn.Dropout(dropout)
             self.proj_bias = bias
             self.out_proj = nn.Linear(d_model, d_model, bias=bias)
-            self.gammas = nn.Parameter(torch.zeros(n_heads, 1, 1))
-            torch.nn.init.xavier_uniform_(self.gammas)
+            # SimpleKT 不使用 AKT 的 gamma 指数衰减机制
             self._reset_parameters()
 
 
@@ -312,12 +312,9 @@ class MultiHeadAttention(nn.Module):
             k = k.transpose(1, 2)
             q = q.transpose(1, 2)
             v = v.transpose(1, 2)
-            # calculate attention using function we will define next
-            gammas = self.gammas
-            if self.emb_type.find("pdiff") == -1:
-                pdiff = None
+            # SimpleKT 使用标准 masked attention（无 AKT 的 gamma 指数衰减）
             scores = attention(q, k, v, self.d_k,
-                            mask, self.dropout, zero_pad, gammas, pdiff)
+                            mask, self.dropout, zero_pad)
 
             # concatenate heads and put through final linear layer
             concat = scores.transpose(1, 2).contiguous()\
@@ -335,61 +332,22 @@ class MultiHeadAttention(nn.Module):
         return scores
 
 
-def attention(q, k, v, d_k, mask, dropout, zero_pad, gamma=None, pdiff=None):
+def attention(q, k, v, d_k, mask, dropout, zero_pad):
     """
-    This is called by Multi-head atention object to find the values.
+    SimpleKT 标准 masked attention（1:1 复刻 PyKT SimpleKT）。
+    与 AKT 的关键区别：不使用 gamma 指数距离衰减。
     """
-    # d_k: 每一个头的dim
     scores = torch.matmul(q, k.transpose(-2, -1)) / \
         math.sqrt(d_k)  # BS, 8, seqlen, seqlen
     bs, head, seqlen = scores.size(0), scores.size(1), scores.size(2)
 
-    x1 = torch.arange(seqlen).expand(seqlen, -1).to(q.device)
-    x2 = x1.transpose(0, 1).contiguous()
-
-    with torch.no_grad():
-        # dtype为Half时，-1e32会导致溢出，使用与dtype对应的小一点的负数
-        if scores.dtype == torch.float16:
-            scores_ = scores.masked_fill(mask == 0, -65504.0)
-        else:
-            scores_ = scores.masked_fill(mask == 0, -1e32)
-        scores_ = F.softmax(scores_, dim=-1)  # BS,8,seqlen,seqlen
-        scores_ = scores_ * mask.float().to(q.device) # 结果和上一步一样
-        distcum_scores = torch.cumsum(scores_, dim=-1)  # bs, 8, sl, sl
-        disttotal_scores = torch.sum(
-            scores_, dim=-1, keepdim=True)  # bs, 8, sl, 1 全1
-        # print(f"distotal_scores: {disttotal_scores}")
-        position_effect = torch.abs(
-            x1-x2)[None, None, :, :].type(torch.FloatTensor).to(q.device)  # 1, 1, seqlen, seqlen 位置差值
-        # bs, 8, sl, sl positive distance
-        dist_scores = torch.clamp(
-            (disttotal_scores-distcum_scores)*position_effect, min=0.) # score <0 时，设置为0
-        dist_scores = dist_scores.sqrt().detach()
-    m = nn.Softplus()
-    gamma = -1. * m(gamma).unsqueeze(0)  # 1,8,1,1 一个头一个gamma参数， 对应论文里的theta
-    # Now after do exp(gamma*distance) and then clamp to 1e-5 to 1e5
-    if pdiff == None:
-        total_effect = torch.clamp(torch.clamp(
-            (dist_scores*gamma).exp(), min=1e-5), max=1e5) # 对应论文公式1中的新增部分
-    else:
-        diff = pdiff.unsqueeze(1).expand(pdiff.shape[0], dist_scores.shape[1], pdiff.shape[1], pdiff.shape[2])
-        diff = diff.sigmoid().exp()
-        total_effect = torch.clamp(torch.clamp(
-            (dist_scores*gamma*diff).exp(), min=1e-5), max=1e5) # 对应论文公式1中的新增部分
-    scores = scores * total_effect
-
     scores.masked_fill_(mask == 0, -1e32)
     scores = F.softmax(scores, dim=-1)  # BS,8,seqlen,seqlen
-    # print(f"before zero pad scores: {scores.shape}")
-    # print(zero_pad)
     if zero_pad:
         pad_zero = torch.zeros(bs, head, 1, seqlen).to(q.device)
-        scores = torch.cat([pad_zero, scores[:, :, 1:, :]], dim=2) # 第一行score置0
-    # print(f"after zero pad scores: {scores}")
+        scores = torch.cat([pad_zero, scores[:, :, 1:, :]], dim=2)
     scores = dropout(scores)
     output = torch.matmul(scores, v)
-    # import sys
-    # sys.exit()
     return output
 
 
