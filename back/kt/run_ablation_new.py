@@ -71,7 +71,31 @@ ABLATION_TARGETS = {
     ]
 }
 
+CSV_HEADERS = [
+    'Ablation Group', 'Date', 'Dataset', 'K Fold',
+    'Fold Best Epochs', 'Fold Best Val AUCs', 'Fold Best Val ACCs', 'Fold Best Val LOSSes', 'Fold Best Thresholds',
+    'Fold Test AUCs', 'Fold Test ACCs', 'Fold Test LOSSes',
+    'Mean Test AUC', 'Std Test AUC', 'Mean Test ACC', 'Std Test ACC', 'Mean Test LOSS', 'Std Test LOSS',
+    'Max AUC (Fold)', 'Min AUC (Fold)', 'Time', 'experiments_name'
+]
+
+def ensure_csv_initialized():
+    """防御性代码：确保 CSV 文件和表头存在，避免后续读取报错"""
+    import csv
+    csv_path = os.path.join("output", "run_ablation", "ablation_summary.csv")
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(CSV_HEADERS)
+            print(f"🆕 已防御性初始化消融结果表: {csv_path}")
+        except Exception as e:
+            print(f"⚠️ 初始化 CSV 失败 (非致命): {e}")
+
 def main():
+    ensure_csv_initialized()
     parser = argparse.ArgumentParser(description="GIKT 消融实验运行脚本")
     parser.add_argument("--full", action="store_true", help="使用全量数据集 (覆盖 --full 标志)")
     parser.add_argument("--nolog", action="store_true", help="禁用详细日志 (train.verbose=false)")
@@ -201,17 +225,27 @@ def main():
     csv_path = os.path.join("output", "run_ablation", "ablation_summary.csv")
 
     if not os.path.exists(csv_path):
-        print("🤔 没有找到 ablation_summary.csv，请检查上方日志是否有报错。")
+        print("🤔 仍未找到 ablation_summary.csv (防御性检查失败)，请检查 training 过程是否有致命错误。")
     else:
         try:
-            df = pd.read_csv(csv_path)
-            print(f"\n📊 读取自: {csv_path}")
-            print(df.tail(len(ABLATION_TARGETS)).to_markdown(index=False))
+            if os.path.getsize(csv_path) > 10: # 大于10字节(考虑到BOM头)才尝试读取
+                df = pd.read_csv(csv_path)
+                print(f"\n📊 实验结果汇总表 [累计 {len(df)} 条记录]: {csv_path}")
+                
+                # 防御性展示：防止 DataFrame 为空报错，或行数不足
+                if not df.empty:
+                    display_count = min(len(df), len(ABLATION_TARGETS))
+                    print(df.tail(display_count).to_markdown(index=False))
+                else:
+                    print("⚠️ 表格仅包含表头，尚未写入任何数据行。")
+            else:
+                print("⚠️ CSV 文件存在但似乎为空。")
         except Exception as e:
-            print(f"读取 CSV 异常：{str(e)}")
+            print(f"⚠️ 读取 CSV 展示结果时发生异常 (非致命): {str(e)}")
+            print(f"💡 文件路径: {csv_path}")
 
 # python run_ablation_new.py
 # python run_ablation_new.py --full
-# python run_ablation_new.py --full --log --dataset_name assist09_builder_window
+# python run_ablation_new.py --full --nolog --dataset_name assist09
 if __name__ == "__main__":
     main()

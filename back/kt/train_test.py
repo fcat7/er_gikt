@@ -25,7 +25,17 @@ except ImportError:
 
 # @add_fzq: AMP Support
 import torch
-from torch.cuda.amp import autocast, GradScaler
+import warnings
+# Suppress FutureWarning for torch.cuda.amp.autocast
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.cuda.amp")
+try:
+    # Try new PyTorch 2.4+ syntax
+    from torch.amp import autocast, GradScaler
+    AMP_DEVICE_TYPE = 'cuda'
+except ImportError:
+    # Fallback for older PyTorch
+    from torch.cuda.amp import autocast, GradScaler
+    AMP_DEVICE_TYPE = 'cuda'
 
 # AMP 将在加载配置后再设置
 
@@ -102,7 +112,13 @@ if __name__ == '__main__':
     
     # @add_fzq 2026-03-05: 从参数配置中读取 AMP 设置
     use_amp = params.train.amp_enabled and torch.cuda.is_available()
-    scaler = GradScaler(enabled=use_amp)
+    try:
+        # Pytorch 2.4+
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    except (AttributeError, TypeError):
+        # Older PyTorch
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        
     gradient_clip_norm = params.train.gradient_clip_norm
     if use_amp:
         print(f"🚀 AMP Enabled on {torch.cuda.get_device_name(0)}")
@@ -355,39 +371,76 @@ if __name__ == '__main__':
                 interval_time = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
                 response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
 
-                with autocast(enabled=use_amp):
-                    # @fix_fzq: Pass mask as tensor for GIKT internal logic
-                    y_hat = model(x, y_target, mask, interval_time, response_time)
-                    # @fix_fzq: Skip first timestep (no history for prediction)
-                    y_hat = y_hat[:, 1:]
-                    y_target_shift = y_target[:, 1:].float()
-                    mask_valid = mask[:, 1:]
-                    eval_mask_valid = eval_mask[:, 1:]
-                    final_mask = mask_valid & eval_mask_valid
-                    y_hat_flat = torch.masked_select(y_hat, final_mask)
-                    y_target_flat = torch.masked_select(y_target_shift, final_mask)
-                    
-                    # @add_fzq: Label Smoothing
-                    if params.train.label_smoothing > 0:
-                        y_target_flat_smoothed = y_target_flat * (1.0 - params.train.label_smoothing) + 0.5 * params.train.label_smoothing
-                        loss = loss_fun(y_hat_flat, y_target_flat_smoothed)
-                    else:
-                        loss = loss_fun(y_hat_flat, y_target_flat)
+                try:
+                    # New PyTorch 2.4+ API
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                         # @fix_fzq: Pass mask as tensor for GIKT internal logic
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
+                        # @fix_fzq: Skip first timestep (no history for prediction)
+                        y_hat = y_hat[:, 1:]
+                        y_target_shift = y_target[:, 1:].float()
+                        mask_valid = mask[:, 1:]
+                        eval_mask_valid = eval_mask[:, 1:]
+                        final_mask = mask_valid & eval_mask_valid
+                        y_hat_flat = torch.masked_select(y_hat, final_mask)
+                        y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                        
+                        # @add_fzq: Label Smoothing
+                        if params.train.label_smoothing > 0:
+                            y_target_flat_smoothed = y_target_flat * (1.0 - params.train.label_smoothing) + 0.5 * params.train.label_smoothing
+                            loss = loss_fun(y_hat_flat, y_target_flat_smoothed)
+                        else:
+                            loss = loss_fun(y_hat_flat, y_target_flat)
 
-                    # Regularization
-                    reg_loss = 0.0
-                    if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
-                    
-                    # 4PL-IRT Regularization (Zero-mean L2 for stable priors)
-                    if hasattr(model, 'difficulty_bias'): 
-                         reg_loss += params.train.reg_4pl * torch.sum(model.difficulty_bias.weight ** 2)
-                    if hasattr(model, 'discrimination_bias'): 
-                         reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
-                    if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
-                         reg_loss += params.train.reg_4pl * torch.sum(model.guessing_bias.weight ** 2) 
-                         reg_loss += params.train.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
+                        # Regularization
+                        reg_loss = 0.0
+                        if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                        
+                        # 4PL-IRT Regularization (Zero-mean L2 for stable priors)
+                        if hasattr(model, 'difficulty_bias'): 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.difficulty_bias.weight ** 2)
+                        if hasattr(model, 'discrimination_bias'): 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
+                        if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                             reg_loss += params.train.reg_4pl * torch.sum(model.guessing_bias.weight ** 2) 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
 
-                    loss += reg_loss
+                        loss += reg_loss
+                except AttributeError:
+                    # Fallback for older PyTorch
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                         # @fix_fzq: Pass mask as tensor for GIKT internal logic
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
+                        # @fix_fzq: Skip first timestep (no history for prediction)
+                        y_hat = y_hat[:, 1:]
+                        y_target_shift = y_target[:, 1:].float()
+                        mask_valid = mask[:, 1:]
+                        eval_mask_valid = eval_mask[:, 1:]
+                        final_mask = mask_valid & eval_mask_valid
+                        y_hat_flat = torch.masked_select(y_hat, final_mask)
+                        y_target_flat = torch.masked_select(y_target_shift, final_mask)
+                        
+                        # @add_fzq: Label Smoothing
+                        if params.train.label_smoothing > 0:
+                            y_target_flat_smoothed = y_target_flat * (1.0 - params.train.label_smoothing) + 0.5 * params.train.label_smoothing
+                            loss = loss_fun(y_hat_flat, y_target_flat_smoothed)
+                        else:
+                            loss = loss_fun(y_hat_flat, y_target_flat)
+
+                        # Regularization
+                        reg_loss = 0.0
+                        if hasattr(model, 'discrimination_gain'): reg_loss += 0.01 * (model.discrimination_gain ** 2)
+                        
+                        # 4PL-IRT Regularization (Zero-mean L2 for stable priors)
+                        if hasattr(model, 'difficulty_bias'): 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.difficulty_bias.weight ** 2)
+                        if hasattr(model, 'discrimination_bias'): 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.discrimination_bias.weight ** 2)
+                        if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
+                             reg_loss += params.train.reg_4pl * torch.sum(model.guessing_bias.weight ** 2) 
+                             reg_loss += params.train.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
+
+                        loss += reg_loss
                 
                 scaler.scale(loss).backward()
                 # @add_fzq 2026-03-05: 梯度裁剪防止数值不稳定 (特别是 AMP + GAT 场景)
@@ -486,8 +539,14 @@ if __name__ == '__main__':
                 response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
                 eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
 
-                with autocast(enabled=use_amp):
-                    y_hat = model(x, y_target, mask, interval_time, response_time)
+                try:
+                    # New PyTorch 2.4+ API
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
+                except AttributeError:
+                    # Fallback for older PyTorch
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        y_hat = model(x, y_target, mask, interval_time, response_time)
 
                 y_hat = y_hat[:, 1:]
                 y_target_shift = y_target[:, 1:].float()
