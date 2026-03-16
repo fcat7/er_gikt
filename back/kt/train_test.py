@@ -1,7 +1,7 @@
 """
 训练并测试模型
 使用五折交叉验证法 (Standard K-Fold)
-python train_test.py --override train.dataset_name=assist09_gikt_old train.learning_rate=0.01
+python train_test.py --full --override train.dataset_name=assist09_gikt_old train.learning_rate=0.01
 """
 import os
 import time
@@ -582,9 +582,10 @@ if __name__ == '__main__':
             n_train_targets = sum(len(arr) for arr in all_train_targets) if len(all_train_targets) > 0 else 0
             n_train_targets_no_mask = sum(len(arr) for arr in all_train_targets_no_mask) if len(all_train_targets_no_mask) > 0 else 0
             if eval_mask_filter_ratio > 0:
-                print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: Filtered {eval_mask_filter_ratio*100:.1f}% of training samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={n_train_targets})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={n_train_targets_no_mask}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
+                if params.train.verbose:
+                    print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: Filtered {eval_mask_filter_ratio*100:.1f}% of training samples (History context)' + COLOR_LOG_END)
+                    print(COLOR_LOG_Y + f'   with_mask:    AUC={train_auc:.4f} (n={n_train_targets})' + COLOR_LOG_END)
+                    print(COLOR_LOG_Y + f'   without_mask: AUC={train_auc_no_mask:.4f} (n={n_train_targets_no_mask}) | Δ AUC={train_auc_no_mask - train_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering (all sequences are short or training non-overlapping windows)
                 print(COLOR_LOG_Y + f'📊 Eval Mask Diagnostic: No history context filtering (all {n_train_targets} samples are evaluation data)' + COLOR_LOG_END)
@@ -596,9 +597,10 @@ if __name__ == '__main__':
             n_val_targets = sum(len(arr) for arr in all_targets) if len(all_targets) > 0 else 0
             n_val_targets_no_mask = sum(len(arr) for arr in all_targets_no_mask) if len(all_targets_no_mask) > 0 else 0
             if val_eval_mask_filter_ratio > 0:
-                print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: Filtered {val_eval_mask_filter_ratio*100:.1f}% of validation samples (History context)' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={n_val_targets})' + COLOR_LOG_END)
-                print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={n_val_targets_no_mask}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
+                if params.train.verbose:
+                    print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: Filtered {val_eval_mask_filter_ratio*100:.1f}% of validation samples (History context)' + COLOR_LOG_END)
+                    print(COLOR_LOG_Y + f'   with_mask:    AUC={val_auc:.4f} (n={n_val_targets})' + COLOR_LOG_END)
+                    print(COLOR_LOG_Y + f'   without_mask: AUC={val_auc_no_mask:.4f} (n={n_val_targets_no_mask}) | Δ AUC={val_auc_no_mask - val_auc:+.4f}' + COLOR_LOG_END)
             else:
                 # No history context filtering in validation
                 print(COLOR_LOG_Y + f'📊 Val Eval Mask Diagnostic: No history context filtering (all {n_val_targets} samples are evaluation data)' + COLOR_LOG_END)
@@ -662,15 +664,12 @@ if __name__ == '__main__':
                 fold_best_threshold = best_val_threshold
                 best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
-                if params.train.verbose:
-                    print(COLOR_LOG_G + f'🎯 新的最佳验证AUC: {best_fold_val_auc:.4f} (提升 +{improvement:.4f})' + COLOR_LOG_END)
+                print(COLOR_LOG_G + f'🎯 新的最佳验证AUC: {best_fold_val_auc:.4f} (提升 +{improvement:.4f})' + COLOR_LOG_END)
             else:
                 patience_counter += 1
-                if params.train.verbose:
-                    print(COLOR_LOG_Y + f'⏳ 验证AUC未提升 (Patience: {patience_counter}/{params.train.patience}, 最佳: {best_fold_val_auc:.4f})' + COLOR_LOG_END)
+                print(COLOR_LOG_Y + f'⏳ 验证AUC未提升 (Patience: {patience_counter}/{params.train.patience}, 最佳: {best_fold_val_auc:.4f})' + COLOR_LOG_END)
                 if params.train.patience > 0 and patience_counter >= params.train.patience:
-                    if params.train.verbose:
-                        print(f"{COLOR_LOG_Y}⛔ Early Stopping 触发于 Epoch {epoch+1} (最佳验证AUC: {best_fold_val_auc:.4f}){COLOR_LOG_END}")
+                    print(f"{COLOR_LOG_Y}⛔ Early Stopping 触发于 Epoch {epoch+1} (最佳验证AUC: {best_fold_val_auc:.4f}){COLOR_LOG_END}")
                     break
         
         # Fold Summary (after all epochs)
