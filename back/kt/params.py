@@ -44,7 +44,7 @@ class ModelParams:
 class TrainParams:
     dataset_name: str
     batch_size: int = 32
-    lr: float = 0.001
+    learning_rate: float = 0.001
     lr_gamma: float = 0.95
     epochs: int = 100
     weight_decay: float = 0.0 # 权重衰减 (L2 正则化)

@@ -1,7 +1,7 @@
 """
 训练并测试模型
 使用五折交叉验证法 (Standard K-Fold)
-python train_test.py --override train.dataset_name=assist09_gikt_old train.lr=0.01
+python train_test.py --override train.dataset_name=assist09_gikt_old train.learning_rate=0.01
 """
 import os
 import time
@@ -274,7 +274,7 @@ if __name__ == '__main__':
             use_4pl_irt=params.model.use_4pl_irt
         ).to(DEVICE)
         
-        optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.lr, weight_decay=params.train.weight_decay)
+        optimizer = torch.optim.Adam(params=model.parameters(), lr=params.train.learning_rate, weight_decay=params.train.weight_decay)
         
         best_fold_val_auc = 0.0
         best_fold_val_acc = 0.0
@@ -302,7 +302,7 @@ if __name__ == '__main__':
         if params.train.enable_lr_scheduler:
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer, 
-                max_lr=params.train.lr, 
+                max_lr=params.train.learning_rate, 
                 steps_per_epoch=max(1, len(train_loader)), 
                 epochs=params.train.epochs,
                 pct_start=0.1, # 10% steps for warmup
@@ -842,7 +842,7 @@ if __name__ == '__main__':
     tb_hparam_writer = SummaryWriter(log_dir=runs_root)
     avg_val_auc = np.mean(fold_results_test_auc) if fold_results_test_auc else 0.0
     tb_hparam_writer.add_hparams(
-        hparam_dict={'model': 'GIKT', 'dataset': dataset_name, 'lr': params.train.lr},
+        hparam_dict={'model': 'GIKT', 'dataset': dataset_name, 'lr': params.train.learning_rate},
         metric_dict={'hparam/Avg_Test_AUC': avg_val_auc}
     )
     tb_hparam_writer.close()
