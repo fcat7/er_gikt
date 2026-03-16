@@ -755,8 +755,14 @@ if __name__ == '__main__':
                     response_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
                     eval_mask = features[SeqFeatureKey.EVAL_MASK].to(torch.bool)
 
-                    with autocast(enabled=use_amp):
-                        y_hat = model(x, y_target, mask, interval_time, response_time)
+                    try:
+                        # New PyTorch 2.4+ API
+                        with torch.amp.autocast('cuda', enabled=use_amp):
+                            y_hat = model(x, y_target, mask, interval_time, response_time)
+                    except AttributeError:
+                        # Fallback for older PyTorch
+                        with torch.cuda.amp.autocast(enabled=use_amp):
+                            y_hat = model(x, y_target, mask, interval_time, response_time)
 
                     y_hat = y_hat[:, 1:]
                     y_target_shift = y_target[:, 1:].float()
