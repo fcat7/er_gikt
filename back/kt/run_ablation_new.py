@@ -98,6 +98,44 @@ def main():
 
     print(f"🚀 开始执行 GIKT 模块消融实验（共 {len(ABLATION_TARGETS)} 组）")
     
+    # 尝试加载当前数据集的最优参数
+    best_params_overrides = []
+    if args.dataset_name:
+        # 先以 "-" 分割去掉抽样后缀，再把 "_window" 替换为空
+        base_dataset_name = args.dataset_name.split('-')[0].replace("_window", "")
+        
+        best_params_path = os.path.join("config", "best_params", "gikt_best_params.json")
+        if os.path.exists(best_params_path):
+            try:
+                with open(best_params_path, "r", encoding="utf-8") as f:
+                    params_dict = json.load(f)
+                
+                # 模糊匹配逻辑（支持 assist09_builder 匹配到 assist09 的参数）
+                matched_key = None
+                for k in params_dict.keys():
+                    if k == "default": 
+                        continue
+                    # 统一转小写并兼容年份简写
+                    k_norm = k.lower().replace("2009", "09").replace("2012", "12").replace("2015", "15").replace("2017", "17")
+                    if k_norm == base_dataset_name or k_norm in base_dataset_name:
+                        matched_key = k
+                        break
+                
+                # 获取匹配到的参数，如果没有找到则回退到 default
+                target_params = params_dict.get(matched_key, params_dict.get("default", {}))
+                display_key = matched_key if matched_key else "default"
+                
+                if target_params:
+                    print(f"✅ 成功从 {best_params_path} 加载 [{display_key}] 的最优参数！(基于输入 {args.dataset_name})")
+                    for k, v in target_params.items():
+                        # 注意：字典中学习率可能是 float，其它是模型参数
+                        if k == "learning_rate":
+                            best_params_overrides.append(f"train.learning_rate={v}")
+                        else:
+                            best_params_overrides.append(f"model.{k}={v}")
+            except Exception as e:
+                print(f"⚠️ 读取 {best_params_path} 解析失败，将使用默认参数: {e}")
+
     for exp_name, override_args in ABLATION_TARGETS.items():
         if exp_name in completed_experiments:
             print("\n" + "="*80)
@@ -117,8 +155,10 @@ def main():
         # 加入消融专用标识，让 train_test.py 帮我们写 CSV
         cmd.extend(["--ablation_name", exp_name])
         
-        # 处理覆写参数
+        # 处理覆写参数，先加入消融模块特定参数，然后加入从 JSON 提取的最优超参
         final_overrides = list(override_args)
+        final_overrides.extend(best_params_overrides)
+        
         if args.log:
             final_overrides.append("train.verbose=True")
         if args.dataset_name:
@@ -172,6 +212,6 @@ def main():
 
 # python run_ablation_new.py
 # python run_ablation_new.py --full
-# python run_ablation_new.py --log --dataset_name assist09-sample_20%
+# python run_ablation_new.py --full --log --dataset_name assist09_builder_window
 if __name__ == "__main__":
     main()

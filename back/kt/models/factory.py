@@ -116,10 +116,11 @@ class ModelFactory:
         
 
         elif name_key == 'deep_irt':
-            emb_size = kwargs.get('emb_size', 64)
+            # 兼容 emb_size 和 dim_s 两种命名
+            dim_s = kwargs.get('dim_s', kwargs.get('emb_size', 64))
             size_m = kwargs.get('size_m', 50)
             dropout = kwargs.get('dropout', 0.1)
-            model = DeepIRT(num_q=num_question, num_c=num_skill, dim_s=emb_size, size_m=size_m, dropout=dropout).to(device)
+            model = DeepIRT(num_q=num_question, num_c=num_skill, dim_s=dim_s, size_m=size_m, dropout=dropout).to(device)
             
         elif name_key == 'gikt_old':
             q_neighbors = kwargs.get('q_neighbors')
@@ -152,7 +153,7 @@ class ModelFactory:
                 dim_emb=kwargs.get('emb_dim', 100),
                 dropout4gru=kwargs.get('dropout_linear', 0.1),
                 dropout4gnn=kwargs.get('dropout_gnn', 0.1),
-                rank_k=kwargs.get('rank_k', 10)
+                rank_k=kwargs.get('rank_k', 20)
             ).to(device)
 
         else:

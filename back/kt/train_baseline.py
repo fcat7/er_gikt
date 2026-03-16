@@ -131,6 +131,6 @@ def main():
     if os.path.exists(save_path):
         print(f"✅ Successfully saved to {save_path}!")
 
-# python train_baseline.py --model_name akt --dataset assist09 --epochs 50 --k_fold 1 --patience 3 --no_save_model --batch_size 64 --learning_rate 0.01
+# python train_baseline.py --model_name gikt_old --dataset assist09_builder_window --epochs 50 --k_fold 1 --patience 3 --no_save_model --batch_size 64 --learning_rate 0.01
 if __name__ == '__main__':
     main()
