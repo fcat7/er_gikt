@@ -166,7 +166,8 @@ def main():
     parser.add_argument('--ratio', type=float, default=1.0, help='Sample ratio (1.0 for full)')
     parser.add_argument('--seed', type=int, default=RANDOM_SEED, help='Random seed')
     parser.add_argument('--min_seq_len', type=int, default=5, help='Min interactions per user')
-    parser.add_argument('--stride', type=int, default=0, help=f'Sliding window stride for TRAIN set. 0 = disable, range: [0, {MAX_SEQ_LEN}]')
+    parser.add_argument('--train_window_stride', type=int, default=0, help=f'Sliding window stride for TRAIN set. 0 = disable (no overlap), range: [1, {MAX_SEQ_LEN}]')
+    parser.add_argument('--test_window_stride', type=int, default=0, help=f'Sliding window stride for TEST set. 0 = default (50% overlap), range: [1, {MAX_SEQ_LEN}]')
     parser.add_argument('--k_core', type=int, default=5, help='K-Core过滤稀疏节点阈值 (默认5, <=0表示关闭)')
     parser.add_argument('--extreme_acc_min', type=int, default=10, help='触发异常正确率100%/0%过滤的最少作答数阈值 (默认10, <=0表示关闭)')
     parser.add_argument('--rapid_merge_sec', type=float, default=3.0, help='过滤连答/脚手架的最短合法秒数间隔 (默认3.0, <=0表示关闭)')
@@ -184,14 +185,21 @@ def main():
     else:
         dataset_name = base_name
 
-    if args.stride < 0 or args.stride > MAX_SEQ_LEN:
-        raise ValueError(f"stride must be in range [0, {MAX_SEQ_LEN}], got {args.stride}")
-    enable_window = args.stride > 0
+    # 兼容性检查
+    if args.train_window_stride < 0 or args.train_window_stride > MAX_SEQ_LEN:
+        raise ValueError(f"train_window_stride must be in range [0, {MAX_SEQ_LEN}], got {args.train_window_stride}")
+        
+    enable_window = args.train_window_stride > 0
     target_dataset_name = f"{dataset_name}_window" if enable_window else dataset_name
-    train_stride = args.stride if enable_window else None
+    
+    # 训练集 Stride 策略：
+    # 0 或 >= MAX_SEQ_LEN: 不重叠 (pykt standard)
+    # < MAX_SEQ_LEN: 重叠增强 (Ours)
+    train_stride_val = args.train_window_stride if enable_window else None
 
     ic(f"=== Pipeline Start: {dataset_name} ===")
-    ic(f"滑动窗口: {'ON' if enable_window else 'OFF'} | stride={args.stride}")
+    ic(f"Train Window: {'Overlap' if enable_window else 'Non-Overlap'} | Stride={args.train_window_stride}")
+    ic(f"Test Window Stride: {args.test_window_stride} (0=Auto 50%)")
 
     # 加载数据集的 TOML 配置
     dataset_config = load_dataset_config(base_name)
@@ -282,7 +290,8 @@ def main():
     # ========== Step 6: 序列构建 (Parquet) ========== 
     ic("Step 6: 序列构建 (Parquet) 并计算相对时序特征...")
     df_train = df[df[StandardColumns.USER_ID].isin(train_users)].copy()
-    train_records = builder.build_sequences(df_train, stride=train_stride, save_prefix='train')
+    # 训练集: 如果 train_window_stride=0，则传入 None，Builder 内部会自动处理为 Non-overlap
+    train_records = builder.build_sequences(df_train, stride=train_stride_val, save_prefix='train')
     pd.DataFrame(train_records).to_parquet(os.path.join(output_dir, 'train.parquet'), engine='pyarrow', index=False)
 
     # ⚠️ 防特征泄漏：提取训练集的 question_avg_time，供测试集复用
@@ -290,8 +299,16 @@ def main():
     train_question_avg_time = builder.get_question_avg_time(df_train)
     
     df_test = df[df[StandardColumns.USER_ID].isin(test_users)].copy()
+    
+    # 解析测试集 stride
+    # 如果 args.test_window_stride 为 0，则默认使用 50% 重叠 (MAX_SEQ_LEN // 2) - 工程默认
+    # 如果想要类似 pykt 的 "window" 模式（密集评估），请传入 1
+    # 如果想要类似 pykt 的 "original" 模式（无重叠），请传入 200 (MAX_SEQ_LEN)
+    real_test_stride = args.test_window_stride if args.test_window_stride > 0 else (MAX_SEQ_LEN // 2)
+    ic(f"Testing Stride Config: {real_test_stride}")
+
     # 按照严格的评测标准，测试集应将超长用户按 50% 重叠的滑动窗口(MAX_SEQ_LEN//2) 切开，依靠 builder 内部的 eval_mask 解决状态截断导致的冷启动。
-    test_records = builder.build_sequences(df_test, stride=MAX_SEQ_LEN // 2, save_prefix='test', question_avg_time_override=train_question_avg_time)
+    test_records = builder.build_sequences(df_test, stride=real_test_stride, save_prefix='test', question_avg_time_override=train_question_avg_time)
     pd.DataFrame(test_records).to_parquet(os.path.join(output_dir, 'test.parquet'), engine='pyarrow', index=False)
     
 
@@ -379,7 +396,8 @@ def main():
         "config_at_processing": {
             "min_seq_len": args.min_seq_len,
             "max_seq_len": MAX_SEQ_LEN,
-            "window_size": args.stride
+            "train_window_stride": args.train_window_stride,
+            "test_window_stride": args.test_window_stride,
         },
         "mappings": mappings,
         "features": {
@@ -416,5 +434,17 @@ def main():
 #    python data_process.py --dataset assist09 --no_denoise
 # ============================================================================
 
+# === 1. 复现 pykt Baseline (0.75) ===
+# 训练无重叠，测试无重叠
+# python data_process.py --dataset assist09 --train_window_stride 0 --test_window_stride 200
+
+# === 2. 复现 pykt Window Evaluaton ===
+# 训练无重叠，测试如其名 "Window" (极其密集，慎用)
+# python data_process.py --dataset assist09 --train_window_stride 0 --test_window_stride 1
+
+# === 3. 你的 SOTA 配置 (0.83) ===
+# 训练 50% 重叠增强，测试 50% 重叠评估
+# 这种配置在工程落地和学术竞赛中是最常用的 Trick
+# python data_process.py --dataset assist09 --train_window_stride 100 --test_window_stride 100
 if __name__ == "__main__":
     main()

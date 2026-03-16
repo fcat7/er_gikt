@@ -478,21 +478,32 @@ class KTDataBuilder:
             
             history_len = 0
             
-            # 如果 stride=None 或者 stride >= max_len，则使用非重叠模式；否则使用指定的 stride 进行切分
-            if stride is None or stride >= total_interactions:
-                # 测试集且序列过长：使用重叠窗口，保留历史预热
+            # 如果 stride=None 或者 stride >= max_len 或者 stride <= 0，则使用非重叠模式
+            if stride is None or stride >= total_interactions or stride <= 0:
+                # 测试集且序列过长：默认使用50%重叠，保留历史预热（避免冷启动）
+                # 这是旧的默认行为，如果不指定具体 stride，为了性能平衡通常取 50%
                 if not is_train_mode and total_interactions > max_len:
-                    # 测试集超长序列：使用50%重叠，保留历史预热（避免冷启动）
-                    # 窗口1: [0-200]，全部评估
-                    # 窗口2: [100-300]，前100是历史，后100是新评估数据
                     current_stride = max_len // 2
-                    history_len = max_len // 2
-                else: # 训练集或短序列：直接使用非重叠窗口，全部评估
+                else: 
+                    # 训练集或短序列：直接使用非重叠窗口，全部评估
                     current_stride = max_len
-                    history_len = 0
-            else: # 否则使用指定的 stride 进行切分，训练集允许更密集的切分，测试集则保持较大的重叠以保留历史预热
+            else: 
+                # 否则使用指定的 stride 进行切分
                 current_stride = stride
-                history_len = max_len // 2 if total_interactions > max_len else 0
+            
+            # 动态计算 history_len (Context Length)
+            # 核心逻辑：在一个 max_len 的窗口中，新进来的数据长度为 current_stride。
+            # 剩下的前面部分 (max_len - current_stride) 都是历史数据（已在之前的窗口评估过），仅作为 Context。
+            # 例如：
+            # Case A (pykt Window): stride=1. history=199. Eval 范围=[199, 200]，只评测最后1个不重复的点。
+            # Case B (50% Overlap): stride=100. history=100. Eval 范围=[100, 200]。
+            # Case C (No Overlap): stride=200. history=0. Eval 范围=[0, 200]。
+            if total_interactions > max_len and is_train_mode is False: 
+                # 仅对测试集/验证集启用这种只评测增量部分的逻辑 (Masking History)
+                # 训练集通常希望尽可能多利用数据，或者由外部控制 stride
+                history_len = max(0, max_len - current_stride)
+            else:
+                history_len = 0
             
             starts = list(range(0, total_interactions, current_stride))
             
@@ -521,6 +532,10 @@ class KTDataBuilder:
                 elif length > 0 and start == 0:
                     for j in range(length):
                         eval_mask[j] = True
+                
+                # 优化：如果该窗口完全没有需要评估的点（例如在 Stride 小于 MaxLen 时，末尾的残缺窗口主要由 History 覆盖），则跳过
+                if not any(eval_mask):
+                    continue
                 
                 record = {
                     'uid': u_idx,
