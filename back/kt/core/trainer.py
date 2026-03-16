@@ -116,7 +116,13 @@ class BaseTrainer:
                     y_hat = model(question, response, mask, skill=skill)
                     preds = y_hat[:, :-1]
                 elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
-                    y_hat = model(question, response, mask, interval, r_time)
+                    # 必须把 skill 显式传给基线模型，否则它们内部会因为获取不到 skill=None 退化为全 0 张量
+                    try:
+                        y_hat = model(question, response, mask, interval, r_time, skill=skill)
+                    except TypeError:
+                        # 兼容某些没有 skill 参数的模型 (例如 QIKT 如果没定义 skill)
+                        y_hat = model(question, response, mask, interval, r_time)
+                    
                     if y_hat.shape[1] == question.shape[1]: 
                         preds = y_hat[:, :-1]
                     else:
@@ -153,6 +159,13 @@ class BaseTrainer:
                 if hasattr(model, 'guessing_bias') and hasattr(model, 'slipping_bias'):
                     reg_loss += self.reg_4pl * torch.sum(model.guessing_bias.weight ** 2)
                     reg_loss += self.reg_4pl * torch.sum(model.slipping_bias.weight ** 2)
+                
+                # 针对 AKT 模型: Rasch difficulty L2 regularization (P2 fix)
+                if model_name == 'akt' and hasattr(model, 'q_diff_embed'):
+                    rasch_loss = torch.sum(model.q_diff_embed.weight ** 2)
+                    # PyKT AKT paper officially uses 1e-5 for rasch l2 regularization
+                    reg_loss += 1e-5 * rasch_loss
+                
                 loss += reg_loss
 
             scaler.scale(loss).backward()
@@ -245,7 +258,10 @@ class BaseTrainer:
                         preds = y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
                     elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'gkt']:
-                        y_hat = model(question, response, mask, interval, r_time)
+                        try:
+                            y_hat = model(question, response, mask, interval, r_time, skill=skill)
+                        except TypeError:
+                            y_hat = model(question, response, mask, interval, r_time)
                         preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
                         y_hat_prob = torch.sigmoid(preds)
                     elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':

@@ -18,7 +18,6 @@ MODELS = {
     'gikt_old': {'batch_size': 128, 'debug_lr': 0.005},      # GNN节点聚合，需要一定显存（128，time: 49.19s | VRAM: 2.64G (Res: 6.64G)；64，time: 84.24s | VRAM: 1.36G (Res: 5.26G)）
     'simplekt': {'batch_size': 256, 'debug_lr': 0.001},      # 注意力模型(Transformer架构)，内存消耗大，防炸（256，time: 8.40s | VRAM: 3.27G (Res: 3.62G)；128，time: 8.54s | VRAM: 1.64G (Res: 1.67G)）
     'akt': {'batch_size': 64, 'debug_lr': 0.001},           # 同为重型注意力机制，占用大（64，time: 38.41s | VRAM: 4.06G (Res: 4.14G)）
-    'qikt': {'batch_size': 128, 'debug_lr': 0.0005}          # 结构最重，极易OOM，即便调试也不能太激进（256，time: 7.01s | VRAM: 2.33G (Res: 2.61G)；128，time: 3.15s | VRAM: 1.20G (Res: 1.34G)）
 }
 
 # 配置你想跑的数据集名称

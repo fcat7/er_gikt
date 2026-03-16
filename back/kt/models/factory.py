@@ -87,20 +87,24 @@ class ModelFactory:
             model = DKVMN(num_question, dim_s=dim_s, size_m=size_m, dropout=dropout).to(device)
             
         elif name_key == 'akt':
-            emb_size = kwargs.get('emb_size', 64)
-            d_model = kwargs.get('d_model', emb_size)
-            n_blocks = kwargs.get('n_blocks', 2)
+            d_model = kwargs.get('d_model', 64)
+            n_blocks = kwargs.get('n_blocks', 4)
             d_ff = kwargs.get('d_ff', 256)
-            num_attn_heads = kwargs.get('num_attn_heads', 8)
-            dropout = kwargs.get('dropout', 0.1)
+            num_attn_heads = kwargs.get('num_attn_heads', 4)
+            dropout = kwargs.get('dropout', 0.05)
             model = AKT(n_question=num_question, n_skill=num_skill, d_model=d_model, n_blocks=n_blocks, 
                     d_ff=d_ff, num_attn_heads=num_attn_heads, dropout=dropout).to(device)
 
         elif name_key == 'simplekt':
-            emb_size = kwargs.get('emb_size', 64)
-            d_model = kwargs.get('d_model', emb_size)
+            d_model = kwargs.get('d_model', 256)
+            n_blocks = kwargs.get('n_blocks', 4)
+            d_ff = kwargs.get('d_ff', 256)
+            num_attn_heads = kwargs.get('num_attn_heads', 4)
             dropout = kwargs.get('dropout', 0.1)
-            model = SimpleKT(n_question=num_question, n_skill=num_skill, d_model=d_model, dropout=dropout).to(device)
+            final_fc_dim = kwargs.get('final_fc_dim', 256)
+            model = SimpleKT(n_question=num_question, n_skill=num_skill, d_model=d_model,
+                             n_blocks=n_blocks, d_ff=d_ff, num_attn_heads=num_attn_heads,
+                             dropout=dropout, final_fc_dim=final_fc_dim).to(device)
 
         elif name_key == 'qikt':
             emb_size = kwargs.get('emb_size', 64)

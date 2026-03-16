@@ -48,9 +48,9 @@ ABLATION_TARGETS = {
         "model.use_4pl_irt=False"
     ],
     
-    # "E_agg_method-kk_gat": [
-    #     "model.agg_method=kk_gat"
-    # ],
+    "E_agg_method-kk_gat": [
+        "model.agg_method=kk_gat"
+    ],
     
     "F_old_gikt": [
         "model.use_pid=False",
@@ -158,25 +158,14 @@ def main():
             os.remove(CHECKPOINT_FILE)
             print("🎉 所有组别运行完成，已自动清除断点记录！")
     
-    # 因为跑的是默认配置，数据集可能是 assist09，我们需要去读取 CSV
-    # 在这个项目中 log_dir_name 根据数据集来定，但前面 train_test.py 里把 csv 和普通 log 存一起了。
-    # 我们可以用简单的正则或者固定的基础目录来扫（由于不知道具体存哪，我们做一个模糊查找）
-    
-    # 我们知道 train_test.py 会把文件写到输出目录。如果你跑多次不同的数据集，可能会写到不同的位置。
-    # 为了保险，我们搜索一下 back/kt 目录下最近被修改的 ablation_summary.csv
-    import glob
-    search_path = "output/**/ablation_summary.csv"
-    csv_files = glob.glob(search_path, recursive=True)
-    
-    if not csv_files:
+    csv_path = os.path.join("output", "run_ablation", "ablation_summary.csv")
+
+    if not os.path.exists(csv_path):
         print("🤔 没有找到 ablation_summary.csv，请检查上方日志是否有报错。")
     else:
-        # 取最新修改的 CSV
-        latest_csv = max(csv_files, key=os.path.getmtime)
         try:
-            df = pd.read_csv(latest_csv)
-            # 过滤出含有今天日期的记录，或者是最近运行跑的这几组
-            print(f"\n📊 读取自: {latest_csv}")
+            df = pd.read_csv(csv_path)
+            print(f"\n📊 读取自: {csv_path}")
             print(df.tail(len(ABLATION_TARGETS)).to_markdown(index=False))
         except Exception as e:
             print(f"读取 CSV 异常：{str(e)}")

@@ -35,14 +35,20 @@ class AKT(nn.Module):
         self.emb_type = "qid"
         embed_l = d_model
         
-        # n_question+1 ,d_model
-        # Joint embed
-        self.q_embed = nn.Embedding(self.n_question, embed_l // 2)
-        self.c_embed = nn.Embedding(self.n_skill, embed_l // 2)
-        if self.separate_qa: 
-            self.qa_embed = nn.Embedding(2*self.n_question+1, embed_l) # interaction emb
+        # 1:1 复刻 PyKT AKT 的 Context-Aware Rasch Embedding
+        # q_embed: 以知识点为键的概念嵌入 (concept embedding)
+        self.c_embed = nn.Embedding(self.n_skill + 10, embed_l)
+        # difficult_param: 以题目ID为键的 **标量** 难度参数（PyKT 原版是 1 维！）
+        self.q_diff_embed = nn.Embedding(self.n_question + 10, 1)
+        # q_embed_diff: 以知识点为键的概念变化量 (concept variation)
+        self.c_var_embed = nn.Embedding(self.n_skill + 10, embed_l)
+        
+        if self.separate_qa:
+            self.r_embed = nn.Embedding(2*self.n_question+10, embed_l)
         else: # false default
-            self.qa_embed = nn.Embedding(2, embed_l)
+            self.r_embed = nn.Embedding(10, embed_l)
+        # qa_embed_diff: 以回答(0/1)为键的交互变化量 (interaction variation)
+        self.r_var_embed = nn.Embedding(10, embed_l)
 
         # Architecture Object. It contains stack of attention block
         self.model = Architecture(n_question=n_question, n_blocks=n_blocks, n_heads=num_attn_heads, dropout=dropout,
@@ -60,18 +66,30 @@ class AKT(nn.Module):
     def reset(self):
         for p in self.parameters():
             if p.size(0) == self.n_pid+1 and self.n_pid > 0:
-                torch.nn.init.constant_(p, 0.)
-
+                torch.nn.init.constant_(p, 0.)        # Rasch difficulty parameter zero-initialization (P1 fix)
+        if hasattr(self, 'q_diff_embed'):
+            torch.nn.init.constant_(self.q_diff_embed.weight, 0.)
     def base_emb(self, q_data, c_data, target):
-        q_emb = self.q_embed(q_data)
-        c_emb = self.c_embed(c_data)
-        q_embed_data = torch.cat([q_emb, c_emb], dim=-1)
+        q_data = q_data * (q_data > -1).long()
+        c_data = c_data * (c_data > -1).long()
+        target = target * (target > -1).long()
+
+        c_emb = self.c_embed(c_data)            # [bs, seq, d_model]
+        q_diff = self.q_diff_embed(q_data)       # [bs, seq, 1]  ← 标量！
+        c_var = self.c_var_embed(c_data)          # [bs, seq, d_model]
+
+        # PyKT 原版公式: q_embed = c_ct + mu_q * d_ct
+        q_embed_data = c_emb + q_diff * c_var
+
         if self.separate_qa:
             qa_data = q_data + self.n_question * target
-            qa_embed_data = self.qa_embed(qa_data)
+            r_emb = self.r_embed(qa_data)
         else:
-            # BS, seqlen, d_model # c_ct+ g_rt =e_(ct,rt)
-            qa_embed_data = self.qa_embed(target)+q_embed_data
+            r_emb = self.r_embed(target)
+        r_var = self.r_var_embed(target)          # [bs, seq, d_model]
+        # PyKT/pyedmine 原版公式: qa_embed = (c_ct + g_rt) + mu_q * (f_rt + d_ct)
+        qa_embed_data = (c_emb + r_emb) + q_diff * (r_var + c_var)
+
         return q_embed_data, qa_embed_data
 
     def forward(self, question, response, mask=None, interval_time=None, response_time=None, skill=None):
