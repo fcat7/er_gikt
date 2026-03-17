@@ -34,11 +34,11 @@ ABLATION_TARGETS = {
     #     "train.save_model=True"
     # ],
     # 实验名 : 要覆写（Override）的参数列表
-    "A_Baseline": [
-    ],
-    "B_Remove_PID": [
-        "model.use_pid=False"
-    ],
+    # "A_Baseline": [
+    # ],
+    # "B_Remove_PID": [
+    #     "model.use_pid=False"
+    # ],
     
     "C_Remove_Cognitive": [
         "model.use_cognitive_model=False"
