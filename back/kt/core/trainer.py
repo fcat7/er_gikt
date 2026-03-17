@@ -2,6 +2,7 @@ import time
 import os
 import logging
 from datetime import datetime
+import gc
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -375,6 +376,7 @@ class BaseTrainer:
             
             best_val_auc = 0.0
             patience_counter = 0
+            best_state_dict_cpu = None
             
             if fold == 0:
                 train_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "train"))
@@ -430,6 +432,15 @@ class BaseTrainer:
                 if val_auc > best_val_auc:
                     best_val_auc = val_auc
                     patience_counter = 0
+                    # Keep an in-memory copy of best weights on CPU for robust test-time loading.
+                    # This avoids potential Windows file I/O edge cases during torch.load.
+                    try:
+                        with torch.no_grad():
+                            best_state_dict_cpu = {
+                                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                            }
+                    except Exception as e:
+                        self.logger.warning(f"Failed to snapshot best state_dict to CPU: {e}")
                     if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
                         torch.save(model.state_dict(), self.kwargs.get('model_save_path'))
                 else:
@@ -444,16 +455,30 @@ class BaseTrainer:
                 val_writer.close()
 
             if test_dataset is not None:
-                if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
-                    # Load best model weights for this fold
+                # Load best model weights for this fold
+                if best_state_dict_cpu is not None:
+                    self.logger.info(f"Loading best model for fold {fold+1} test evaluation (in-memory CPU snapshot)...")
+                    try:
+                        model.load_state_dict(best_state_dict_cpu)
+                    except Exception as e:
+                        self.logger.error(f"Failed to load in-memory best state_dict: {e}")
+                elif self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
                     best_model_path = self.kwargs.get('model_save_path')
-                    if os.path.exists(best_model_path):
-                        self.logger.info(f"Loading best model for fold {fold+1} test evaluation...")
-                        state_dict = torch.load(best_model_path, map_location=self.device)
-                        if isinstance(state_dict, torch.nn.Module):
-                            model = state_dict
-                        else:
-                            model.load_state_dict(state_dict)
+                    if best_model_path and os.path.exists(best_model_path):
+                        self.logger.info(f"Loading best model for fold {fold+1} test evaluation (torch.load from disk)...")
+                        try:
+                            state_dict = torch.load(best_model_path, map_location=self.device)
+                            if isinstance(state_dict, torch.nn.Module):
+                                model = state_dict
+                            else:
+                                model.load_state_dict(state_dict)
+                        except Exception as e:
+                            self.logger.error(f"Failed to torch.load best model from disk: {e}")
+
+                # Best-effort memory cleanup before long test evaluation.
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
                 test_auc, test_acc, _ = self._evaluate(model, test_loader, use_amp)
