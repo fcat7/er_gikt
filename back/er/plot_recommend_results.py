@@ -197,7 +197,8 @@ def plot_radar_chart(df, output_dir):
 
 if __name__ == "__main__":
     set_style()
-    csv_path = r"output/recommendation_full/recommend_eval_full_all.bak-论文当前用图.csv"
+    # csv_path = r"output/recommendation_full/recommend_eval_full_all.bak-论文当前用图.csv"
+    csv_path = r"output/recommendation_full/recommend_eval_full_all_MERGED.csv"
     # csv_path = r"output/ablation_er/ablation_eval_full.bak-论文当前用图.csv"
     if not os.path.exists(csv_path):
         import glob

@@ -73,7 +73,7 @@ class RecDataLoader:
             self._global_popular_qs = set(int(x) for x in sorted_by_freq[:200] if global_freq[int(x)] > 0)
         return self._global_popular_qs
 
-    def get_eval_samples(self, n_samples: int = None) -> pd.DataFrame:
+    def get_eval_samples(self, start_idx: int = 0, end_idx: int = None) -> pd.DataFrame:
         if self._test_samples is None:
             logger.info(f"📂 加载测试集: {self.test_parquet_path}")
             min_seq_len = self.config.get('min_seq_len', 10)
@@ -85,7 +85,8 @@ class RecDataLoader:
             logger.info(f"  ↳ 有效长序列样本: {len(self._test_samples)}")
             
         df = self._test_samples
-        return df.iloc[:n_samples] if n_samples is not None else df
+        _end_idx = end_idx if end_idx is not None else len(df)
+        return df.iloc[start_idx:_end_idx]
 
 # ---- 3. 推荐器静态工厂 ----
 class RecommenderFactory:
@@ -327,6 +328,8 @@ def main():
     parser.add_argument('--full', action='store_true')
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--n_eval_samples', type=int, default=None)
+    parser.add_argument('--start_idx', type=int, default=0)
+    parser.add_argument('--end_idx', type=int, default=None)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--baseline', type=str, default=None, choices=['greedy', 'random', 'popularity', 'dkt_greedy', 'dkvmn_greedy', 'all'])
     parser.add_argument('--dkt_model', type=str, default=None)
@@ -348,7 +351,12 @@ def main():
 
     # 初始化重构的各类
     data_loader = RecDataLoader(config_dict)
-    samples_df = data_loader.get_eval_samples(config_dict.get('n_eval_samples'))
+    
+    # 兼容老配置，如果传入了评估总数但没传end_idx
+    if args.n_eval_samples and args.end_idx is None:
+        args.end_idx = args.start_idx + args.n_eval_samples
+        
+    samples_df = data_loader.get_eval_samples(args.start_idx, args.end_idx)
     engine = RecommendationEngine(data_loader, config_dict)
     
     task_queue = ['ours'] if not args.baseline else (
@@ -373,7 +381,10 @@ def main():
         combined_df = pd.concat(all_results.values(), ignore_index=True)
         out_dir = config_dict.get('save_dir', 'output/recommendation_full' if args.full else 'output/recommendation_sample')
         os.makedirs(out_dir, exist_ok=True)
-        out_file = os.path.join(out_dir, f"recommend_eval_{'full' if args.full else 'sample'}{'_'+args.baseline if args.baseline else ''}.csv")
+        
+        chunk_tag = f"_parts_{args.start_idx}_to_{args.end_idx}" if args.end_idx else ""
+        out_file = os.path.join(out_dir, f"recommend_eval_{'full' if args.full else 'sample'}{'_'+args.baseline if args.baseline else ''}{chunk_tag}.csv")
+        
         combined_df.to_csv(out_file, index=False)
         logger.info(f"💾 Results saved to {out_file}")
 

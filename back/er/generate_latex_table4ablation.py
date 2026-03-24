@@ -76,7 +76,7 @@ def generate_latex_table_ablation(csv_path):
     return '\n'.join(latex_code)
 
 if __name__ == "__main__":
-    csv_path = r'H:\er_gikt\back\er\output\ablation_er\ablation_eval_full.csv'
+    csv_path = r'H:\er_gikt\back\er\output\ablation_er\ablation_eval_full.bak-论文当前用图.csv'
     try:
         latex_table = generate_latex_table_ablation(csv_path)
         print(latex_table)

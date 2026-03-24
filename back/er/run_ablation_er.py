@@ -13,7 +13,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from run_er_eval import RecDataLoader, MetricsCalculator, RecommendationEngine, Reporter, get_exp_config_path
+from run_er_eval import RecDataLoader, RecommendationEngine, Reporter, get_exp_config_path, set_seed, DEVICE
 from pso_recommend import RecommendationSystem, FitnessEvaluator, DiscreteMOPSO
 import toml
 from datetime import datetime, timezone, timedelta
@@ -110,6 +110,9 @@ def main():
     parser = argparse.ArgumentParser(description="Real Model Ablation Study")
     parser.add_argument('--n_eval_samples', type=int, default=None, help="Num samples to evaluate. Defaults to all.")
     parser.add_argument('--is_full', action='store_true', help="Use the full config if set.")
+    parser.add_argument('--start_idx', type=int, default=0, help="起始样本索引")
+    parser.add_argument('--end_idx', type=int, default=None, help="结束样本索引（开区间）")
+    parser.add_argument('--mode', type=str, default='all', choices=['all', 'full', 'no_pid', 'no_mopso', 'no_f2'], help="指定要跑的消融模式")
     args = parser.parse_args()
 
     logger = setup_ablation_logger()
@@ -117,38 +120,48 @@ def main():
     config_path = get_exp_config_path(args.is_full)
     with open(config_path, 'r', encoding='utf-8') as f:
         config_dict = toml.load(f)
+    flat_config = {
+        k: v
+        for sect in config_dict.values()
+        for k, v in (sect.items() if isinstance(sect, dict) else [])
+    }
 
     c_common = config_dict.get('common', {})
-    c_rec = config_dict.get('recommendation', {})
     c_eval = config_dict.get('evaluation', {})
-    
-    data_loader = RecDataLoader(config_dict['common'])
-    
-    n_samples = args.n_eval_samples
-    if n_samples is None and not c_eval.get('use_full_test_set', False):
-        n_samples = c_eval.get('n_eval_samples', None)
+    c_rec = config_dict.get('recommendation', {})
 
-    df_eval = data_loader.get_eval_samples(n_samples)
-    print(f"\n[*] Extracted test sequences: {len(df_eval)} (Requires length >= {config_dict['common'].get('min_seq_len', 10) + c_rec.get('K', 5)})")
+    seed = flat_config.get('seed', 42)
+    set_seed(seed)
+    logger.info(f"🌱 Global Random Seed Set to: {seed}")
+    
+    data_loader = RecDataLoader(flat_config)
+    
+    if args.n_eval_samples is None and not c_eval.get('use_full_test_set', False):
+        args.n_eval_samples = c_eval.get('n_eval_samples', None)
+    if args.n_eval_samples is not None and args.end_idx is None:
+        args.end_idx = args.start_idx + args.n_eval_samples
+
+    df_eval = data_loader.get_eval_samples(args.start_idx, args.end_idx)
+    print(f"\n[*] Extracted test sequences: {len(df_eval)} (Requires length >= {flat_config.get('min_seq_len', 10) + flat_config.get('K', 5)})")
 
     model_path = c_common.get('model_path', '')
     metadata_path = data_loader.metadata_path
 
-    engine = RecommendationEngine(data_loader, c_rec)
+    engine = RecommendationEngine(data_loader, flat_config)
     
-    modes = ["full", "no_pid", "no_mopso", "no_f2"]
+    modes = ["full", "no_pid", "no_mopso", "no_f2"] if args.mode == 'all' else [args.mode]
     out_results = {}
 
     print("\n================ Real PyTorch Ablation Starting ================\n")
     
-    actual_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    actual_device = DEVICE
 
     for mode in modes:
         recommender = AblationRecommendationSystem(
             mode=mode, 
             model_path=model_path, 
             metadata_path=metadata_path, 
-            config=c_rec, 
+            config=flat_config, 
             device=actual_device
         )
         
@@ -162,7 +175,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     combined_df = pd.concat(out_results.values(), ignore_index=True)
     
-    out_file = os.path.join(out_dir, f"ablation_eval_{'full' if args.is_full else 'sample'}.csv")
+    suffix = '' if args.mode == 'all' else f'_{args.mode}'
+    chunk_tag = f"_parts_{args.start_idx}_to_{args.end_idx}" if args.end_idx is not None else ''
+    out_file = os.path.join(out_dir, f"ablation_eval_{'full' if args.is_full else 'sample'}{suffix}{chunk_tag}.csv")
     combined_df.to_csv(out_file, index=False)
     logger.info(f"💾 Results saved to {out_file}")
     

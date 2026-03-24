@@ -79,6 +79,7 @@ def generate_latex_table(csv_path):
     return '\n'.join(latex_code)
 
 if __name__ == "__main__":
-    csv_path = r'H:\er_gikt\back\er\output\recommendation_full\recommend_eval_full_all.csv'
+    # csv_path = r'H:\er_gikt\back\er\output\recommendation_full\recommend_eval_full_all.csv'
+    csv_path = r'H:\er_gikt\back\er\output\recommendation_full\recommend_eval_full_all_MERGED.csv'
     latex_table = generate_latex_table(csv_path)
     print(latex_table)
