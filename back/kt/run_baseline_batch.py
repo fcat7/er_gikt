@@ -2,12 +2,13 @@ import os
 import subprocess
 import time
 from datetime import datetime
+import traceback
 
 # ================= 🔧 配置区域 =================
 # 全局开关：是否为快速调试模式？
 # True：所有模型强制使用较高的学习率（加快收敛步伐，用于快速摸底验证）
 # False：严格遵守 config/best_params 中每个基线论文宣称的最佳超参（用于写论文的夜间最终跑批）
-IS_DEBUG_MODE = True
+IS_DEBUG_MODE = False
 
 # 配置你想跑的模型及其专属的 Batch Size（以此适配 6GB 显存，防止 OOM）
 # 建议的快速试错学习率同样配置在下方字典中。若 IS_DEBUG_MODE=False，'debug_lr' 将被忽略。
@@ -23,8 +24,8 @@ MODELS = {
 # 配置你想跑的数据集名称
 DATASETS = [
     # 'assist09',
-    'assist09_builder',
-    # 'assist12',
+    # 'assist09_builder',
+    'assist12',
     # 'ednet_kt1',
     # 'nips2020_task34'
 ]
@@ -98,7 +99,17 @@ def run_batch():
                     print(f"  ❌ [失败] 任务 {task_name} 异常终结 (退出码:{process.returncode})！请明天检查日志: {log_filename}")
                     
             except Exception as e:
+                err_tb = traceback.format_exc()
                 print(f"  ⚠️ [系统异常] 启动任务 {task_name} 时发生系统级错误: {str(e)}")
+                print(err_tb)
+                # 尽力把异常也落到对应的 batch log 里
+                try:
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write("\n=== Batch Runner Exception ===\n")
+                        f.write(err_tb)
+                        f.write("\n")
+                except Exception:
+                    pass
                 
     total_time = time.time() - start_time
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🎉 所有夜间批处理任务已执行完毕！总耗时: {total_time/3600:.2f} 小时。")

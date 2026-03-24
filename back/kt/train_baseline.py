@@ -5,6 +5,8 @@ Outputs models to the checkpoint directory for downstream evaluation.
 import os
 import argparse
 import sys
+import random
+import numpy as np
 import torch
 from datetime import datetime
 
@@ -16,6 +18,19 @@ from config import get_config
 from core.trainer import BaseTrainer
 from models.factory import ModelFactory
 from dataset import UnifiedParquetDataset
+
+
+def set_seed(seed=42):
+    """固定随机种子，保证实验可复现（与 train_test.py 口径一致）"""
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def get_metadata(processed_data_dir):
     import json
@@ -37,10 +52,17 @@ def main():
     parser.add_argument('--k_fold', type=int, default=5, help="K-Fold cross validation splits")
     parser.add_argument('--patience', type=int, default=3, help="Early stopping patience")
     parser.add_argument('--no_save_model', action='store_true', help="启用则不保存模型")
+    parser.add_argument('--no_save_fold_checkpoints', action='store_true', help="启用则不保存每一折最优 checkpoint")
+    parser.add_argument('--save_global_best', action='store_true', help="启用则额外保存全局最优 checkpoint（跨所有折按 Val AUC）")
     parser.add_argument('--batch_size', type=int, default=64, help="批大小")
     parser.add_argument('--learning_rate', type=float, default=None, help="如果提供，将覆盖最优学习率 (快速测试使用)")
+    parser.add_argument('--seed', type=int, default=42, help="随机种子（默认42）")
     
     args = parser.parse_args()
+
+    # 固定随机种子（Python/NumPy/Torch/cuDNN）
+    set_seed(args.seed)
+    print(f"[{args.model_name.upper()}] 🔒 Reproducibility seed fixed to {args.seed}")
 
     # Load optimal hyperparameters dynamically from json
     best_params_path = os.path.join(current_dir, 'config', 'best_params', f'{args.model_name}_best_params.json')
@@ -110,6 +132,8 @@ def main():
         'k_fold': args.k_fold,
         'patience': args.patience,
         'save_model': not args.no_save_model,
+        'save_fold_checkpoints': not args.no_save_fold_checkpoints,
+        'save_global_best': args.save_global_best,
         'model_save_path': save_path,
         'amp_enabled': False
     }
@@ -123,14 +147,20 @@ def main():
         kwargs=kwargs
     )
     
-    print(f"Start training {args.model_name.upper()}... Best model will be saved to => {save_path}")
+    print(f"Start training {args.model_name.upper()}...")
+    if not args.no_save_model:
+        print(f"  - 每折 checkpoint 保存: {'关闭' if args.no_save_fold_checkpoints else '开启'}")
+        print(f"  - 全局最优 checkpoint 保存: {'开启' if args.save_global_best else '关闭'}")
+        if args.save_global_best:
+            print(f"  - 全局最优保存路径 => {save_path}")
     fold_aucs = trainer.cross_validate(dataset, test_dataset=test_dataset)
     
     best_auc = max(fold_aucs) if fold_aucs else 0.0
     print(f"[{args.model_name.upper()}] Training finished. Max validation AUC: {best_auc:.4f}")
-    if os.path.exists(save_path):
+    if args.save_global_best and os.path.exists(save_path):
         print(f"✅ Successfully saved to {save_path}!")
 
-# python train_baseline.py --model_name dkt --dataset assist09_builder-sample_99% --epochs 200 --k_fold 1 --patience 10 --no_save_model
+# python train_baseline.py --model_name gikt_old --dataset assist012 --epochs 200 --k_fold 1 --patience 10 --batch_size 128
+# python train_baseline.py --model_name dkt --dataset assist09 --epochs 5 --k_fold 5 --patience 1 --batch_size 256 --save_global_best
 if __name__ == '__main__':
     main()
