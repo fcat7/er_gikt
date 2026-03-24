@@ -34,11 +34,11 @@ ABLATION_TARGETS = {
     #     "train.save_model=True"
     # ],
     # 实验名 : 要覆写（Override）的参数列表
-    # "A_Baseline": [
-    # ],
-    # "B_Remove_PID": [
-    #     "model.use_pid=False"
-    # ],
+    "A_Baseline": [
+    ],
+    "B_Remove_PID": [
+        "model.use_pid=False"
+    ],
     
     "C_Remove_Cognitive": [
         "model.use_cognitive_model=False"
@@ -101,6 +101,7 @@ def main():
     ensure_csv_initialized()
     parser = argparse.ArgumentParser(description="GIKT 消融实验运行脚本")
     parser.add_argument("--full", action="store_true", help="使用全量数据集 (覆盖 --full 标志)")
+    parser.add_argument("--save_global_best", action="store_true", help="透传给 train_test.py：额外保存全局最优 checkpoint")
     parser.add_argument("--nolog", action="store_true", help="禁用详细日志 (train.verbose=false)")
     parser.add_argument("--dataset_name", type=str, help="设置数据集名称 (train.dataset_name)")
     parser.add_argument("--epochs", type=int, help="强制指定实验轮数 (覆盖配置)")
@@ -178,6 +179,8 @@ def main():
         cmd = ["python", "train_test.py", "--name", BASE_CONFIG_NAME]
         if args.full:
             cmd.append("--full")
+        if args.save_global_best:
+            cmd.append("--save_global_best")
             
         # 加入消融专用标识，让 train_test.py 帮我们写 CSV
         cmd.extend(["--ablation_name", exp_name])
