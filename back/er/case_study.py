@@ -53,6 +53,8 @@ from matplotlib.font_manager import FontProperties
 # Ensure fonts for Chinese
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial']
 plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['ps.fonttype'] = 42
 
 # Set up paths
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,7 +65,7 @@ if _KT_DIR not in sys.path:
     sys.path.insert(0, _KT_DIR)
 
 from config import get_config, DEVICE
-from recommend_eval import RecDataLoader, get_exp_config_path
+from run_er_eval import RecDataLoader, get_exp_config_path
 from pso_recommend import RecommendationSystem, DiscreteMOPSO
 
 logger = logging.getLogger('case_study')

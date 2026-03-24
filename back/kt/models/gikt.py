@@ -72,9 +72,9 @@ class AutonomousCognitiveCell(Module):
         combined_gate = torch.cat((h_prev, input_data, surprise_vec), dim=1)
         
         z_t = torch.sigmoid(self.linear_z(combined_gate))
-        r_t = torch.sigmoid(self.linear_r(combined_gate))
+        k_t = torch.sigmoid(self.linear_r(combined_gate))
         
-        combined_candidate = torch.cat((r_t * h_prev, input_data, surprise_vec), dim=1)
+        combined_candidate = torch.cat((k_t * h_prev, input_data, surprise_vec), dim=1)
         h_tilde = torch.tanh(self.linear_h(combined_candidate))
         
         h_new = (1 - z_t) * h_prev + z_t * h_tilde
@@ -113,9 +113,9 @@ class CognitiveRNNCell(Module):
         combined_candidate = torch.cat((h_prev, input_data), dim=1)
         
         # 计算门控
-        # 保留门 (Retention Gate): 范围 [0, 1]，值越小忘得越多 (对应 LSTM 的 forget gate)
+        # 保留门 (Keep Gate): 范围 [0, 1]，值越小忘得越多 (对应 LSTM 的 forget gate)
         # 艾宾浩斯思想: interval 越大 -> retention 越小
-        r_t = torch.sigmoid(self.linear_forget(combined_forget))
+        k_t = torch.sigmoid(self.linear_forget(combined_forget))
         
         # 学习门: 范围 [0, 1]，值越大通过的新知识越多
         # 认知风格思想: 冲动型答错 -> learn 越小
@@ -126,17 +126,17 @@ class CognitiveRNNCell(Module):
         
         # 状态更新公式
         # h_new = (保留门 * 旧状态) + (学习门 * 新知识)
-        # h_new = r_t * h_prev + l_t * c_t # 原始方案：存在数值不稳定的风险（如果 r_t 和 l_t 都很大，状态会无限累积）
+        # h_new = k_t * h_prev + l_t * c_t # 原始方案：存在数值不稳定的风险（如果 k_t 和 l_t 都很大，状态会无限累积）
         # 和上面效果一致，进行归一化后上面公式：输入受控 + 增量受控 + 遗忘机制 ≈ 系统自然稳定
         # 但建议使用下面的方案，更加稳健
-        h_new = torch.tanh(r_t * h_prev + l_t * c_t) # 修改方案：加入 tanh 激活函数，将状态限制在 [-1, 1] 之间，避免数值不稳定
+        h_new = torch.tanh(k_t * h_prev + l_t * c_t) # 修改方案：加入 tanh 激活函数，将状态限制在 [-1, 1] 之间，避免数值不稳定
         
         return h_new, h_new # 返回两次是为了兼容 LSTM 接口
 # @add_fzq 2025-12-25 -------------------------------------------
 
 class GIKT(Module):
 
-    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='autonomous', data_dir=None, agg_method='gcn', recap_source='hssi', use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02, use_4pl_irt=True):
+    def __init__(self, num_question, num_skill, q_neighbors, s_neighbors, qs_table, agg_hops=3, emb_dim=100, dropout_linear=0.2, dropout_gnn=0.4, drop_edge_rate=0.0, feature_noise_scale=0.0, hard_recap=True, rank_k=10, pre_train=False, use_cognitive_model=False, cognitive_mode='classic', data_dir=None, agg_method='gcn', recap_source='hssi', use_pid=False, pid_mode='global', pid_ema_alpha=0.1, pid_lambda=1.0, pid_init_i=0.5, pid_init_d=0.1, guessing_prob_init=0.05, slipping_prob_init=0.02, use_4pl_irt=True):
         '''
         概述：这是一个名为GIKT的模型的初始化函数，用于设置模型的各个参数和层结构，包括问题数量、技能数量、邻居数量、聚合层数、嵌入维度、dropout率等，并定义了用于聚合、查询、键和权重计算的线性层。
 

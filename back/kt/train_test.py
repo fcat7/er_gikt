@@ -62,6 +62,9 @@ def get_parser():
     parser.add_argument('--name', type=str, default='default', help='Name of the experiment')
     parser.add_argument('--override', nargs='*', help='Override params, e.g. model.use_pid=False train.epochs=10')
     parser.add_argument('--ablation_name', type=str, default='', help='If set, logs result to ablation_summary.csv')
+    # 模型保存策略：默认保存每折最优；全局最优按需开启
+    parser.add_argument('--no_save_fold_checkpoints', action='store_true', help='启用则不保存每折最优 checkpoint')
+    parser.add_argument('--save_global_best', action='store_true', help='启用则额外保存全局最优 checkpoint（跨所有折按 Val AUC）')
     return parser
 
 def get_exp_config_path(isFull=False, name='default'):
@@ -242,6 +245,24 @@ if __name__ == '__main__':
     os.makedirs(chart_data_dir, exist_ok=True)
     os.makedirs(chart_img_dir, exist_ok=True)
     os.makedirs(runs_root, exist_ok=True)
+
+    # ---------------- 模型保存策略配置 ----------------
+    save_model_enabled = bool(params.train.save_model)
+    save_fold_checkpoints = save_model_enabled and (not args.no_save_fold_checkpoints)
+    save_global_best = save_model_enabled and bool(args.save_global_best)
+    os.makedirs(config.path.MODEL_DIR, exist_ok=True)
+    fold_ckpt_root = os.path.join(config.path.MODEL_DIR, f'{time_now}_folds')
+    if save_fold_checkpoints:
+        os.makedirs(fold_ckpt_root, exist_ok=True)
+    global_best_model_path = os.path.join(config.path.MODEL_DIR, f'{time_now}.pt')
+    global_best_val_auc = float('-inf')
+    global_best_fold = 0
+    # -------------------------------------------------
+
+    # 训练过程时间统计（用于与 baseline_summary 口径对齐）
+    total_train_time_sec = 0.0
+    total_val_time_sec = 0.0
+    total_test_time_sec = 0.0
     
     # 覆盖原有的 CHART_DIR 使得旧代码兼容
     config.path.CHART_DIR = chart_data_dir
@@ -253,6 +274,15 @@ if __name__ == '__main__':
     for fold, (train_indices, test_indices) in enumerate(splits):
         print('===================' + COLOR_LOG_Y + f'fold: {fold + 1} / {len(splits)}'+ COLOR_LOG_END + '====================')
         output_file.write('===================' + f'fold: {fold + 1} / {len(splits)}' + '====================\n')
+
+        # 每折计时统计
+        fold_train_time_sec = 0.0
+        fold_val_time_sec = 0.0
+        fold_test_time_sec = 0.0
+        fold_epochs_run = 0
+
+        # 每折 checkpoint 路径
+        fold_ckpt_path = os.path.join(fold_ckpt_root, f'{time_now}_fold{fold + 1}_best.pt')
         
         # Initialize Writers for fold 1
         if fold == 0:
@@ -518,6 +548,8 @@ if __name__ == '__main__':
                 eval_mask_filter_ratio = 0.0
             
             train_time = time.time() - train_start_time
+            fold_train_time_sec += train_time
+            total_train_time_sec += train_time
             
             # 验证集评估
             print('-------------------validate------------------')
@@ -624,10 +656,14 @@ if __name__ == '__main__':
             val_loss /= val_step if val_step > 0 else 1
             # val_acc = val_right / val_total if val_total > 0 else 0 (已由动态阈值替代)
             val_time = time.time() - val_start_time
+            fold_val_time_sec += val_time
+            total_val_time_sec += val_time
+            fold_epochs_run += 1
             
             # Logging & Recording
             # ---------------------
             run_time = train_time + val_time
+            is_best_epoch = False
             
             # Epoch 总结阶段
             train_avg_batch_time = train_time / train_step if train_step > 0 else 0.0
@@ -697,7 +733,13 @@ if __name__ == '__main__':
                 'val_loss': val_loss,
                 'val_auc': val_auc,
                 'val_acc': val_acc,
-                'time_sec': run_time
+                'train_time_sec': train_time,
+                'val_time_sec': val_time,
+                'epoch_time_sec': run_time,
+                'train_samples': int(train_total),
+                'val_samples': int(val_total.item() if torch.is_tensor(val_total) else val_total),
+                'learning_rate': current_lr,
+                'is_best_epoch': False,
             })
             
             if train_writer and val_writer:
@@ -723,6 +765,29 @@ if __name__ == '__main__':
                 fold_best_threshold = best_val_threshold
                 best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
+                is_best_epoch = True
+
+                # 回填 history：每折仅保留“最终最佳 epoch”一个 True
+                # 若当前出现更优，则将同折此前标记为 True 的记录回退为 False
+                for prev_idx in range(len(history_records) - 2, -1, -1):
+                    if history_records[prev_idx]['fold'] != (fold + 1):
+                        break
+                    if history_records[prev_idx].get('is_best_epoch', False):
+                        history_records[prev_idx]['is_best_epoch'] = False
+
+                # 标记当前 epoch 为该折最新最佳
+                history_records[-1]['is_best_epoch'] = True
+
+                # 保存当前折最优 checkpoint
+                if save_fold_checkpoints:
+                    torch.save(model.state_dict(), fold_ckpt_path)
+
+                # 可选保存全局最优 checkpoint（跨折）
+                if save_global_best and val_auc > global_best_val_auc:
+                    global_best_val_auc = val_auc
+                    global_best_fold = fold + 1
+                    torch.save(model.state_dict(), global_best_model_path)
+
                 print(COLOR_LOG_G + f'🎯 新的最佳验证AUC: {best_fold_val_auc:.4f} (提升 +{improvement:.4f})' + COLOR_LOG_END)
             else:
                 patience_counter += 1
@@ -745,6 +810,7 @@ if __name__ == '__main__':
         test_loss = 0
         test_step = 0
         if dataset_test_loader is not None:
+            fold_test_start_time = time.time()
             with torch.no_grad():
                 for data in dataset_test_loader:
                     features = {k: v.to(DEVICE) for k, v in data.items()}
@@ -782,6 +848,8 @@ if __name__ == '__main__':
                 best_fold_test_auc = roc_auc_score(test_targets, test_probs)
             best_fold_test_loss = test_loss / test_step if test_step > 0 else 0
             best_fold_test_acc = np.mean(np.array(test_targets) == (np.array(test_probs) >= fold_best_threshold))
+            fold_test_time_sec = time.time() - fold_test_start_time
+            total_test_time_sec += fold_test_time_sec
 
         print('\n' + '='*70)
         print(COLOR_LOG_G + f"✅ Fold {fold+1} 完成 | 最佳验证AUC: {best_fold_val_auc:.4f}" + COLOR_LOG_END)
@@ -799,6 +867,11 @@ if __name__ == '__main__':
             'test_auc': best_fold_test_auc,
             'test_acc': best_fold_test_acc,
             'test_loss': best_fold_test_loss,
+            'fold_train_time_sec': fold_train_time_sec,
+            'fold_val_time_sec': fold_val_time_sec,
+            'fold_test_time_sec': fold_test_time_sec,
+            'epochs_run': fold_epochs_run,
+            'fold_checkpoint_path': fold_ckpt_path if save_fold_checkpoints else '',
         })
         
     print('\n' + '='*70)
@@ -816,6 +889,12 @@ if __name__ == '__main__':
     output_file.write(f"CV Mean AUC (Holdout Test Set): {np.mean(fold_results_test_auc):.4f}\n")
     output_file.write(f"CV Mean ACC (Holdout Test Set): {np.mean(fold_results_test_acc):.4f}\n")
     output_file.write(f"CV Mean LOSS (Holdout Test Set): {np.mean(fold_results_test_loss):.4f}\n")
+
+    # 统计时间字段（与 baseline_summary 的时间口径尽量统一）
+    avg_epoch_train_time = float(np.mean([r['fold_train_time_sec'] / max(1, r['epochs_run']) for r in fold_result_records])) if fold_result_records else 0.0
+    avg_epoch_val_time = float(np.mean([r['fold_val_time_sec'] / max(1, r['epochs_run']) for r in fold_result_records])) if fold_result_records else 0.0
+    avg_epoch_total_time = avg_epoch_train_time + avg_epoch_val_time
+    avg_epoch_test_time = float(np.mean([r['fold_test_time_sec'] for r in fold_result_records])) if fold_result_records else 0.0
 
     # Normalize Averages
     if len(splits) > 0:
@@ -838,18 +917,39 @@ if __name__ == '__main__':
     if args.ablation_name:
         import csv
         csv_path = os.path.join(config.path.OUTPUT_DIR, 'run_ablation', 'ablation_summary.csv')
+        csv_path_v2 = os.path.join(config.path.OUTPUT_DIR, 'run_ablation', 'ablation_summary_v2.csv')
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
-        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+
+        expected_headers = [
+            'Ablation Group', 'Date', 'Dataset', 'K Fold',
+            'Fold Best Epochs', 'Fold Best Val AUCs', 'Fold Best Val ACCs', 'Fold Best Val LOSSes', 'Fold Best Thresholds',
+            'Fold Test AUCs', 'Fold Test ACCs', 'Fold Test LOSSes',
+            'Mean Test AUC', 'Std Test AUC', 'Mean Test ACC', 'Std Test ACC', 'Mean Test LOSS', 'Std Test LOSS',
+            'Max AUC (Fold)', 'Min AUC (Fold)',
+            'Avg Epoch Train Time', 'Avg Epoch Val Time', 'Avg Epoch Total Time', 'Avg Epoch Test Time',
+            'Total Train Time', 'Total Val Time', 'Total Test Time', 'Total Wall Time',
+            'Time', 'experiments_name'
+        ]
+
+        target_csv_path = csv_path
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            try:
+                with open(csv_path, 'r', newline='', encoding='utf-8') as rf:
+                    reader = csv.reader(rf)
+                    existing_headers = next(reader, [])
+                if existing_headers != expected_headers:
+                    # 旧版本表头不一致时，自动切换到 v2 文件，避免继续写“错列”
+                    target_csv_path = csv_path_v2
+                    print(COLOR_LOG_Y + f"⚠️ 检测到旧版 ablation_summary 表头，已自动改写到 {target_csv_path}" + COLOR_LOG_END)
+            except Exception as e:
+                target_csv_path = csv_path_v2
+                print(COLOR_LOG_Y + f"⚠️ 读取历史 ablation_summary 表头失败({e})，已自动改写到 {target_csv_path}" + COLOR_LOG_END)
+
+        file_exists = os.path.exists(target_csv_path) and os.path.getsize(target_csv_path) > 0
+        with open(target_csv_path, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow([
-                    'Ablation Group', 'Date', 'Dataset', 'K Fold',
-                    'Fold Best Epochs', 'Fold Best Val AUCs', 'Fold Best Val ACCs', 'Fold Best Val LOSSes', 'Fold Best Thresholds',
-                    'Fold Test AUCs', 'Fold Test ACCs', 'Fold Test LOSSes',
-                    'Mean Test AUC', 'Std Test AUC', 'Mean Test ACC', 'Std Test ACC', 'Mean Test LOSS', 'Std Test LOSS',
-                    'Max AUC (Fold)', 'Min AUC (Fold)', 'Time', 'experiments_name'
-                ])
+                writer.writerow(expected_headers)
             
             mean_auc = np.mean(fold_results_test_auc)
             std_auc = np.std(fold_results_test_auc)
@@ -889,16 +989,32 @@ if __name__ == '__main__':
                 f"{std_loss:.4f}",
                 f"{fold_results_test_auc[max_auc_idx]:.4f} (F{max_auc_idx+1})",
                 f"{fold_results_test_auc[min_auc_idx]:.4f} (F{min_auc_idx+1})",
+                f"{avg_epoch_train_time:.4f}",
+                f"{avg_epoch_val_time:.4f}",
+                f"{avg_epoch_total_time:.4f}",
+                f"{avg_epoch_test_time:.4f}",
+                f"{total_train_time_sec:.4f}",
+                f"{total_val_time_sec:.4f}",
+                f"{total_test_time_sec:.4f}",
+                f"{total_duration:.4f}",
                 time_str,
                 run_name
             ])
-        print(COLOR_LOG_Y + f"📝 消融结果已追加至 {csv_path}" + COLOR_LOG_END)
+        print(COLOR_LOG_Y + f"📝 消融结果已追加至 {target_csv_path}" + COLOR_LOG_END)
 
     # Save Data
-    # Optional: Save final model (from last fold, or logic to save best)
-    if params.train.save_model:
-        torch.save(model, f=f'{config.path.MODEL_DIR}/{time_now}.pt')
-        print(f'Model saved to {config.path.MODEL_DIR}/{time_now}.pt')
+    # 模型保存说明：
+    # 1) 每折最优：默认开启，目录为 {MODEL_DIR}/{time_now}_folds/
+    # 2) 全局最优：通过 --save_global_best 开启，路径为 {MODEL_DIR}/{time_now}.pt
+    # 3) 若两者都关闭且仍要求保存模型，则回退保存最后一折最终模型，避免“无模型可用”
+    if save_model_enabled and save_fold_checkpoints:
+        print(f'Fold checkpoints saved to {fold_ckpt_root}')
+    if save_model_enabled and save_global_best and os.path.exists(global_best_model_path):
+        print(f'Global best model saved to {global_best_model_path} (Fold {global_best_fold}, Val AUC={global_best_val_auc:.4f})')
+    if save_model_enabled and (not save_fold_checkpoints) and (not save_global_best):
+        fallback_path = os.path.join(config.path.MODEL_DIR, f'{time_now}_last_fold.pt')
+        torch.save(model, f=fallback_path)
+        print(f'Fallback model saved to {fallback_path}')
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_all.txt', y_label_all)
     np.savetxt(f'{config.path.CHART_DIR}/{time_now}_aver.txt', y_label_aver)
 
@@ -926,39 +1042,100 @@ if __name__ == '__main__':
         csv_path = os.path.join(chart_data_dir, csv_filename)
         df_history.to_csv(csv_path, index=False)
         print(f"📊 历史训练数据已保存至 {csv_path}")
-        
-        # Plotting
+
+        # Plotting: 拆分输出为“每折单独图 + 共享 epoch 聚合图（均值±标准差）”
         sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
         color_train = "#4DBBD5"
         color_val = "#E64B35"
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        
-        sns.lineplot(data=df_history, x='epoch', y='train_loss', label='Train Loss', color=color_train, ax=axes[0], errorbar='ci', n_boot=100)
-        sns.lineplot(data=df_history, x='epoch', y='val_loss', label='Val Loss', color=color_val, ax=axes[0], errorbar='ci', n_boot=100)
-        axes[0].set_title('Loss Curve (Mean & CI)')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].legend()
-        
-        sns.lineplot(data=df_history, x='epoch', y='train_auc', label='Train AUC', color=color_train, ax=axes[1], errorbar='ci', n_boot=100)
-        sns.lineplot(data=df_history, x='epoch', y='val_auc', label='Val AUC', color=color_val, ax=axes[1], errorbar='ci', n_boot=100)
-        axes[1].set_title('AUC Curve (Mean & CI)')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('AUC')
-        axes[1].legend()
-        
-        sns.lineplot(data=df_history, x='epoch', y='train_acc', label='Train ACC', color=color_train, ax=axes[2], errorbar='ci', n_boot=100)
-        sns.lineplot(data=df_history, x='epoch', y='val_acc', label='Val ACC', color=color_val, ax=axes[2], errorbar='ci', n_boot=100)
-        axes[2].set_title('Accuracy Curve (Mean & CI)')
-        axes[2].set_xlabel('Epoch')
-        axes[2].set_ylabel('Accuracy')
-        axes[2].legend()
-        
-        plt.tight_layout()
-        img_path = os.path.join(chart_img_dir, img_filename)
-        plt.savefig(img_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"📈 训练曲线图已保存至 {img_path}")
+
+        folds_img_dir = os.path.join(chart_img_dir, f"folds_{time_now}")
+        shared_img_dir = os.path.join(chart_img_dir, "shared")
+        os.makedirs(folds_img_dir, exist_ok=True)
+        os.makedirs(shared_img_dir, exist_ok=True)
+
+        def _plot_fold_panel(ax, fold_df, metric_train, metric_val, ylabel, title):
+            ax.plot(fold_df['epoch'], fold_df[metric_train], color=color_train, linewidth=2.0, label='Train')
+            ax.plot(fold_df['epoch'], fold_df[metric_val], color=color_val, linewidth=2.0, label='Val')
+            ax.set_title(title)
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(ylabel)
+            ax.legend(fontsize=8)
+
+        # 1) 每折单独图
+        fold_ids = sorted(df_history['fold'].unique())
+        for fold_id in fold_ids:
+            fold_df = df_history[df_history['fold'] == fold_id].copy()
+            if fold_df.empty:
+                continue
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            _plot_fold_panel(axes[0], fold_df, 'train_loss', 'val_loss', 'Loss', f'Fold {int(fold_id)} - Loss')
+            _plot_fold_panel(axes[1], fold_df, 'train_auc', 'val_auc', 'AUC', f'Fold {int(fold_id)} - AUC')
+            _plot_fold_panel(axes[2], fold_df, 'train_acc', 'val_acc', 'Accuracy', f'Fold {int(fold_id)} - Accuracy')
+            plt.tight_layout()
+
+            fold_img_path = os.path.join(
+                folds_img_dir,
+                f"gikt_{dataset_name}_fold{int(fold_id)}_metrics_{time_now}.png"
+            )
+            plt.savefig(fold_img_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        # 2) 共享 epoch 聚合图（仅统计所有折都存在的 epoch）
+        fold_max_epochs = df_history.groupby('fold')['epoch'].max()
+        shared_max_epoch = int(fold_max_epochs.min()) if len(fold_max_epochs) > 0 else 0
+        if shared_max_epoch > 0:
+            shared_df = df_history[df_history['epoch'] <= shared_max_epoch].copy()
+
+            def _agg_mean_std(metric_key):
+                grouped = shared_df.groupby('epoch')[metric_key].agg(['mean', 'std']).reset_index()
+                grouped['std'] = grouped['std'].fillna(0.0)
+                return grouped
+
+            def _plot_shared_panel(ax, metric_train, metric_val, ylabel, title):
+                g_train = _agg_mean_std(metric_train)
+                g_val = _agg_mean_std(metric_val)
+
+                ax.plot(g_train['epoch'], g_train['mean'], color=color_train, linewidth=2.2, label='Train Mean')
+                ax.fill_between(
+                    g_train['epoch'],
+                    g_train['mean'] - g_train['std'],
+                    g_train['mean'] + g_train['std'],
+                    color=color_train,
+                    alpha=0.18,
+                    label='Train ±1 STD',
+                )
+
+                ax.plot(g_val['epoch'], g_val['mean'], color=color_val, linewidth=2.2, label='Val Mean')
+                ax.fill_between(
+                    g_val['epoch'],
+                    g_val['mean'] - g_val['std'],
+                    g_val['mean'] + g_val['std'],
+                    color=color_val,
+                    alpha=0.18,
+                    label='Val ±1 STD',
+                )
+
+                ax.set_title(f"{title} (Shared Epochs: 1-{shared_max_epoch})")
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel(ylabel)
+                ax.legend(fontsize=8)
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            _plot_shared_panel(axes[0], 'train_loss', 'val_loss', 'Loss', 'Shared Loss')
+            _plot_shared_panel(axes[1], 'train_auc', 'val_auc', 'AUC', 'Shared AUC')
+            _plot_shared_panel(axes[2], 'train_acc', 'val_acc', 'Accuracy', 'Shared Accuracy')
+            plt.tight_layout()
+
+            shared_img_filename = img_filename.replace('_metrics_', '_shared_metrics_')
+            shared_img_path = os.path.join(shared_img_dir, shared_img_filename)
+            plt.savefig(shared_img_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"📈 共享聚合图已保存至 {shared_img_path}")
+        else:
+            print("⚠️ 未找到共享 epoch 区间，跳过共享聚合图输出")
+
+        print(f"📈 每折曲线图已保存至 {folds_img_dir}")
         print(f"📝 Tensorboard 目录: {runs_root}")
         
     except Exception as e:

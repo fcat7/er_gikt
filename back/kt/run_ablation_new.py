@@ -76,7 +76,10 @@ CSV_HEADERS = [
     'Fold Best Epochs', 'Fold Best Val AUCs', 'Fold Best Val ACCs', 'Fold Best Val LOSSes', 'Fold Best Thresholds',
     'Fold Test AUCs', 'Fold Test ACCs', 'Fold Test LOSSes',
     'Mean Test AUC', 'Std Test AUC', 'Mean Test ACC', 'Std Test ACC', 'Mean Test LOSS', 'Std Test LOSS',
-    'Max AUC (Fold)', 'Min AUC (Fold)', 'Time', 'experiments_name'
+    'Max AUC (Fold)', 'Min AUC (Fold)',
+    'Avg Epoch Train Time', 'Avg Epoch Val Time', 'Avg Epoch Total Time', 'Avg Epoch Test Time',
+    'Total Train Time', 'Total Val Time', 'Total Test Time', 'Total Wall Time',
+    'Time', 'experiments_name'
 ]
 
 def ensure_csv_initialized():

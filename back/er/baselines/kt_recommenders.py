@@ -53,38 +53,52 @@ class _KTGreedyBase:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
         self.n_question = int(metadata.get('metrics', {}).get('n_question', config.get('n_question', 0)))
+        self.n_skill = int(metadata.get('metrics', {}).get('n_skill', config.get('n_skill', 0)))
+        
         if self.n_question <= 1:
             raise ValueError('Invalid n_question in metadata/config')
 
+        # Load qs_table for mapping question -> first skill
+        data_dir = os.path.dirname(metadata_path)
+        qs_table_path = os.path.join(data_dir, 'qs_table.npz')
+        import scipy.sparse as sp
+        self.qs_table = sp.load_npz(qs_table_path).toarray()
+
         checkpoint = torch.load(kt_model_path, map_location=device)
-        self.model = self._build_model(self.n_question, checkpoint)
+        self.model = self._build_model(self.n_question, self.n_skill, checkpoint)
         self._safe_load_checkpoint(checkpoint)
         self.model.to(device)
         self.model.eval()
 
-    def _build_model(self, n_question: int, checkpoint: dict):
+    def _build_model(self, n_question: int, n_skill: int, checkpoint: dict):
         # 动态推断隐藏层参数，防止 state_dict 尺寸不匹配
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         if hasattr(checkpoint, 'state_dict'):
             state_dict = checkpoint.state_dict()
             
         if self.model_type == 'dkt':
-            # DKT: interaction_emb.weight -> [num_interaction, emb_dim]
+            # DKT: c_emb.weight -> [num_interaction, emb_dim] 或者 interaction_emb.weight
             emb_dim = 100
             for k, v in state_dict.items():
-                if 'interaction_emb.weight' in k:
+                if 'c_emb.weight' in k or 'interaction_emb.weight' in k:
                     emb_dim = v.shape[1]
                     break
-            return DKT(num_question=n_question, emb_dim=emb_dim)
+            return DKT(num_question=n_question, num_skill=n_skill, emb_dim=emb_dim)
             
         if self.model_type == 'dkvmn':
             # DKVMN: Mk -> [size_m, dim_s]
             dim_s, size_m = 50, 20
+            self.dkvmn_is_q_level = False
+            ckp_num_skill = n_skill
             for k, v in state_dict.items():
                 if 'Mk' in k:
                     size_m, dim_s = v.shape[0], v.shape[1]
-                    break
-            return DKVMN(num_question=n_question, dim_s=dim_s, size_m=size_m)
+                if 'k_c_emb.weight' in k:
+                    # 如果 checkpoint 的 emb size 接近 n_question，说明模型是在题级别训练的
+                    if v.shape[0] > n_skill + 50:
+                        ckp_num_skill = v.shape[0] - 10
+                        self.dkvmn_is_q_level = True
+            return DKVMN(num_question=n_question, num_skill=ckp_num_skill, dim_s=dim_s, size_m=size_m)
             
         raise ValueError(f'Unsupported model type: {self.model_type}')
 
@@ -100,21 +114,47 @@ class _KTGreedyBase:
             return
         raise ValueError('Unsupported checkpoint format for KT baseline model')
 
+    def _map_q_to_s(self, q_tensor: torch.Tensor) -> torch.Tensor:
+        """Map question tensor to their primary skill using qs_table"""
+        q_np = q_tensor.cpu().numpy()
+        # qs_table shape: [n_question, n_skill]
+        # argmax returns the first index where value is max.
+        # Since qs_table is binary, it returns the first valid skill index,
+        # or 0 if it's padding / no skill.
+        s_np = np.argmax(self.qs_table[q_np], axis=-1)
+        return torch.tensor(s_np, dtype=torch.long, device=q_tensor.device)
+
     def _predict_all_probs(self, history_q: torch.Tensor, history_r: torch.Tensor, history_mask: torch.Tensor) -> np.ndarray:
         with torch.no_grad():
+            
+            history_s = self._map_q_to_s(history_q)
+            
             if self.model_type == 'dkt':
-                x = history_q + self.model.num_question * history_r
-                input_emb = self.model.interaction_emb(x)
+                x = history_s + self.model.num_skill * history_r
+                # 适配修改过的 DKT: DKT 使用的是 c_emb 而不是 interaction_emb
+                input_emb = self.model.c_emb(x)
                 h, _ = self.model.lstm_layer(input_emb)
                 h = self.model.dropout_layer(h)
-                y_logits = self.model.out_layer(h)       # [B, L, Q]
-                last_logits = y_logits[:, -1, :]         # [B, Q]
-                probs = torch.sigmoid(last_logits).squeeze(0)
+                y_logits = self.model.out_layer(h)       # [B, L, num_skill]
+                last_logits = y_logits[:, -1, :]         # [B, num_skill]
+                probs_skill = torch.sigmoid(last_logits).squeeze(0) # [num_skill]
+                
+                # Broaden skill probs to question probs
+                all_q_idx = torch.arange(self.n_question, device=history_q.device)
+                all_s_idx = self._map_q_to_s(all_q_idx)
+                probs = probs_skill[all_s_idx]
+                
             else:  # dkvmn
+                if getattr(self, 'dkvmn_is_q_level', False):
+                    eval_s = history_q
+                else:
+                    eval_s = history_s
+
                 batch_size = history_q.shape[0]
-                x = history_q + self.model.num_question * history_r
-                k = self.model.k_emb_layer(history_q)
-                v = self.model.v_emb_layer(x)
+                x = eval_s + self.model.num_skill * history_r
+                # 适配修改过的 DKVMN: 使用 k_c_emb 和 v_c_emb
+                k = self.model.k_c_emb(eval_s)
+                v = self.model.v_c_emb(x)
 
                 Mvt = self.model.Mv0.unsqueeze(0).repeat(batch_size, 1, 1)
                 e = torch.sigmoid(self.model.e_layer(v))
@@ -130,7 +170,8 @@ class _KTGreedyBase:
                     Mvt = torch.where(mt == 1, Mvt_next, Mvt)
 
                 all_q_idx = torch.arange(self.n_question, device=history_q.device)
-                k_all = self.model.k_emb_layer(all_q_idx)
+                all_s_idx = self._map_q_to_s(all_q_idx)
+                k_all = self.model.k_c_emb(all_s_idx)
                 w_all = torch.softmax(torch.matmul(k_all, self.model.Mk.T), dim=-1)
                 read_content = (w_all.unsqueeze(-1) * Mvt.squeeze(0)).sum(-2)
                 f = torch.tanh(self.model.f_layer(torch.cat([read_content, k_all], dim=-1)))

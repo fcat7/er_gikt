@@ -9,6 +9,8 @@ def set_style():
     # 支持中文显示，同时指定英文使用 Times New Roman 会更美观
     plt.rcParams['font.family'] = ['Times New Roman', 'SimHei', 'Microsoft YaHei', 'sans-serif']
     plt.rcParams['axes.unicode_minus'] = False
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['ps.fonttype'] = 42
     try:
         plt.rcParams['text.usetex'] = False
     except:
@@ -195,8 +197,9 @@ def plot_radar_chart(df, output_dir):
 
 if __name__ == "__main__":
     set_style()
-    # csv_path = r"output/recommendation_full/recommend_eval_full_all.bak-论文当前用图"
-    csv_path = r"output/ablation_er/ablation_eval_full.bak-论文当前用图"
+    # csv_path = r"output/recommendation_full/recommend_eval_full_all.bak-论文当前用图.csv"
+    csv_path = r"output/recommendation_full/recommend_eval_full_all_MERGED.csv"
+    # csv_path = r"output/ablation_er/ablation_eval_full.bak-论文当前用图.csv"
     if not os.path.exists(csv_path):
         import glob
         files = glob.glob(r"output/recommendation_*/recommend_eval_*.csv")
