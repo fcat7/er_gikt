@@ -37,6 +37,10 @@ class BaseTrainer:
         self.reg_4pl = kwargs.get('reg_4pl', 1e-5)
         self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
         self.verbose_batch = kwargs.get('verbose_batch', False)  # 是否打印每个 batch 的耗时
+        # 模型保存策略：默认保存每折最优；全局最优默认不保存（可通过参数开启）
+        self.save_model = kwargs.get('save_model', True)
+        self.save_fold_checkpoints = kwargs.get('save_fold_checkpoints', True)
+        self.save_global_best = kwargs.get('save_global_best', False)
         
         self.criterion = nn.BCEWithLogitsLoss()
         
@@ -52,6 +56,9 @@ class BaseTrainer:
         self.logger.info(f"  Patience: {self.patience}")
         self.logger.info(f"  K-Fold: {self.k_fold}")
         self.logger.info(f"  Optimization: AMP={self.kwargs.get('amp_enabled', True)}")
+        self.logger.info(f"  Save Model: {self.save_model}")
+        self.logger.info(f"  Save Fold Checkpoints: {self.save_fold_checkpoints}")
+        self.logger.info(f"  Save Global Best: {self.save_global_best}")
         self.logger.info(f"=====================================")
 
     def _setup_logger(self):
@@ -225,7 +232,7 @@ class BaseTrainer:
                 except ValueError:
                     pass # Handled single class exception cases mostly in very tiny batches
 
-        return epoch_loss, train_auc, train_acc
+        return epoch_loss, train_auc, train_acc, total_samples
 
     def _evaluate(self, model, dataloader, use_amp, epoch_idx=None):
         model.eval()
@@ -297,7 +304,7 @@ class BaseTrainer:
                     self.logger.info(f"[Eval] Epoch {epoch_idx} | Batch {batch_idx+1}/{len(dataloader)} | Time: {batch_time:.3f}s")
         
         if not all_preds:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0
         
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         all_targets = np.array(all_targets)
@@ -305,13 +312,73 @@ class BaseTrainer:
         
         auc = metrics.roc_auc_score(all_targets, all_preds)
         acc = metrics.accuracy_score(all_targets, [1 if p >= 0.5 else 0 for p in all_preds])
-        return auc, acc, avg_loss
+        return auc, acc, avg_loss, total_samples
+
+    @staticmethod
+    def _format_fold_records(fold_result_records, key, value_format):
+        formatted = []
+        for record in fold_result_records:
+            value = record.get(key, '')
+            if isinstance(value, (int, np.integer)):
+                value_str = f"{int(value)}"
+            elif isinstance(value, (float, np.floating)):
+                value_str = format(float(value), value_format)
+            else:
+                value_str = str(value)
+            formatted.append(f"F{record['fold']}:{value_str}")
+        return '; '.join(formatted)
+
+    def _append_baseline_summary(self, summary_path, summary_row):
+        import csv
+
+        summary_headers = [
+            'Date',
+            'Task Name',
+            'Model',
+            'Dataset',
+            'K Fold',
+            'Run Name',
+            'History CSV',
+            'Fold Best Epochs',
+            'Fold Best Val AUCs',
+            'Fold Best Val ACCs',
+            'Fold Best Val LOSSes',
+            'Fold Test AUCs',
+            'Fold Test ACCs',
+            'Fold Test LOSSes',
+            'Mean Test AUC',
+            'Std Test AUC',
+            'Mean Test ACC',
+            'Std Test ACC',
+            'Mean Test LOSS',
+            'Std Test LOSS',
+            'Max AUC (Fold)',
+            'Min AUC (Fold)',
+            'Avg Epoch Train Time',
+            'Avg Epoch Val Time',
+            'Avg Epoch Total Time',
+            'Avg Epoch Test Time',
+            'Total Train Time',
+            'Total Val Time',
+            'Total Test Time',
+            'Total Wall Time',
+        ]
+
+        os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+        file_exists = os.path.exists(summary_path) and os.path.getsize(summary_path) > 0
+
+        with open(summary_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=summary_headers)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(summary_row)
 
     def cross_validate(self, dataset, test_dataset=None):
         """
         执行 K-Fold 交叉验证
         返回: 各折在验证集上的最佳 AUC 列表
         """
+        cv_start_time = time.time()
         groups = getattr(dataset, 'groups', None)
         
         if groups is not None:
@@ -328,6 +395,7 @@ class BaseTrainer:
             splits = list(k_fold.split(dataset))
 
         fold_aucs = []
+        fold_result_records = []
         
         # History dict for storing metrics for dataframe conversion
         history_records = []
@@ -338,10 +406,33 @@ class BaseTrainer:
             base_out_dir = self.config.path.OUTPUT_DIR # type: ignore
         except AttributeError:
             base_out_dir = './output'
-        runs_root = os.path.join(base_out_dir, self.task_name, "runs", f"{self.model_name}_{self.dataset_name}_{time_now}")
+        run_name = f"{self.model_name}_{self.dataset_name}_{time_now}"
+        runs_root = os.path.join(base_out_dir, self.task_name, "runs", run_name)
+
+        # 解析 checkpoint 保存路径，并准备“每折保存目录”
+        model_save_path = self.kwargs.get('model_save_path') if self.save_model else None
+        save_dir = ""
+        save_stem = ""
+        fold_ckpt_root = ""
+        if model_save_path:
+            save_dir = os.path.dirname(model_save_path) or '.'
+            save_file = os.path.basename(model_save_path)
+            save_stem, _ = os.path.splitext(save_file)
+            fold_ckpt_root = os.path.join(save_dir, f"{save_stem}_folds")
+            if self.save_fold_checkpoints:
+                os.makedirs(fold_ckpt_root, exist_ok=True)
+
+        # 全局最优（跨所有折、按验证集 AUC）
+        global_best_val_auc = float('-inf')
+        global_best_fold = 0
 
         for fold, (train_indices, val_indices) in enumerate(splits):
             self.logger.info(f"--- Fold {fold + 1}/{len(splits)} ---")
+
+            # 当前折最优 checkpoint 路径
+            fold_best_ckpt_path = ""
+            if self.save_model and self.save_fold_checkpoints and fold_ckpt_root:
+                fold_best_ckpt_path = os.path.join(fold_ckpt_root, f"{save_stem}_fold{fold + 1}_best.pt")
             
             train_set = Subset(dataset, train_indices)
             val_set = Subset(dataset, val_indices)
@@ -375,8 +466,18 @@ class BaseTrainer:
                 scaler = DummyScaler()
             
             best_val_auc = 0.0
+            best_val_acc = 0.0
+            best_val_loss = float('inf')
+            best_epoch = 0
             patience_counter = 0
             best_state_dict_cpu = None
+            fold_train_time_sec = 0.0
+            fold_val_time_sec = 0.0
+            fold_test_time_sec = 0.0
+            epochs_run = 0
+            best_fold_test_auc = 0.0
+            best_fold_test_acc = 0.0
+            best_fold_test_loss = 0.0
             
             if fold == 0:
                 train_writer = SummaryWriter(log_dir=os.path.join(runs_root, "fold_1", "train"))
@@ -386,10 +487,21 @@ class BaseTrainer:
                 val_writer = None
 
             for epoch in range(self.epochs):
-                start_time = time.time()
-                train_loss, train_auc, train_acc = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1, tb_writer=train_writer)
-                val_auc, val_acc, val_loss = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
-                end_time = time.time()
+                train_start_time = time.time()
+                train_loss, train_auc, train_acc, train_samples = self._train_epoch(model, train_loader, optimizer, scaler, use_amp, epoch_idx=epoch+1, tb_writer=train_writer)
+                train_time_sec = time.time() - train_start_time
+
+                val_start_time = time.time()
+                val_auc, val_acc, val_loss, val_samples = self._evaluate(model, val_loader, use_amp, epoch_idx=epoch+1)
+                val_time_sec = time.time() - val_start_time
+                epoch_time_sec = train_time_sec + val_time_sec
+
+                fold_train_time_sec += train_time_sec
+                fold_val_time_sec += val_time_sec
+                epochs_run += 1
+
+                current_lr = optimizer.param_groups[0]['lr']
+                is_best_epoch = False
 
                 # Write to TensorBoard
                 if train_writer and val_writer:
@@ -402,10 +514,52 @@ class BaseTrainer:
                     val_writer.add_scalar('Performance/ACC', val_acc, epoch)
                     
                     try:
-                        current_lr = optimizer.param_groups[0]['lr']
                         train_writer.add_scalar('Optimization/Learning_Rate', current_lr, epoch)
                     except:
                         pass
+                
+                vram_info = ""
+                if torch.cuda.is_available():
+                    # 显示最大已分配(Allocated)和最大已保留(Reserved)对显存的使用情况
+                    vram_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    vram_res_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
+                    vram_info = f" | VRAM: {vram_alloc_gb:.2f}G (Res: {vram_res_gb:.2f}G)"
+
+                self.logger.info(
+                    f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | "
+                    f"train: {train_time_sec:.2f}s | val: {val_time_sec:.2f}s | total: {epoch_time_sec:.2f}s{vram_info}"
+                )
+
+                if val_auc > best_val_auc:
+                    best_val_auc = val_auc
+                    best_val_acc = val_acc
+                    best_val_loss = val_loss
+                    best_epoch = epoch + 1
+                    is_best_epoch = True
+                    patience_counter = 0
+                    # Keep an in-memory copy of best weights on CPU for robust test-time loading.
+                    # This avoids potential Windows file I/O edge cases during torch.load.
+                    try:
+                        with torch.no_grad():
+                            best_state_dict_cpu = {
+                                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                            }
+                    except Exception as e:
+                        self.logger.warning(f"Failed to snapshot best state_dict to CPU: {e}")
+                    # 保存策略：每折最优 + 可选全局最优
+                    if self.save_model:
+                        # 1) 保存当前折最优 checkpoint
+                        if self.save_fold_checkpoints and fold_best_ckpt_path:
+                            torch.save(model.state_dict(), fold_best_ckpt_path)
+
+                        # 2) 可选：保存全局最优 checkpoint（跨折）
+                        if self.save_global_best and model_save_path and val_auc > global_best_val_auc:
+                            global_best_val_auc = val_auc
+                            global_best_fold = fold + 1
+                            torch.save(model.state_dict(), model_save_path)
+                else:
+                    patience_counter += 1
 
                 # Append to history
                 history_records.append({
@@ -417,34 +571,22 @@ class BaseTrainer:
                     'val_loss': val_loss,
                     'val_auc': val_auc,
                     'val_acc': val_acc,
-                    'time_sec': end_time - start_time
+                    'train_time_sec': train_time_sec,
+                    'val_time_sec': val_time_sec,
+                    'epoch_time_sec': epoch_time_sec,
+                    'train_samples': train_samples,
+                    'val_samples': val_samples,
+                    'learning_rate': current_lr,
+                    'is_best_epoch': is_best_epoch,
                 })
-                
-                vram_info = ""
-                if torch.cuda.is_available():
-                    # 显示最大已分配(Allocated)和最大已保留(Reserved)对显存的使用情况
-                    vram_alloc_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-                    vram_res_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
-                    vram_info = f" | VRAM: {vram_alloc_gb:.2f}G (Res: {vram_res_gb:.2f}G)"
 
-                self.logger.info(f"Epoch {epoch+1:02d} | Train Loss: {train_loss:.4f} | Train AUC: {train_auc:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | time: {end_time - start_time:.2f}s{vram_info}")
-
-                if val_auc > best_val_auc:
-                    best_val_auc = val_auc
-                    patience_counter = 0
-                    # Keep an in-memory copy of best weights on CPU for robust test-time loading.
-                    # This avoids potential Windows file I/O edge cases during torch.load.
-                    try:
-                        with torch.no_grad():
-                            best_state_dict_cpu = {
-                                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
-                            }
-                    except Exception as e:
-                        self.logger.warning(f"Failed to snapshot best state_dict to CPU: {e}")
-                    if self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
-                        torch.save(model.state_dict(), self.kwargs.get('model_save_path'))
-                else:
-                    patience_counter += 1
+                # 语义修正：每折仅保留“最终最佳 epoch”一个 True
+                if is_best_epoch:
+                    for prev_idx in range(len(history_records) - 2, -1, -1):
+                        if history_records[prev_idx]['fold'] != (fold + 1):
+                            break
+                        if history_records[prev_idx].get('is_best_epoch', False):
+                            history_records[prev_idx]['is_best_epoch'] = False
                     
                 if patience_counter >= self.patience:
                     self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
@@ -462,18 +604,30 @@ class BaseTrainer:
                         model.load_state_dict(best_state_dict_cpu)
                     except Exception as e:
                         self.logger.error(f"Failed to load in-memory best state_dict: {e}")
-                elif self.kwargs.get('save_model') and self.kwargs.get('model_save_path'):
-                    best_model_path = self.kwargs.get('model_save_path')
-                    if best_model_path and os.path.exists(best_model_path):
-                        self.logger.info(f"Loading best model for fold {fold+1} test evaluation (torch.load from disk)...")
-                        try:
-                            state_dict = torch.load(best_model_path, map_location=self.device)
-                            if isinstance(state_dict, torch.nn.Module):
-                                model = state_dict
-                            else:
-                                model.load_state_dict(state_dict)
-                        except Exception as e:
-                            self.logger.error(f"Failed to torch.load best model from disk: {e}")
+                elif self.save_model:
+                    # 若内存快照不存在，则优先从“当前折最优文件”回读；其次尝试“全局最优文件”
+                    best_model_candidates = []
+                    if fold_best_ckpt_path:
+                        best_model_candidates.append(fold_best_ckpt_path)
+                    if model_save_path:
+                        best_model_candidates.append(model_save_path)
+
+                    loaded_from_disk = False
+                    for best_model_path in best_model_candidates:
+                        if best_model_path and os.path.exists(best_model_path):
+                            self.logger.info(f"Loading best model for fold {fold+1} test evaluation (torch.load from disk): {best_model_path}")
+                            try:
+                                state_dict = torch.load(best_model_path, map_location=self.device)
+                                if isinstance(state_dict, torch.nn.Module):
+                                    model = state_dict
+                                else:
+                                    model.load_state_dict(state_dict)
+                                loaded_from_disk = True
+                                break
+                            except Exception as e:
+                                self.logger.error(f"Failed to torch.load best model from disk ({best_model_path}): {e}")
+                    if not loaded_from_disk:
+                        self.logger.warning(f"Fold {fold+1} has no available checkpoint on disk for fallback loading.")
 
                 # Best-effort memory cleanup before long test evaluation.
                 gc.collect()
@@ -481,25 +635,126 @@ class BaseTrainer:
                     torch.cuda.empty_cache()
 
                 test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False)
-                test_auc, test_acc, _ = self._evaluate(model, test_loader, use_amp)
-                self.logger.info(f"Fold {fold + 1} Test ACC: {test_acc:.4f} | Test AUC: {test_auc:.4f}\n")
+                test_start_time = time.time()
+                test_auc, test_acc, test_loss, _ = self._evaluate(model, test_loader, use_amp)
+                fold_test_time_sec = time.time() - test_start_time
+                best_fold_test_auc = test_auc
+                best_fold_test_acc = test_acc
+                best_fold_test_loss = test_loss
+                self.logger.info(
+                    f"Fold {fold + 1} Test ACC: {test_acc:.4f} | Test AUC: {test_auc:.4f} | "
+                    f"Test Loss: {test_loss:.4f} | Test Time: {fold_test_time_sec:.2f}s\n"
+                )
             else:
                 self.logger.info("\n")
                 
             fold_aucs.append(best_val_auc)
+            fold_result_records.append({
+                'fold': fold + 1,
+                'best_epoch': best_epoch,
+                'best_val_auc': best_val_auc,
+                'best_val_acc': best_val_acc,
+                'best_val_loss': best_val_loss,
+                'test_auc': best_fold_test_auc,
+                'test_acc': best_fold_test_acc,
+                'test_loss': best_fold_test_loss,
+                'fold_train_time_sec': fold_train_time_sec,
+                'fold_val_time_sec': fold_val_time_sec,
+                'fold_test_time_sec': fold_test_time_sec,
+                'epochs_run': epochs_run,
+            })
             
         # Save history to CSV and Plot
+        history_csv_path = ""
         try:
             import pandas as pd
             df_history = pd.DataFrame(history_records)
+            task_root_dir = os.path.join(base_out_dir, self.task_name)
             chart_data_dir = os.path.join(base_out_dir, self.task_name, "chart_data")
             chart_img_dir = os.path.join(base_out_dir, self.task_name, "chart")
             os.makedirs(chart_data_dir, exist_ok=True)
             os.makedirs(chart_img_dir, exist_ok=True)
 
-            csv_path = os.path.join(chart_data_dir, f"{self.model_name}_{self.dataset_name}_history_{time_now}.csv")
-            df_history.to_csv(csv_path, index=False)
-            self.logger.info(f"Training history saved to {csv_path}")
+            history_csv_path = os.path.join(chart_data_dir, f"{self.model_name}_{self.dataset_name}_history_{time_now}.csv")
+            df_history.to_csv(history_csv_path, index=False)
+            self.logger.info(f"Training history saved to {history_csv_path}")
+
+            test_aucs = [record['test_auc'] for record in fold_result_records]
+            test_accs = [record['test_acc'] for record in fold_result_records]
+            test_losses = [record['test_loss'] for record in fold_result_records]
+            total_train_time = sum(record['fold_train_time_sec'] for record in fold_result_records)
+            total_val_time = sum(record['fold_val_time_sec'] for record in fold_result_records)
+            total_test_time = sum(record['fold_test_time_sec'] for record in fold_result_records)
+            total_wall_time = time.time() - cv_start_time
+
+            avg_epoch_train_time = float(df_history['train_time_sec'].mean()) if not df_history.empty else 0.0
+            avg_epoch_val_time = float(df_history['val_time_sec'].mean()) if not df_history.empty else 0.0
+            avg_epoch_total_time = float(df_history['epoch_time_sec'].mean()) if not df_history.empty else 0.0
+            # 说明：测试阶段通常每折仅执行一次，此处取“每折测试耗时均值”作为 Avg Epoch Test Time
+            avg_epoch_test_time = float(total_test_time / len(fold_result_records)) if fold_result_records else 0.0
+
+            mean_test_auc = float(np.mean(test_aucs)) if test_aucs else 0.0
+            std_test_auc = float(np.std(test_aucs)) if test_aucs else 0.0
+            mean_test_acc = float(np.mean(test_accs)) if test_accs else 0.0
+            std_test_acc = float(np.std(test_accs)) if test_accs else 0.0
+            mean_test_loss = float(np.mean(test_losses)) if test_losses else 0.0
+            std_test_loss = float(np.std(test_losses)) if test_losses else 0.0
+
+            max_auc_text = ""
+            min_auc_text = ""
+            if test_aucs:
+                max_auc_idx = int(np.argmax(test_aucs))
+                min_auc_idx = int(np.argmin(test_aucs))
+                max_auc_text = f"{test_aucs[max_auc_idx]:.4f} (F{fold_result_records[max_auc_idx]['fold']})"
+                min_auc_text = f"{test_aucs[min_auc_idx]:.4f} (F{fold_result_records[min_auc_idx]['fold']})"
+
+            summary_path = os.path.join(task_root_dir, 'baseline_summary.csv')
+            summary_row = {
+                'Date': time_now,
+                'Task Name': self.task_name,
+                'Model': self.model_name,
+                'Dataset': self.dataset_name,
+                'K Fold': len(splits),
+                'Run Name': run_name,
+                'History CSV': history_csv_path,
+                'Fold Best Epochs': self._format_fold_records(fold_result_records, 'best_epoch', 'd'),
+                'Fold Best Val AUCs': self._format_fold_records(fold_result_records, 'best_val_auc', '.4f'),
+                'Fold Best Val ACCs': self._format_fold_records(fold_result_records, 'best_val_acc', '.4f'),
+                'Fold Best Val LOSSes': self._format_fold_records(fold_result_records, 'best_val_loss', '.4f'),
+                'Fold Test AUCs': self._format_fold_records(fold_result_records, 'test_auc', '.4f'),
+                'Fold Test ACCs': self._format_fold_records(fold_result_records, 'test_acc', '.4f'),
+                'Fold Test LOSSes': self._format_fold_records(fold_result_records, 'test_loss', '.4f'),
+                'Mean Test AUC': f"{mean_test_auc:.4f}",
+                'Std Test AUC': f"{std_test_auc:.4f}",
+                'Mean Test ACC': f"{mean_test_acc:.4f}",
+                'Std Test ACC': f"{std_test_acc:.4f}",
+                'Mean Test LOSS': f"{mean_test_loss:.4f}",
+                'Std Test LOSS': f"{std_test_loss:.4f}",
+                'Max AUC (Fold)': max_auc_text,
+                'Min AUC (Fold)': min_auc_text,
+                'Avg Epoch Train Time': f"{avg_epoch_train_time:.4f}",
+                'Avg Epoch Val Time': f"{avg_epoch_val_time:.4f}",
+                'Avg Epoch Total Time': f"{avg_epoch_total_time:.4f}",
+                'Avg Epoch Test Time': f"{avg_epoch_test_time:.4f}",
+                'Total Train Time': f"{total_train_time:.4f}",
+                'Total Val Time': f"{total_val_time:.4f}",
+                'Total Test Time': f"{total_test_time:.4f}",
+                'Total Wall Time': f"{total_wall_time:.4f}",
+            }
+            self._append_baseline_summary(summary_path, summary_row)
+            self.logger.info(f"Baseline summary appended to {summary_path}")
+
+            # 输出 checkpoint 保存结果，便于后续评估脚本批量读取
+            if self.save_model and self.save_fold_checkpoints and fold_ckpt_root:
+                self.logger.info(f"Fold checkpoints saved under: {fold_ckpt_root}")
+            if self.save_model and self.save_global_best and model_save_path and os.path.exists(model_save_path):
+                if global_best_fold > 0 and global_best_val_auc > float('-inf'):
+                    self.logger.info(
+                        f"Global best checkpoint saved: {model_save_path} "
+                        f"(Fold {global_best_fold}, Best Val AUC={global_best_val_auc:.4f})"
+                    )
+                else:
+                    self.logger.info(f"Global best checkpoint saved: {model_save_path}")
             
             # Write TB Hparams
             avg_val_auc = sum(fold_aucs) / len(fold_aucs) if fold_aucs else 0.0
@@ -525,47 +780,113 @@ class BaseTrainer:
         return fold_aucs
 
     def _plot_training_history(self, df, save_dir, timestamp):
-        """绘制学术级训练历史图: 均值曲线及阴影置信区间"""
+        """绘制训练历史图：每折单独图 + 共享 epoch 聚合图（均值±标准差）"""
         try:
             import matplotlib.pyplot as plt
             import seaborn as sns
+            import pandas as pd
 
             # 设置学术风的主题
             sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
             color_train = "#4DBBD5"  # 宁静蓝
             color_val = "#E64B35"    # 高光红
 
+            if df is None or len(df) == 0:
+                self.logger.warning("History dataframe is empty. Skip plotting training history.")
+                return
+
+            # 目录结构：folds/ 下存每折图；shared/ 下存聚合图
+            folds_dir = os.path.join(save_dir, f"{self.model_name}_{self.dataset_name}_folds_{timestamp}")
+            shared_dir = os.path.join(save_dir, "shared")
+            os.makedirs(folds_dir, exist_ok=True)
+            os.makedirs(shared_dir, exist_ok=True)
+
+            def _plot_fold_panel(ax, fold_df: pd.DataFrame, metric_train: str, metric_val: str, ylabel: str, title: str):
+                ax.plot(fold_df['epoch'], fold_df[metric_train], color=color_train, linewidth=2.0, label='Train')
+                ax.plot(fold_df['epoch'], fold_df[metric_val], color=color_val, linewidth=2.0, label='Val')
+                ax.set_title(title)
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel(ylabel)
+                ax.legend(fontsize=8)
+
+            # 1) 输出每折单独图
+            fold_ids = sorted(df['fold'].unique())
+            for fold_id in fold_ids:
+                fold_df = df[df['fold'] == fold_id].copy()
+                if fold_df.empty:
+                    continue
+
+                fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+                _plot_fold_panel(axes[0], fold_df, 'train_loss', 'val_loss', 'Loss', f'Fold {fold_id} - Loss')
+                _plot_fold_panel(axes[1], fold_df, 'train_auc', 'val_auc', 'AUC', f'Fold {fold_id} - AUC')
+                _plot_fold_panel(axes[2], fold_df, 'train_acc', 'val_acc', 'Accuracy', f'Fold {fold_id} - Accuracy')
+                plt.tight_layout()
+
+                fold_img_path = os.path.join(
+                    folds_dir,
+                    f"{self.model_name}_{self.dataset_name}_fold{int(fold_id)}_metrics_{timestamp}.png"
+                )
+                plt.savefig(fold_img_path, dpi=300, bbox_inches='tight')
+                plt.close()
+
+            # 2) 输出共享 epoch 聚合图（均值±标准差）
+            fold_max_epochs = df.groupby('fold')['epoch'].max()
+            shared_max_epoch = int(fold_max_epochs.min()) if len(fold_max_epochs) > 0 else 0
+            if shared_max_epoch <= 0:
+                self.logger.warning("No shared epochs found across folds. Skip shared plot.")
+                return
+
+            shared_df = df[df['epoch'] <= shared_max_epoch].copy()
+
+            def _agg_mean_std(dataframe: pd.DataFrame, metric_key: str):
+                grouped = dataframe.groupby('epoch')[metric_key].agg(['mean', 'std']).reset_index()
+                grouped['std'] = grouped['std'].fillna(0.0)
+                return grouped
+
+            def _plot_shared_panel(ax, metric_train: str, metric_val: str, ylabel: str, title: str):
+                g_train = _agg_mean_std(shared_df, metric_train)
+                g_val = _agg_mean_std(shared_df, metric_val)
+
+                ax.plot(g_train['epoch'], g_train['mean'], color=color_train, linewidth=2.2, label='Train Mean')
+                ax.fill_between(
+                    g_train['epoch'],
+                    g_train['mean'] - g_train['std'],
+                    g_train['mean'] + g_train['std'],
+                    color=color_train,
+                    alpha=0.18,
+                    label='Train ±1 STD',
+                )
+
+                ax.plot(g_val['epoch'], g_val['mean'], color=color_val, linewidth=2.2, label='Val Mean')
+                ax.fill_between(
+                    g_val['epoch'],
+                    g_val['mean'] - g_val['std'],
+                    g_val['mean'] + g_val['std'],
+                    color=color_val,
+                    alpha=0.18,
+                    label='Val ±1 STD',
+                )
+
+                ax.set_title(f"{title} (Shared Epochs: 1-{shared_max_epoch})")
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel(ylabel)
+                ax.legend(fontsize=8)
+
             fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-            # 1. Loss Plot
-            sns.lineplot(data=df, x='epoch', y='train_loss', label='Train Loss', color=color_train, ax=axes[0], errorbar='ci', n_boot=100)
-            sns.lineplot(data=df, x='epoch', y='val_loss', label='Val Loss', color=color_val, ax=axes[0], errorbar='ci', n_boot=100)
-            axes[0].set_title(f'Loss Curve (5-Fold Mean & 95% CI)')
-            axes[0].set_xlabel('Epoch')
-            axes[0].set_ylabel('Loss')
-            axes[0].legend()
-
-            # 2. AUC Plot
-            sns.lineplot(data=df, x='epoch', y='train_auc', label='Train AUC', color=color_train, ax=axes[1], errorbar='ci', n_boot=100)
-            sns.lineplot(data=df, x='epoch', y='val_auc', label='Val AUC', color=color_val, ax=axes[1], errorbar='ci', n_boot=100)
-            axes[1].set_title(f'AUC Curve (5-Fold Mean & 95% CI)')
-            axes[1].set_xlabel('Epoch')
-            axes[1].set_ylabel('AUC')
-            axes[1].legend()
-            
-            # 3. ACC Plot
-            sns.lineplot(data=df, x='epoch', y='train_acc', label='Train ACC', color=color_train, ax=axes[2], errorbar='ci', n_boot=100)
-            sns.lineplot(data=df, x='epoch', y='val_acc', label='Val ACC', color=color_val, ax=axes[2], errorbar='ci', n_boot=100)
-            axes[2].set_title(f'Accuracy Curve (5-Fold Mean & 95% CI)')
-            axes[2].set_xlabel('Epoch')
-            axes[2].set_ylabel('Accuracy')
-            axes[2].legend()
-
+            _plot_shared_panel(axes[0], 'train_loss', 'val_loss', 'Loss', 'Shared Loss')
+            _plot_shared_panel(axes[1], 'train_auc', 'val_auc', 'AUC', 'Shared AUC')
+            _plot_shared_panel(axes[2], 'train_acc', 'val_acc', 'Accuracy', 'Shared Accuracy')
             plt.tight_layout()
-            img_path = os.path.join(save_dir, f"{self.model_name}_{self.dataset_name}_metrics_{timestamp}.png")
-            plt.savefig(img_path, dpi=300, bbox_inches='tight')
+
+            shared_img_path = os.path.join(
+                shared_dir,
+                f"{self.model_name}_{self.dataset_name}_shared_metrics_{timestamp}.png"
+            )
+            plt.savefig(shared_img_path, dpi=300, bbox_inches='tight')
             plt.close()
-            self.logger.info(f"Journal-quality training plots saved to {img_path}")
+
+            self.logger.info(f"Fold plots saved under {folds_dir}")
+            self.logger.info(f"Shared plot saved to {shared_img_path}")
         except ModuleNotFoundError:
             self.logger.warning("Seaborn module not found. Please `pip install seaborn` for journal quality plots.")
         except Exception as e:
