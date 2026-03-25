@@ -2,139 +2,314 @@
 # -*- coding: utf-8 -*-
 
 """
-模型冷启动（序列长度分桶）测试评价脚本
-用于第三章实验分析：探讨图结构对短序列（冷启动）的兜底鲁棒性
-python test_evaluate_cold_start.py --auto --checkpoint_dir "H:\er_gikt\back\kt\checkpoint-min20" --data_dir H:\er_gikt\back\kt\data\bak
+模型冷启动（序列长度分桶）测试评价脚本（V2）
+
+升级点（对齐 test_evaluate.py）：
+1) 路径与模型加载更稳健：严格按评估 JSON 清单加载。
+2) 评估口径统一：固定协议、eval_mask、生效 batch 统计、AMP 开关可控。
+3) 输出增强：CSV 记录时间、吞吐、分桶样本/用户与 AUC，支持增量去重。
 """
 
-import os
-import sys
+import argparse
+import datetime
 import json
-import torch
+import os
+import random
+import sys
+import time
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-from sklearn import metrics
-import argparse
-from collections import defaultdict
-import datetime
-from torch.utils.data import DataLoader
 import toml
+import torch
+from sklearn import metrics
+from torch.utils.data import DataLoader
 
-# 确保能导入内部模块
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
 
 from config import get_config
 from dataset import UnifiedParquetDataset, SeqFeatureKey
 from models.factory import ModelFactory
-def get_available_checkpoints(checkpoint_dir=None):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    if checkpoint_dir is None:
-        checkpoint_dir = os.path.join(current_dir, 'checkpoint')
-    available_combos = []
-    known_models = [
-        'deep_irt', 'simplekt', 'gikt_old',
-        'dkvmn', 'qikt', 'gikt', 'dkt', 'akt'
-    ]
-    if os.path.exists(checkpoint_dir):
-        for f in os.listdir(checkpoint_dir):
-            if f.endswith('_best.pt'):
-                prefix = f.replace('_best.pt', '')
-                matched_model = None
-                for m in sorted(known_models, key=len, reverse=True):
-                    if prefix.startswith(m + '_'):
-                        matched_model = m
-                        break
-                if matched_model:
-                    dataset = prefix[len(matched_model)+1:]
-                    available_combos.append((matched_model, dataset))
-    return available_combos
 
-# ==========================================
-# 专家推荐的序列长度划分 (Cold-Start Bins)
-# ==========================================
-# 1. 极端冷启动 (3-10): 交互极少，传统RNN/Transformer模型极易崩溃。
-# 2. 中度冷启动 (11-30): 具备部分历史，但仍不足以精准刻画。
-# 3. 常规长度 (31-100): 数据相对丰富，模型性能通常在这个区间达到平台期。
-# 4. 丰富序列 (>100): 充分交互数据。
+
+KNOWN_MODEL_PREFIXES = [
+    'deep_irt', 'simplekt', 'gikt_old', 'dkvmn', 'qikt', 'gikt', 'dkt', 'akt', 'lbkt'
+]
+BASELINE_MODELS = {'dkt', 'dkvmn', 'akt', 'simplekt', 'deep_irt', 'qikt', 'lbkt'}
+GIKT_MODELS = {'gikt', 'gikt_old'}
+
+DISPLAY_NAME_MAP = {
+    'dkt': 'DKT', 'dkvmn': 'DKVMN', 'akt': 'AKT', 'simplekt': 'SimpleKT',
+    'deep_irt': 'Deep-IRT', 'qikt': 'QIKT', 'lbkt': 'LBKT', 'gikt_old': 'GIKT', 'gikt': 'FA-GIKT'
+}
+
+ABLATION_OVERRIDES = {
+    'A_Baseline': {},
+    'B_Remove_PID': {'use_pid': False},
+    'C_Remove_Cognitive': {'use_cognitive_model': False},
+    'D_Remove_IRT': {'use_4pl_irt': False},
+    'E_agg_method-kk_gat': {'agg_method': 'kk_gat'},
+    'F_old_gikt': {'use_pid': False, 'use_cognitive_model': False, 'use_4pl_irt': False},
+    'G_remove_PID_Cognitive': {'use_pid': False, 'use_cognitive_model': False},
+    'H_remove_PID_IRT': {'use_pid': False, 'use_4pl_irt': False},
+    'I_remove_Cognitive_IRT': {'use_cognitive_model': False, 'use_4pl_irt': False},
+}
+
 BINS = [
-    (3, 10, "3-10 (Extreme Cold)"),
-    (11, 30, "11-30 (Moderate Cold)"),
-    (31, 100, "31-100 (Normal)"),
-    (101, float('inf'), ">100 (Data Rich)")
+    (3, 10, '3-10 (Extreme Cold)', 'bin_3_10'),
+    (11, 30, '11-30 (Moderate Cold)', 'bin_11_30'),
+    (31, 100, '31-100 (Normal)', 'bin_31_100'),
+    (101, float('inf'), '>100 (Data Rich)', 'bin_100p'),
 ]
 
 
-def resolve_processed_data_dir(data_dir, dataset_name):
-    """解析实际的数据目录。
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='冷启动(按序列长度分桶)统一评估脚本 V2')
+    parser.add_argument('--config', type=str, default=os.path.join(CURRENT_DIR, 'config', 'evaluation', 'unified_acc_reeval_models.json'), help='评估清单 JSON 路径')
+    parser.add_argument('--dataset', type=str, default='', help='仅评估指定数据集')
+    parser.add_argument('--model_name', type=str, default='', help='仅评估指定模型')
+    parser.add_argument('--ablation_group', type=str, default='', help='仅评估指定消融组（FA-GIKT）')
+    parser.add_argument('--family', type=str, choices=['all', 'baseline', 'gikt'], default='all', help='模型家族过滤')
+    parser.add_argument('--batch_size', type=int, default=128, help='测试批大小')
+    parser.add_argument('--num_workers', type=int, default=0, help='DataLoader num_workers')
+    parser.add_argument('--use_amp', action='store_true', help='测试时启用 AMP（仅 CUDA 生效）')
+    parser.add_argument('--output', type=str, default='', help='输出文件名或路径；默认自动追加时间戳，避免覆盖')
+    parser.add_argument('--force', action='store_true', help='强制覆盖（不跳过已有记录）')
+    parser.add_argument('--data_dir', type=str, default=None, help='处理后数据目录（root 或 dataset 目录）')
+    parser.add_argument('--seed', type=int, default=42, help='评估随机种子')
+    parser.add_argument('--shard_index', type=int, default=0, help='并行分片编号（从 0 开始）')
+    parser.add_argument('--num_shards', type=int, default=1, help='总分片数')
+    return parser.parse_args()
 
-    支持两种传参方式：
-    1. 传入数据根目录，如 H:\\er_gikt\\back\\kt\\data\\bak
-       -> 自动拼接为 H:\\...\\bak\\<dataset_name>
-    2. 直接传入某个数据集目录，如 H:\\...\\bak\\assist09-min20
-       -> 直接使用该目录
-    """
+
+def set_global_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, 'cudnn'):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def normalize_dataset_name(name: str) -> str:
+    return name.lower().replace('2009', '09').replace('2012', '12').replace('2015', '15').replace('2017', '17')
+
+
+def resolve_path(base_dir: str, path_str: str) -> str:
+    if os.path.isabs(path_str):
+        return os.path.normpath(path_str)
+    return os.path.normpath(os.path.join(base_dir, path_str))
+
+
+def resolve_output_path(output_arg: str) -> str:
+    if not output_arg:
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_arg = f'cold_start_results_v2_{ts}.csv'
+    out = output_arg if os.path.isabs(output_arg) else os.path.join(CURRENT_DIR, 'output', output_arg)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    return out
+
+
+def load_json(path: str) -> dict:
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def resolve_processed_data_dir(data_dir: Optional[str], dataset_name: str) -> Optional[str]:
     if not data_dir:
         return None
-
     data_dir = os.path.abspath(data_dir)
     direct_metadata = os.path.join(data_dir, 'metadata.json')
     nested_dir = os.path.join(data_dir, dataset_name)
     nested_metadata = os.path.join(nested_dir, 'metadata.json')
-
     if os.path.exists(direct_metadata):
         return data_dir
     if os.path.exists(nested_metadata):
         return nested_dir
-
-    # 即使 metadata 还不存在，也优先按“root/dataset_name”语义兜底
     if os.path.basename(data_dir).lower() == dataset_name.lower():
         return data_dir
     return nested_dir
 
-def calculate_auc(targets, preds):
-    """单独计算 AUC 且防报错处理"""
-    if len(preds) < 2 or len(set(targets)) < 2:
-        return 0.0
-    targets = np.array(targets)
-    preds = np.array(preds)
-    return metrics.roc_auc_score(targets, preds)
 
-def evaluate_cold_start(model, dataloader, device, use_amp=True):
-    """按序列长度分桶验证循环"""
+def get_metadata(processed_data_dir: str) -> Tuple[int, int]:
+    metadata_path = os.path.join(processed_data_dir, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f'Metadata file not found: {metadata_path}')
+    with open(metadata_path, 'r', encoding='utf-8') as f:
+        meta = json.load(f)
+    return int(meta['metrics'].get('n_question', 0)), int(meta['metrics'].get('n_skill', 0))
+
+
+def select_best_params(model_name: str, dataset_name: str) -> Dict:
+    best_params_path = os.path.join(CURRENT_DIR, 'config', 'best_params', f'{model_name}_best_params.json')
+    if not os.path.exists(best_params_path):
+        return {}
+    with open(best_params_path, 'r', encoding='utf-8') as f:
+        best_params_dict = json.load(f)
+    ds_name = dataset_name.lower()
+    base_ds_name = ds_name.split('-')[0]
+    matched_key = None
+    for key in best_params_dict.keys():
+        if key == 'default':
+            continue
+        key_norm = normalize_dataset_name(key)
+        if key_norm == base_ds_name or key_norm in base_ds_name:
+            matched_key = key
+            break
+    return dict(best_params_dict.get(matched_key, best_params_dict.get('default', {})))
+
+
+def safe_torch_load(path: str, device: torch.device):
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def parse_model_dataset_from_checkpoint_name(filename: str) -> Tuple[Optional[str], Optional[str]]:
+    name = os.path.basename(filename)
+    if name.endswith('.pt'):
+        name = name[:-3]
+    for suffix in ['_best', '_last_fold', '_global_best']:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    matched_model = None
+    for model_name in sorted(KNOWN_MODEL_PREFIXES, key=len, reverse=True):
+        if name.startswith(model_name + '_'):
+            matched_model = model_name
+            break
+    if matched_model is None:
+        return None, None
+    dataset_name = name[len(matched_model) + 1:]
+    return (matched_model, dataset_name) if dataset_name else (None, None)
+
+
+def parse_baseline_filename_from_config(filename: str) -> Tuple[Optional[str], Optional[str]]:
+    name = os.path.basename(filename)
+    if name.endswith('.pt'):
+        name = name[:-3]
+
+    matched_model = None
+    for model_name in sorted(KNOWN_MODEL_PREFIXES, key=len, reverse=True):
+        if name.startswith(model_name + '_'):
+            matched_model = model_name
+            break
+    if matched_model is None:
+        return None, None
+
+    suffix = name[len(matched_model) + 1:]
+    if '_best_' in suffix:
+        dataset = suffix.split('_best_', 1)[0]
+    elif suffix.endswith('_best'):
+        dataset = suffix[:-5]
+    else:
+        dataset = suffix
+    return matched_model, dataset
+
+
+def should_keep_by_family(model_name: str, family: str) -> bool:
+    m = model_name.lower()
+    if family == 'all':
+        return True
+    if family == 'baseline':
+        return m in BASELINE_MODELS
+    if family == 'gikt':
+        return m in GIKT_MODELS
+    return True
+
+
+def should_keep_by_shard(item_index: int, shard_index: int, num_shards: int) -> bool:
+    return True if num_shards <= 1 else (item_index % num_shards == shard_index)
+
+
+def calculate_auc(targets: List[float], preds: List[float]) -> float:
+    if len(preds) < 2 or len(set(targets)) < 2:
+        return float('nan')
+    return float(metrics.roc_auc_score(np.array(targets), np.array(preds)))
+
+
+def build_test_loader(config, batch_size: int, num_workers: int) -> DataLoader:
+    test_dataset = UnifiedParquetDataset(config, augment=False, mode='test')
+    return DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available())
+
+
+def instantiate_model(model_name: str, dataset_name: str, checkpoint_path: str, device: torch.device, data_dir: Optional[str] = None, ablation_group: str = ''):
+    config = get_config(dataset_name)
+    if data_dir:
+        resolved_data_dir = resolve_processed_data_dir(data_dir, dataset_name)
+        config.path.PROCESSED_DATA_ROOT = os.path.dirname(resolved_data_dir)
+        config.DATASET_NAME = os.path.basename(resolved_data_dir)
+    num_question, num_skill = get_metadata(config.PROCESSED_DATA_DIR)
+    kwargs = select_best_params(model_name.lower(), dataset_name)
+    if model_name.lower() in {'gikt', 'gikt_old'}:
+        exp_config_path = os.path.join(CURRENT_DIR, 'config', 'experiments', 'exp_full_default.toml')
+        if os.path.exists(exp_config_path):
+            gikt_config = toml.load(exp_config_path)
+            if 'model' in gikt_config and isinstance(gikt_config['model'], dict):
+                merged = dict(gikt_config['model'])
+                merged.update(kwargs)
+                kwargs = merged
+        if ablation_group:
+            kwargs.update(ABLATION_OVERRIDES.get(ablation_group, {}))
+        if data_dir:
+            kwargs['data_dir'] = config.PROCESSED_DATA_DIR
+    loaded_obj = safe_torch_load(checkpoint_path, device)
+    load_info = {'checkpoint_kind': type(loaded_obj).__name__, 'missing_keys_count': 0, 'unexpected_keys_count': 0}
+    if isinstance(loaded_obj, torch.nn.Module):
+        model = loaded_obj.to(device)
+    else:
+        model = ModelFactory.get_model(model_name=model_name, num_question=num_question, num_skill=num_skill, device=device, config=config, **kwargs)
+        clean_state_dict = {(k[7:] if k.startswith('module.') else k): v for k, v in loaded_obj.items()}
+        incompatible = model.load_state_dict(clean_state_dict, strict=False)
+        load_info['missing_keys_count'] = len(getattr(incompatible, 'missing_keys', []))
+        load_info['unexpected_keys_count'] = len(getattr(incompatible, 'unexpected_keys', []))
+    model.model_name = model_name.lower()
+    return model, config, load_info
+
+
+def evaluate_cold_start(model, dataloader: DataLoader, device: torch.device, use_amp: bool = False) -> Dict:
     model.eval()
-    
-    bin_preds = {b_label: [] for _, _, b_label in BINS}
-    bin_targets = {b_label: [] for _, _, b_label in BINS}
-    bin_counts = {b_label: 0 for _, _, b_label in BINS}
-    
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
+    amp_enabled = bool(use_amp and device.type == 'cuda')
+    bin_preds = {b_label: [] for _, _, b_label, _ in BINS}
+    bin_targets = {b_label: [] for _, _, b_label, _ in BINS}
+    bin_user_counts = {b_label: 0 for _, _, b_label, _ in BINS}
+    total_batches = 0
+    effective_batches = 0
+    invalid_prob_count = 0
+
+    with torch.inference_mode():
+        for batch in dataloader:
+            total_batches += 1
             features = {k: v.to(device) for k, v in batch.items()}
             question = features[SeqFeatureKey.Q].to(torch.long)
+            skill = features.get(SeqFeatureKey.C, torch.zeros_like(question)).to(torch.long)
             response = features[SeqFeatureKey.R].to(torch.long)
             mask = features[SeqFeatureKey.MASK].to(torch.bool)
             eval_mask = features.get(SeqFeatureKey.EVAL_MASK, mask).to(torch.bool)
-            interval = features[SeqFeatureKey.T_INTERVAL].to(torch.float32)
-            r_time = features[SeqFeatureKey.T_RESPONSE].to(torch.float32)
-            
-            interval = torch.nan_to_num(interval, nan=0.0)
-            r_time = torch.nan_to_num(r_time, nan=0.0)
-
-            model_name = getattr(model, 'model_name', getattr(model, '_get_name', lambda: '')()).lower()
+            interval = torch.nan_to_num(features[SeqFeatureKey.T_INTERVAL].to(torch.float32), nan=0.0)
+            r_time = torch.nan_to_num(features[SeqFeatureKey.T_RESPONSE].to(torch.float32), nan=0.0)
+            model_name = getattr(model, 'model_name', '').lower()
             cognitive_mode = getattr(model, 'cognitive_mode', None)
-            
-            if not model_name or model_name == 'module':
-                model_name = model.__class__.__name__.lower()
 
-            with torch.amp.autocast(device_type='cuda', enabled=use_amp):
-                if model_name == 'dkt' or 'dkt' in model_name and 'lbkt' not in model_name:
-                    y_hat = model(question, response, mask)
+            with torch.amp.autocast(device_type='cuda', enabled=amp_enabled):
+                if model_name == 'dkt':
+                    y_hat = model(question, response, mask, skill=skill)
                     preds = torch.sigmoid(y_hat[:, :-1])
-                    preds = torch.nan_to_num(preds, nan=0.0)
-                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'lbkt']:
-                    y_hat = model(question, response, mask, interval, r_time)
+                elif model_name in ['dkvmn', 'akt', 'simplekt', 'qikt', 'deep_irt', 'lbkt', 'gkt']:
+                    try:
+                        y_hat = model(question, response, mask, interval, r_time, skill=skill)
+                    except TypeError:
+                        y_hat = model(question, response, mask, interval, r_time)
                     y_hat = torch.sigmoid(y_hat)
-                    preds = y_hat[:, :-1] if y_hat.shape[1] == question.shape[1] else y_hat
+                    preds = y_hat if y_hat.shape[1] != question.shape[1] else y_hat[:, :-1]
                 elif model_name in ['gikt', 'gikt_old'] or cognitive_mode == 'classic':
                     y_hat = model(question, response, mask, interval, r_time)
                     y_hat = torch.sigmoid(y_hat)
@@ -142,217 +317,337 @@ def evaluate_cold_start(model, dataloader, device, use_amp=True):
                 else:
                     try:
                         y_hat = model(question, response, mask, interval, r_time)
-                    except:
+                    except TypeError:
                         y_hat = model(question, response, mask)
                     y_hat = torch.sigmoid(y_hat)
-                    preds = y_hat[:, :-1] if y_hat.shape[1] == question.shape[1] else y_hat
+                    preds = y_hat[:, 1:] if y_hat.shape[1] == question.shape[1] else y_hat
 
             targets = response[:, 1:].float()
             mask_valid = mask[:, 1:]
             eval_mask_valid = eval_mask[:, 1:]
-            
-            # 按 Batch 里的每条学生序列拆解
-            current_batch_size = question.shape[0]
-            for i in range(current_batch_size):
-                # 利用原始 mask (包含起始位) 计算此学生的真实序列交互长度
-                actual_len = mask[i].sum().item()
-                
-                # 寻找匹配的区间
+            batch_effective = False
+
+            for i in range(question.shape[0]):
+                actual_len = int(mask[i].sum().item())
                 matched_label = None
-                for b_min, b_max, b_label in BINS:
+                for b_min, b_max, b_label, _ in BINS:
                     if b_min <= actual_len <= b_max:
                         matched_label = b_label
                         break
-                
                 if matched_label is None:
                     continue
-                    
                 student_final_mask = mask_valid[i] & eval_mask_valid[i]
-                if student_final_mask.sum() > 0:
-                    p = preds[i][student_final_mask].cpu().numpy()
-                    t = targets[i][student_final_mask].cpu().numpy()
-                    
-                    if not (np.isnan(p).any() or np.isinf(p).any()):
-                        bin_preds[matched_label].extend(p)
-                        bin_targets[matched_label].extend(t)
-                        bin_counts[matched_label] += 1
+                if student_final_mask.sum() <= 0:
+                    continue
+                p = preds[i][student_final_mask]
+                t = targets[i][student_final_mask]
+                finite_mask = torch.isfinite(p) & torch.isfinite(t)
+                if finite_mask.sum() <= 0:
+                    invalid_prob_count += int(p.numel())
+                    continue
+                p_np = p[finite_mask].detach().cpu().numpy()
+                t_np = t[finite_mask].detach().cpu().numpy()
+                invalid_prob_count += int((~finite_mask).sum().item())
+                bin_preds[matched_label].extend(p_np.tolist())
+                bin_targets[matched_label].extend(t_np.tolist())
+                bin_user_counts[matched_label] += 1
+                batch_effective = True
 
-    # 计算各区间的 AUC
+            if batch_effective:
+                effective_batches += 1
+
     results = {}
-    for _, _, b_label in BINS:
+    total_samples = 0
+    total_users = 0
+    weighted_auc_num = 0.0
+    for _, _, b_label, b_key in BINS:
         auc_val = calculate_auc(bin_targets[b_label], bin_preds[b_label])
-        results[b_label] = {
-            'auc': auc_val,
-            'samples': len(bin_targets[b_label]),
-            'users': bin_counts[b_label]
-        }
-    return results
+        samples = len(bin_targets[b_label])
+        users = int(bin_user_counts[b_label])
+        total_samples += samples
+        total_users += users
+        if samples > 0 and not np.isnan(auc_val):
+            weighted_auc_num += auc_val * samples
+        results[b_key] = {'label': b_label, 'auc': auc_val, 'samples': samples, 'users': users}
+    weighted_auc = weighted_auc_num / total_samples if total_samples > 0 else float('nan')
 
-def test_cold_start_and_report(tasks, batch_size=128, result_csv="cold_start_results.csv", force=False, checkpoint_dir=None, data_dir=None):
+    return {
+        'bins': results,
+        'total_samples': int(total_samples),
+        'total_users': int(total_users),
+        'weighted_auc': float(weighted_auc) if not np.isnan(weighted_auc) else np.nan,
+        'total_batches': int(total_batches),
+        'effective_batches': int(effective_batches),
+        'invalid_prob_count': int(invalid_prob_count),
+    }
+
+
+def get_device_name(device: torch.device) -> str:
+    if device.type == 'cuda' and torch.cuda.is_available():
+        try:
+            return torch.cuda.get_device_name(device)
+        except Exception:
+            return 'cuda'
+    return 'cpu'
+
+
+def summarize_row(row: Dict):
+    print(
+        f"[Done] {row['model']}@{row['dataset']} | "
+        f"samples={row['total_samples']} users={row['total_users']} | "
+        f"load={row['load_time_sec']:.3f}s eval={row['eval_time_sec']:.3f}s total={row['total_time_sec']:.3f}s | "
+        f"throughput={row['samples_per_sec']:.2f} samples/s | "
+        f"per_sample_eval={row['eval_time_per_sample_ms']:.6f} ms"
+    )
+
+
+def to_float_or_nan(v):
+    try:
+        return float(v)
+    except Exception:
+        return np.nan
+
+
+def build_tasks_from_config(args: argparse.Namespace) -> List[Dict[str, str]]:
+    config_path = resolve_path(CURRENT_DIR, args.config)
+    config_data = load_json(config_path)
+    base_dir = os.path.dirname(config_path)
+
+    baseline_root = resolve_path(base_dir, config_data.get('baseline_root', 'checkpoint'))
+    fa_gikt_root = resolve_path(base_dir, config_data.get('fa_gikt_root', 'checkpoint'))
+
+    tasks = []
+
+    for ckpt_name in config_data.get('baseline_files', []):
+        model_name, dataset_name = parse_baseline_filename_from_config(ckpt_name)
+        if not model_name or not dataset_name:
+            continue
+        tasks.append({
+            'model': model_name.lower(),
+            'dataset': dataset_name.lower(),
+            'checkpoint_path': os.path.join(baseline_root, ckpt_name),
+            'checkpoint_source': 'json_baseline_files',
+            'ablation_group': '',
+        })
+
+    for run in config_data.get('fa_gikt_runs', []):
+        dataset_name = str(run.get('dataset', '')).lower()
+        model_name = str(run.get('model_name', ''))
+        ablation_group = str(run.get('ablation_group', ''))
+        if not dataset_name or not model_name:
+            continue
+        if not model_name.endswith('.pt'):
+            model_name = f'{model_name}.pt'
+        tasks.append({
+            'model': 'gikt',
+            'dataset': dataset_name,
+            'checkpoint_path': os.path.join(fa_gikt_root, model_name),
+            'checkpoint_source': 'json_fa_gikt_runs',
+            'ablation_group': ablation_group,
+        })
+
+    uniq = []
+    seen = set()
+    for t in tasks:
+        key = (t['model'], t['dataset'], t['checkpoint_path'])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(t)
+    return uniq
+
+
+def test_cold_start_and_report(tasks: List[Dict[str, str]], args: argparse.Namespace):
+    if args.num_shards < 1:
+        raise ValueError('--num_shards 必须 >= 1')
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise ValueError('--shard_index 必须满足 0 <= shard_index < num_shards')
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🔥 开始切入第三章冷启动实验。使用设备: {device}")
-    
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    results = []
-    
-    output_path = os.path.join(current_dir, 'output', result_csv)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+    device_name = get_device_name(device)
+    print(f'🔥 冷启动评估启动，设备: {device} ({device_name})')
+    output_path = resolve_output_path(args.output)
+
     existing_records = set()
-    if os.path.exists(output_path) and not force:
+    if os.path.exists(output_path) and not args.force:
         try:
             df_old = pd.read_csv(output_path)
             for _, row in df_old.iterrows():
-                existing_records.add((str(row.get('Dataset', '')).lower(), str(row.get('Model', '')).lower()))
+                existing_records.add((
+                    str(row.get('dataset', '')).lower(),
+                    str(row.get('model', '')).lower(),
+                    str(row.get('checkpoint_path', '')).lower(),
+                ))
         except Exception:
             pass
 
-    tasks_by_dataset = defaultdict(list)
-    for t in tasks:
-        if t['model'] not in tasks_by_dataset[t['dataset']]:
-            tasks_by_dataset[t['dataset']].append(t['model'])
+    filtered_tasks = []
+    for idx, t in enumerate(tasks):
+        m, d = t['model'].lower(), t['dataset'].lower()
+        if args.dataset and d != args.dataset.lower():
+            continue
+        if args.model_name and m != args.model_name.lower():
+            continue
+        if args.ablation_group and str(t.get('ablation_group', '')) != args.ablation_group:
+            continue
+        if not should_keep_by_family(m, args.family):
+            continue
+        if not should_keep_by_shard(idx, args.shard_index, args.num_shards):
+            continue
+        filtered_tasks.append(t)
 
-    for dataset_name, models_to_test in tasks_by_dataset.items():
-        print(f"\n{'='*60}")
-        print(f"📦 测试集: {dataset_name} (自动解析序列长度)")
-        print(f"{'='*60}")
-        
+    if not filtered_tasks:
+        print('[WARN] 过滤后无可执行任务。')
+        return
+
+    tasks_by_dataset = defaultdict(list)
+    for t in filtered_tasks:
+        tasks_by_dataset[t['dataset']].append(t)
+
+    new_rows = []
+    script_start_time = time.perf_counter()
+
+    for dataset_name, task_list in tasks_by_dataset.items():
+        print('\n' + '=' * 72)
+        print(f'📦 数据集: {dataset_name}')
+        print('=' * 72)
+
         try:
             config = get_config(dataset_name)
-            if data_dir:
-                resolved_data_dir = resolve_processed_data_dir(data_dir, dataset_name)
+            if args.data_dir:
+                resolved_data_dir = resolve_processed_data_dir(args.data_dir, dataset_name)
                 config.path.PROCESSED_DATA_ROOT = os.path.dirname(resolved_data_dir)
                 config.DATASET_NAME = os.path.basename(resolved_data_dir)
-                print(f"📁 强制覆盖数据目录: {config.PROCESSED_DATA_DIR}")
+                print(f'📁 覆盖数据目录: {config.PROCESSED_DATA_DIR}')
             metadata_path = os.path.join(config.PROCESSED_DATA_DIR, 'metadata.json')
             with open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
+            test_loader = build_test_loader(config, args.batch_size, args.num_workers)
+            metadata_n_question = int(metadata.get('metrics', {}).get('n_question', 0))
+            metadata_n_skill = int(metadata.get('metrics', {}).get('n_skill', 0))
         except Exception as e:
-            print(f"❌ 加载配置文件或 metadata 失败: {e}")
+            print(f'❌ 初始化数据集失败: {e}')
             continue
-            
-        num_q = metadata['metrics']['n_question']
-        num_c = metadata['metrics']['n_skill']
-        test_loader = None
 
-        for model_name in models_to_test:
-            print(f"\n  >> 正在评估: {model_name.upper()}")
-            if not force and (dataset_name.lower(), model_name.lower()) in existing_records:
-                print(f"    🌟 该组合已有分桶成绩，跳过 (使用 --force 覆盖)")
+        for task in task_list:
+            model_name = task['model']
+            ckpt_path = task['checkpoint_path']
+            ckpt_source = task.get('checkpoint_source', 'json')
+            ablation_group = task.get('ablation_group', '')
+            if not ckpt_path or not os.path.exists(ckpt_path):
+                print(f'  ✗ checkpoint 未找到: {model_name}@{dataset_name} (source={ckpt_source})')
                 continue
-            
-            ckpt_base = checkpoint_dir if checkpoint_dir else os.path.join(current_dir, 'checkpoint')
-            ckpt_path = os.path.join(ckpt_base, f"{model_name.lower()}_{dataset_name.lower()}_best.pt")
-            if not os.path.exists(ckpt_path):
-                print(f"    ✗ 错误: 找不到权重 {ckpt_path}")
+            dedup_key = (dataset_name.lower(), model_name.lower(), ckpt_path.lower())
+            if (not args.force) and (dedup_key in existing_records):
+                print(f'  ⏭️ 已存在记录，跳过: {model_name}@{dataset_name} | {ckpt_path}')
                 continue
-                
-            if test_loader is None:
-                print("    ⏳ 加载并初始化测试集 DataLoader (不需要剔除小序列)...")
-                test_dataset = UnifiedParquetDataset(config, augment=False, mode='test')
-                test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+            print(f'\n  >> Evaluating {model_name.upper()} on {dataset_name} -> {ckpt_path}')
             try:
-                # ----------------加载模型字典与超参----------------
-                kwargs = {}
-                if model_name.lower() in ['gikt', 'gikt_old']:
-                    exp_config_path = os.path.join(current_dir, 'config', 'experiments', 'exp_full_default.toml')
-                    if os.path.exists(exp_config_path):
-                        gikt_config = toml.load(exp_config_path)
-                        if 'model' in gikt_config:
-                            kwargs.update(gikt_config['model'])
-                if data_dir:
-                    kwargs['data_dir'] = config.PROCESSED_DATA_DIR
-                
-                best_params_path = os.path.join(current_dir, 'config', 'best_params', f"{model_name.lower()}_best_params.json")
-                if os.path.exists(best_params_path):
-                    with open(best_params_path, 'r', encoding='utf-8') as f:
-                        best_params = json.load(f)
-                    matched_key = next((k for k in best_params.keys() if k in dataset_name.lower() or dataset_name.lower() in k), 'default')
-                    if matched_key in best_params:
-                        kwargs.update(best_params[matched_key])
+                load_start = time.perf_counter()
+                model, _, load_info = instantiate_model(
+                    model_name=model_name,
+                    dataset_name=dataset_name,
+                    checkpoint_path=ckpt_path,
+                    device=device,
+                    data_dir=args.data_dir,
+                    ablation_group=ablation_group,
+                )
+                load_time_sec = time.perf_counter() - load_start
 
-                model = ModelFactory.get_model(model_name=model_name, num_question=num_q, num_skill=num_c, device=device, config=config, **kwargs)
-                state_dict = torch.load(ckpt_path, map_location=device)
-                if isinstance(state_dict, torch.nn.Module):
-                    state_dict = state_dict.state_dict()
-                
-                clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-                model.load_state_dict(clean_state_dict, strict=False)
-                
-                # ----------------执行区段评测----------------
-                print("    🚀 开始进行区间穿越推断...")
-                bin_res = evaluate_cold_start(model, test_loader, device=device)
-                
-                row_data = {
-                    "Dataset": dataset_name,
-                    "Model": model_name.upper(),
-                    "Update_Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                eval_start = time.perf_counter()
+                eval_res = evaluate_cold_start(model, test_loader, device, use_amp=args.use_amp)
+                eval_time_sec = time.perf_counter() - eval_start
+                total_time_sec = load_time_sec + eval_time_sec
+                total_samples = int(eval_res['total_samples'])
+                samples_per_sec = (total_samples / eval_time_sec) if eval_time_sec > 0 and total_samples > 0 else np.nan
+                eval_time_per_sample_ms = (1000.0 * eval_time_sec / total_samples) if total_samples > 0 else np.nan
+                checkpoint_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(ckpt_path)).strftime('%Y-%m-%d %H:%M:%S')
+
+                row = {
+                    'dataset': dataset_name,
+                    'model': model_name.lower(),
+                    'display_name': (ablation_group if ablation_group else DISPLAY_NAME_MAP.get(model_name.lower(), model_name.upper())),
+                    'family': 'gikt' if model_name.lower() in GIKT_MODELS else 'baseline',
+                    'ablation_group': ablation_group,
+                    'checkpoint_path': ckpt_path,
+                    'checkpoint_source': ckpt_source,
+                    'checkpoint_mtime': checkpoint_mtime,
+                    'update_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'seed': int(args.seed),
+                    'device': device.type,
+                    'device_name': device_name,
+                    'amp_enabled': bool(args.use_amp and device.type == 'cuda'),
+                    'batch_size': int(args.batch_size),
+                    'num_workers': int(args.num_workers),
+                    'total_samples': total_samples,
+                    'total_users': int(eval_res['total_users']),
+                    'weighted_auc': to_float_or_nan(eval_res['weighted_auc']),
+                    'total_batches': int(eval_res['total_batches']),
+                    'effective_batches': int(eval_res['effective_batches']),
+                    'invalid_prob_count': int(eval_res['invalid_prob_count']),
+                    'load_time_sec': float(load_time_sec),
+                    'eval_time_sec': float(eval_time_sec),
+                    'total_time_sec': float(total_time_sec),
+                    'samples_per_sec': float(samples_per_sec) if not np.isnan(samples_per_sec) else np.nan,
+                    'eval_time_per_sample_ms': float(eval_time_per_sample_ms) if not np.isnan(eval_time_per_sample_ms) else np.nan,
+                    'metadata_n_question': metadata_n_question,
+                    'metadata_n_skill': metadata_n_skill,
+                    'load_missing_keys_count': int(load_info.get('missing_keys_count', 0)),
+                    'load_unexpected_keys_count': int(load_info.get('unexpected_keys_count', 0)),
+                    'load_checkpoint_kind': str(load_info.get('checkpoint_kind', 'unknown')),
                 }
-                
-                print(f"    📊 成绩拆解:")
-                for _, _, b_label in BINS:
-                    info = bin_res[b_label]
-                    auc_val = info['auc']
-                    row_data[b_label] = round(auc_val, 4) if auc_val > 0 else 0.0
-                    print(f"       + {b_label:<25} | AUC: {auc_val:.4f}  (答题对数: {info['samples']}, 涵盖学生数: {info['users']})")
-                
-                results.append(row_data)
+                for _, _, b_label, b_key in BINS:
+                    b = eval_res['bins'][b_key]
+                    row[f'{b_key}_label'] = b_label
+                    row[f'{b_key}_auc'] = to_float_or_nan(b['auc'])
+                    row[f'{b_key}_samples'] = int(b['samples'])
+                    row[f'{b_key}_users'] = int(b['users'])
 
+                summarize_row(row)
+                new_rows.append(row)
             except Exception as e:
-                print(f"    ✗ 错误记录: {e}")
+                print(f'  ✗ 评估失败: {model_name}@{dataset_name} | {e}')
 
-    # 合并输出
-    if results:
-        df_new = pd.DataFrame(results)
-        if os.path.exists(output_path) and not force:
+    if not new_rows:
+        print('[WARN] 没有新增结果。')
+        return
+
+    df_new = pd.DataFrame(new_rows)
+    # 重要：即使 --force，也不应清空历史结果文件。
+    # --force 仅用于“重新评估并覆盖同 key 记录”，而不是“覆盖整个输出文件”。
+    if os.path.exists(output_path):
+        try:
             df_old = pd.read_csv(output_path)
             df_merged = pd.concat([df_old, df_new], ignore_index=True)
-            df_merged.drop_duplicates(subset=['Dataset', 'Model'], keep='last', inplace=True)
-            df_merged.to_csv(output_path, index=False)
-            print("\n📈 [冷启动评估] 最新全景排行榜:")
-            print(df_merged.to_string(index=False))
-        else:
-            df_new.to_csv(output_path, index=False)
-            print("\n📈 [冷启动评估] 成绩单:")
-            print(df_new.to_string(index=False))
-            
-        print(f"\n✅ 评测报告存至: {output_path}。可用于第三章《极端冷启动场景下模型鲁棒性与先验图结构分析》的数据支撑。")
+        except Exception:
+            df_merged = df_new.copy()
+    else:
+        df_merged = df_new.copy()
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="冷启动(按序列长度段)分析测试")
-    parser.add_argument('--models', type=str, nargs='+', default=[], help='要测试的模型列表')
-    parser.add_argument('--datasets', type=str, nargs='+', default=[], help='涉及数据集')
-    parser.add_argument('--batch_size', type=int, default=128, help='批量')
-    parser.add_argument('--output', type=str, default='cold_start_results.csv', help='输出文件名')
-    parser.add_argument('--auto', action='store_true', help='自动拉取 checkpoint 跑分')
-    parser.add_argument('--force', action='store_true', help='强制覆盖已有成绩')
-    parser.add_argument('--checkpoint_dir', type=str, default=None, help='指定模型权重目录')
-    parser.add_argument('--data_dir', type=str, default=None, help='指定处理后的数据目录，如 test.parquet / metadata.json 所在目录')
-    return parser.parse_args()
+    if {'dataset', 'model', 'checkpoint_path'}.issubset(set(df_merged.columns)):
+        df_merged.drop_duplicates(subset=['dataset', 'model', 'checkpoint_path'], keep='last', inplace=True)
+
+    df_merged = df_merged.sort_values(['dataset', 'family', 'model', 'update_time']).reset_index(drop=True)
+    df_merged.to_csv(output_path, index=False, encoding='utf-8-sig')
+
+    total_script_time = time.perf_counter() - script_start_time
+    print('\n' + '=' * 80)
+    print('✅ 冷启动分桶评估完成')
+    print(f'结果文件: {output_path}')
+    print(f'新增记录: {len(df_new)} 条 | 累计记录: {len(df_merged)} 条')
+    print(f'脚本总耗时: {total_script_time:.3f}s')
+    print('=' * 80)
+
+
+def main():
+    args = parse_args()
+    set_global_seed(args.seed)
+    tasks = build_tasks_from_config(args)
+    if not tasks:
+        print('💡 配置中未解析到可评估任务，请检查 --config 文件')
+        sys.exit(1)
+    test_cold_start_and_report(tasks, args)
+
 
 if __name__ == '__main__':
-    args = parse_args()
-    tasks = []
-    
-    if args.auto:
-        for m, d in get_available_checkpoints(checkpoint_dir=args.checkpoint_dir):
-            tasks.append({'model': m, 'dataset': d})
-            
-    if args.models and args.datasets:
-        for d in args.datasets:
-            for m in args.models:
-                tasks.append({'model': m, 'dataset': d})
-                
-    if not tasks:
-        print("💡 请使用 --auto 或者传入 --models和--datasets！")
-        sys.exit(1)
-        
-    test_cold_start_and_report(
-        tasks=tasks,
-        batch_size=args.batch_size,
-        result_csv=args.output,
-        force=args.force,
-        checkpoint_dir=args.checkpoint_dir,
-        data_dir=args.data_dir,
-    )
+    main()
